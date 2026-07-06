@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+.env
+.env.*
+.env.bak.*
+!.env.example
+*.egg-info/
+
+# macOS
+.DS_Store

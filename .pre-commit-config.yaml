@@ -1,0 +1,28 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.2.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+      - id: check-json
+      - id: check-merge-conflict
+        args: ['--assume-in-merge']
+  - repo: https://github.com/pycqa/isort
+    rev: 5.12.0
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+  - repo: https://github.com/psf/black
+    rev: 23.3.0
+    hooks:
+      - id: black
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: 'v0.0.274'
+    hooks:
+      - id: ruff
+        args: [--fix, "--ignore=E501,F401,E722,E402,E741"]
+
+# Never reformat: vendored third-party assets (minified 3Dmol, web fonts) and
+# captured test fixtures (byte-exact real-world data).
+exclude: '^(openai4s/server/webui/vendor/|tests/fixtures/)'

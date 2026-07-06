@@ -1,0 +1,39 @@
+[project]
+name = "openai4s"
+version = "0.1.0"
+description = "A minimal Code-as-Action autonomous agent system (Linux daemon form-factor)."
+requires-python = ">=3.10"
+dependencies = []   # pure stdlib by design; LLM client uses urllib
+
+[project.optional-dependencies]
+# The kernel is spawned with sys.executable, so anything in the active venv is
+# visible to agent cells. These libs are OPTIONAL: the core runs stdlib-only and
+# every numpy/pandas/matplotlib import in-tree is guarded by try/except ImportError.
+# Install with: uv sync --extra science
+science = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+]
+
+[dependency-groups]
+# Dev/test tooling (uv installs these by default with `uv sync`).
+dev = [
+    "pytest>=7.4",
+    "pre-commit>=3.0",
+]
+
+[project.scripts]
+openai4s = "openai4s.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openai4s*", "openai4s_compute_provider*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

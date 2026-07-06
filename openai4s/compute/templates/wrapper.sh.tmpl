@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -uo pipefail
+cd "$(dirname "$0")"
+rm -rf out stdout.log stderr.log .phase .deadline_fired .deadline_termed .job_timeout_fired out.tar.gz out.tar.gz.tmp
+mkdir out
+
+# Deadline plumbing (env from the host's launch line; defaults keep an
+# unset submit behaving with no watchdog — no deadline enforcement without a
+# deadline). OSW_JOB_TIMEOUT is the per-job runaway guard. The container wall
+# is anchored on the SANDBOX clock from the host-sent RELATIVE remaining
+# seconds — comparing a host-clock epoch against ${EPOCHSECONDS} here would
+# shrink the staging margin by any clock skew. The epoch var is only a
+# fallback for a host a release behind. The watchdog TERMs the workload at
+# DEADLINE - MARGIN so tar->.phase staging always has MARGIN to run.
+# Read BEFORE sourcing .job_env AND made readonly: agent-supplied job env
+# must not be able to override the deadline-control plane.
+OSW_JOB_TIMEOUT=${OPENAI4S_JOB_TIMEOUT_S:-259200}
+OSW_MARGIN=${OPENAI4S_HARVEST_MARGIN_S:-600}
+OSW_GRACE=${OPENAI4S_TERM_GRACE_S:-60}
+OSW_REMAINING=${OPENAI4S_SANDBOX_REMAINING_S:-0}
+OSW_EPOCH=${OPENAI4S_SANDBOX_DEADLINE_EPOCH:-0}
+if [ "$OSW_REMAINING" -gt 0 ] 2>/dev/null; then
+  OSW_DEADLINE=$(( ${EPOCHSECONDS:-$(date +%s)} + OSW_REMAINING ))
+  if [ "$OSW_EPOCH" -gt 0 ] 2>/dev/null && [ "$OSW_EPOCH" -lt "$OSW_DEADLINE" ]; then
+    OSW_DEADLINE=$OSW_EPOCH
+  fi
+else
+  OSW_DEADLINE=$OSW_EPOCH
+fi
+readonly OSW_JOB_TIMEOUT OSW_DEADLINE OSW_MARGIN OSW_GRACE
+set -a; source .job_env 2>/dev/null || true; set +a
+
+wpid=
+trap '[ -n "$wpid" ] && kill -TERM -- -"$wpid" 2>/dev/null' TERM
+
+t0=${EPOCHSECONDS:-$(date +%s)}
+# The workload runs in its OWN session (setsid): kill scope for both the job
+# timeout and the watchdog is that group only — this wrapper is never in the
+# blast radius, so staging runs no matter how the job ends. --foreground
+# keeps timeout, run.sh, and every backgrounded descendant in the ONE group
+# whose id we know a priori ($wpid). rc 124 = job timeout fired; a received
+# TERM exits 143.
+setsid timeout --foreground --kill-after="$OSW_GRACE" "$OSW_JOB_TIMEOUT" bash run.sh \
+  > stdout.log 2> stderr.log &
+wpid=$!
+
+wd_pid=
+if [ "$OSW_DEADLINE" -gt 0 ] 2>/dev/null; then
+  # Cancellation is a flag-trap, never subshell death — a trapped handler runs
+  # between commands, so the record-and-deliver section below always completes
+  # once entered. The handler also kills the in-flight sleep so a cancel
+  # landing in an inter-command window can't leave the next `wait` parked for
+  # a full tick. Sleeps are `sleep & wait $!` because bash defers traps across
+  # foreground children.
+  (
+    wd_cancelled=
+    sleep 0 & wait $!
+    trap 'wd_cancelled=1; kill $! 2>/dev/null' TERM
+    while [ -z "$wd_cancelled" ]; do
+      now=${EPOCHSECONDS:-$(date +%s)}
+      left=$(( OSW_DEADLINE - OSW_MARGIN - now ))
+      [ "$left" -le 0 ] && break
+      sleep $(( left < 30 ? left : 30 )) &
+      [ -n "$wd_cancelled" ] && { kill $! 2>/dev/null; break; }
+      wait $!
+    done
+    [ -n "$wd_cancelled" ] && exit 0
+    # Record-and-deliver critical section — no park points. Ordering is
+    # load-bearing: sentinel first (host classifies 143/137 as timed_out),
+    # marker AFTER the kill.
+    : > .deadline_fired
+    kill -TERM -- -"$wpid" 2>/dev/null
+    : > .deadline_termed
+    wd_i=0
+    while [ "$wd_i" -lt "$OSW_GRACE" ]; do
+      [ -n "$wd_cancelled" ] && exit 0
+      kill -0 -- -"$wpid" 2>/dev/null || exit 0
+      sleep 1 &
+      [ -n "$wd_cancelled" ] && { kill $! 2>/dev/null; exit 0; }
+      wait $!
+      wd_i=$(( wd_i + 1 ))
+    done
+    [ -n "$wd_cancelled" ] && exit 0
+    kill -KILL -- -"$wpid" 2>/dev/null
+  ) >/dev/null 2>&1 &
+  wd_pid=$!
+fi
+
+wait "$wpid"
+rc=$?
+# A trapped TERM interrupts wait (rc>128) while the workload may still be
+# alive — wait again for the real status if so.
+if [ "$rc" -gt 128 ] && kill -0 "$wpid" 2>/dev/null; then
+  wait "$wpid"
+  rc=$?
+fi
+# Cancel-then-join: the join is the happens-after barrier so every marker read
+# below is post-mortem w.r.t. the watchdog. Bounded poll-tick form: a STOPPED
+# watchdog never exits and never runs its trap, and a blocking `wait` on a
+# stopped child parks forever, so poll `kill -0` at 0.2s ticks, escalate to
+# SIGKILL after 2x grace, and reap once kill -0 goes false.
+if [ -n "$wd_pid" ]; then
+  kill "$wd_pid" 2>/dev/null
+  wd_join=0
+  while kill -0 "$wd_pid" 2>/dev/null; do
+    wd_state=
+    read -r _ _ wd_state _ < "/proc/$wd_pid/stat" 2>/dev/null || wd_state=
+    case "$wd_state" in Z|"") break ;; esac
+    if [ "$wd_join" -ge $(( OSW_GRACE * 10 )) ]; then
+      kill -KILL "$wd_pid" 2>/dev/null
+    fi
+    sleep 0.2 & wait $! 2>/dev/null
+    wd_join=$(( wd_join + 1 ))
+  done
+  wait "$wd_pid" 2>/dev/null
+fi
+job_wall=$(( ${EPOCHSECONDS:-$(date +%s)} - t0 ))
+# Post-exit grace for the whole group. Watchdog arm (.deadline_fired): sleep
+# the grace when any group member survives; skip when already empty.
+# Job-timeout arm (rc 124/137 at budget, no sentinel): deliver TERM->grace
+# before the final reap. The wall gate keeps an honest early rc-124 from
+# wasting a pointless TERM + full-grace sleep before staging.
+if [ -f .deadline_fired ]; then
+  if kill -0 -- -"$wpid" 2>/dev/null; then
+    if [ ! -f .deadline_termed ]; then
+      kill -TERM -- -"$wpid" 2>/dev/null
+    fi
+    sleep "$OSW_GRACE"
+  fi
+elif { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } \
+  && [ "$job_wall" -ge $(( OSW_JOB_TIMEOUT - 1 )) ]; then
+  if kill -0 -- -"$wpid" 2>/dev/null; then
+    kill -TERM -- -"$wpid" 2>/dev/null
+    sleep "$OSW_GRACE"
+  fi
+fi
+# Reap the workload GROUP before the sentinel scrub below so a surviving child
+# can't re-forge the sentinel files. KILL of an already-dead group is a no-op.
+kill -KILL -- -"$wpid" 2>/dev/null
+if [ "$rc" -eq 0 ] && [ -z "$(ls -A out 2>/dev/null)" ]; then
+  echo "openai4s: WARN out/ is empty — nothing will be harvested back (write results under ./out/)" >> stderr.log
+fi
+
+# Authenticity clock sample BEFORE the tar: the deadline sentinel's window
+# check below must compare against the time staging STARTED, not ended.
+now_end=${EPOCHSECONDS:-$(date +%s)}
+# Staging is UNCONDITIONAL — the deadline ends the run, never the results.
+# Marker grammar is load-bearing: done:$rc:$wall / harvest_failed:$rc:$wall.
+# env -u: GNU tar honors TAR_OPTIONS and tar -z's gzip honors GZIP — both
+# could ride in from the sourced .job_env, so strip them here as the in-sandbox
+# belt.
+if env -u TAR_OPTIONS -u GZIP tar -czf out.tar.gz.tmp out stdout.log stderr.log \
+  && mv -f out.tar.gz.tmp out.tar.gz; then
+  staged=0
+else
+  staged=1
+fi
+# Sentinel derivation/scrub runs AFTER staging so the forgeable window is the
+# two adjacent statements below (anything written after .phase reads as newer
+# and is ignored by the probe's staleness gate).
+if { [ "$rc" -eq 137 ] || [ "$rc" -eq 124 ]; } \
+  && [ "$job_wall" -ge $(( OSW_JOB_TIMEOUT - 1 )) ]; then
+  : > .job_timeout_fired
+else
+  rm -f .job_timeout_fired
+fi
+if [ -f .deadline_fired ]; then
+  if [ "$OSW_DEADLINE" -le 0 ] 2>/dev/null \
+    || [ "$now_end" -lt $(( OSW_DEADLINE - OSW_MARGIN - 1 )) ]; then
+    rm -f .deadline_fired
+  fi
+fi
+if [ "$staged" -eq 0 ]; then
+  echo "done:$rc:$job_wall" > .phase
+else
+  echo "harvest_failed:$rc:$job_wall" > .phase
+fi
+exit $rc

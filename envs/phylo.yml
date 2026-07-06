@@ -1,0 +1,30 @@
+# phylo — phylogenetics / bioinformatics (Python 3.11)
+#
+# Derived from all_env_packages.csv. Lists the headline scientific packages
+# only; conda resolves the full dependency tree (system libs, fonts, blas, …).
+# Versions match the CSV where they are meaningful top-level packages.
+name: phylo
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  # sequence / tree tooling
+  - biopython=1.87
+  - dendropy=5.0.8
+  - ete3=3.1.3
+  - logomaker=0.8.6
+  # alignment + tree-building CLIs (bioconda)
+  - mafft=7.526
+  - iqtree=3.1.2
+  - fasttree=2.2.0
+  - trimal=1.5.1
+  # general scientific stack
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - statsmodels
+  - lxml
+  - requests

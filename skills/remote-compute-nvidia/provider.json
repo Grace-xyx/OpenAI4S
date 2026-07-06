@@ -1,0 +1,22 @@
+{
+  "id": "nvidia",
+  "secret_env": ["NGC_API_KEY", "NVIDIA_API_KEY"],
+  "helperEnv": {
+    "name": "compute-provider-nvidia",
+    "packages": ["python=3.11"],
+    "pip": []
+  },
+  "egress": {
+    "control": { "host": "integrate.api.nvidia.com", "port": 443 },
+    "registry": [
+      { "host": "nvcr.io", "port": 443 },
+      { "suffix": ".nvcr.io", "port": 443 },
+      { "host": "api.ngc.nvidia.com", "port": 443 },
+      { "host": "authn.nvidia.com", "port": 443 }
+    ],
+    "blob": [
+      { "suffix": ".nvidia.com" }
+    ]
+  },
+  "max_concurrent": 8
+}

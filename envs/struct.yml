@@ -1,0 +1,31 @@
+# struct — structural biology / ESM / torch (Python 3.13)
+#
+# Derived from all_env_packages.csv. Lists the headline scientific packages
+# only; conda resolves the full dependency tree. Versions match the CSV where
+# they are meaningful top-level packages.
+#
+# NOTE: torch is installed via pip (the safest portable CPU build). To use a
+# GPU/accelerated build instead, substitute a conda pytorch build here, e.g.
+#   dependencies:
+#     - pytorch=2.12.1   # (from the conda-forge / pytorch channel)
+# and drop torch from the pip: section below.
+name: struct
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.13
+  # structural biology
+  - biotite=1.7.1
+  - biotraj=1.2.2
+  # numerics / plotting
+  - numpy
+  - scipy
+  - matplotlib
+  - networkx
+  - sympy
+  # pip-only packages (torch via pip = safest portable CPU build)
+  - pip
+  - pip:
+      - torch==2.12.1
+      - fair-esm==2.0.0

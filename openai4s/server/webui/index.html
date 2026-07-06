@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenAI4S</title>
+  <link rel="icon" href="/static/favicon_anim_64.gif" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- ============ DASHBOARD (home) ============ -->
+  <div id="dashboard" class="dashboard">
+    <header class="dash-head">
+      <div class="dash-brand">
+        <div class="wordmark"><span class="wm-title">OpenAI4S</span><span class="wm-beta">Beta</span></div>
+        <span id="dash-running-count" class="running-count hidden"></span>
+      </div>
+      <div class="dash-actions">
+        <div class="lang-seg" role="group" aria-label="Language / 语言">
+          <button class="lang-btn" data-lang="zh">中文</button>
+          <button class="lang-btn" data-lang="en">EN</button>
+        </div>
+        <button id="dash-settings" class="icon-ghost lg" data-i18n-title="common.settings" title="设置" data-icon="settings" data-icon-size="20"></button>
+        <button id="dash-new-project" class="outline-btn"><span class="ic" data-icon="plus" data-icon-size="16"></span><span data-i18n="palette.action.newProject">New project</span></button>
+      </div>
+    </header>
+    <section id="dash-running" class="dash-running hidden"></section>
+    <div class="dash-grid">
+      <section class="dash-col">
+        <div class="col-title"><span class="ci" data-icon="box" data-icon-size="18"></span> <span data-i18n="dash.col.projects">Projects</span></div>
+        <div id="dash-projects" class="dash-card"></div>
+      </section>
+      <section class="dash-col sessions">
+        <div class="col-title"><span class="ci" data-icon="clock" data-icon-size="18"></span> <span data-i18n="dash.col.recentSessions">Recent sessions</span></div>
+        <div id="dash-sessions" class="dash-card"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ============ WORKSPACE (conversation) ============ -->
+  <div id="workspace" class="workspace hidden">
+    <aside id="sidebar">
+      <div class="side-top">
+        <button id="back-home" class="icon-ghost" data-i18n-title="palette.action.backHome" title="返回主页" data-icon="arrow-left" data-icon-size="20"></button>
+        <button id="proj-btn" class="proj-name"><span id="proj-current" data-i18n="proj.fallbackName">项目</span><span class="chev" data-icon="chevron-down" data-icon-size="16"></span></button>
+        <button id="sidebar-collapse" class="icon-ghost" data-i18n-title="ws.sidebar.collapse" title="收起侧栏" data-icon="panel-left" data-icon-size="20"></button>
+      </div>
+      <div id="proj-menu" class="proj-menu hidden"></div>
+      <nav class="side-nav">
+        <button id="new-session" class="side-nav-item"><span class="ic" data-icon="plus" data-icon-size="16"></span><span data-i18n="ws.nav.new">New</span></button>
+        <button id="customize-btn" class="side-nav-item"><span class="ic" data-icon="sliders" data-icon-size="16"></span><span data-i18n="palette.action.customize">Customize</span></button>
+        <button id="files-btn" class="side-nav-item"><span class="ic" data-icon="files" data-icon-size="16"></span><span data-i18n="ws.nav.files">Files</span></button>
+      </nav>
+      <div id="session-list" class="session-list"></div>
+      <div class="side-foot">
+        <button id="settings-gear" class="icon-ghost" data-i18n-title="common.settings" title="设置" data-icon="settings" data-icon-size="20"></button>
+        <div class="lang-seg" role="group" aria-label="Language / 语言">
+          <button class="lang-btn" data-lang="zh">中文</button>
+          <button class="lang-btn" data-lang="en">EN</button>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <div id="conv-view">
+        <div class="conv-head">
+          <button id="sidebar-reopen" class="icon-ghost hidden" data-i18n-title="ws.sidebar.expand" title="展开侧栏" data-icon="panel-left" data-icon-size="20"></button>
+          <div class="tabbar" id="tabbar">
+            <div class="tab active" id="tab-session">
+              <input id="conv-title" class="conv-title" size="24" value="会话" data-i18n-val="conv.title.default" spellcheck="false" data-i18n-title="conv.title.rename" title="重命名会话（回车保存）" />
+              <span class="t-close" id="tab-close" data-i18n-title="common.close" title="关闭" data-icon="x" data-icon-size="14"></span>
+            </div>
+            <button class="tab" id="tab-new" data-i18n-title="palette.action.newSession" title="新建会话"><span class="t-name" data-i18n="palette.action.newSession">New session</span></button>
+          </div>
+          <div class="conv-head-actions">
+            <button id="session-menu-btn" class="icon-ghost" data-i18n-title="session.menu.tip" title="会话操作" data-icon="more-horizontal" data-icon-size="16"></button>
+            <button id="dock-toggle" class="icon-ghost" data-i18n-title="conv.dockToggle" title="侧栏面板" data-icon="panel-right" data-icon-size="16"></button>
+          </div>
+        </div>
+        <div id="messages" class="messages"></div>
+        <div class="composer-wrap">
+          <button id="jump-pill" class="jump-pill hidden" data-i18n-title="conv.jumpLast" title="跳到最后一条"><span class="ic" data-icon="chevron-down" data-icon-size="16"></span><span class="jp-lbl" data-i18n="conv.jumpLastLabel">最新</span></button>
+          <div class="notebook">
+            <div class="nb-tray"><div class="nb-head"><span class="ic" data-icon="notebook" data-icon-size="16"></span> <span data-i18n="dock.tab.notebook">Notebook</span></div></div>
+            <div class="nb-card">
+              <div id="annot-bar" class="annot-bar hidden"></div>
+              <textarea id="composer" rows="1" data-i18n-ph="composer.placeholder" placeholder="Ask anything — @ for artifacts, # for sessions, / for skills, ⌘K to search…"></textarea>
+              <div class="nb-foot">
+                <div class="nb-left">
+                  <button id="attach-btn" class="nb-icon" data-i18n-title="composer.attach" title="上传文件" data-icon="plus" data-icon-size="20"></button>
+                  <input type="file" id="file-input" style="display:none" multiple />
+                  <button id="plan-toggle" class="nb-icon" data-i18n-title="composer.planMode" title="计划模式" data-icon="grid" data-icon-size="20"></button>
+                  <button id="explore-toggle" class="nb-icon" data-i18n-title="composer.exploreMode" title="自主探索" data-icon="compass" data-icon-size="20"></button>
+                </div>
+                <div class="nb-right">
+                  <button id="cancel-btn" class="nb-icon hidden" data-i18n-title="nb.kernel.stopLabel" title="停止" data-icon="stop" data-icon-size="18"></button>
+                  <div class="nb-model"><select id="model-select" data-i18n-title="composer.model" title="模型"></select><span class="ic" data-icon="chevron-down" data-icon-size="14"></span></div>
+                  <button id="mic-btn" class="nb-icon" data-i18n-title="composer.voice" title="语音输入" data-icon="mic" data-icon-size="20"></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="composer-ac" class="composer-ac hidden"></div>
+          <div class="composer-hint" id="composer-hint"></div>
+        </div>
+      </div>
+    </main>
+
+    <aside id="rightdock" class="rightdock collapsed">
+      <div class="dock-head">
+        <div class="dock-tabs" id="dock-tabs"></div>
+        <div class="dock-head-actions">
+          <button id="dock-collapse" class="icon-ghost" data-i18n-title="dock.collapse" title="收起" data-icon="x" data-icon-size="16"></button>
+        </div>
+      </div>
+      <div class="dock-body">
+        <div id="dock-viewer" class="dock-pane"></div>
+        <div id="dock-notebook" class="dock-pane hidden"></div>
+        <div id="dock-files" class="dock-pane hidden">
+          <div class="files-head"><span data-i18n="dock.files.heading">Files · Artifacts</span><span id="results-count" class="count">0</span><span class="seg files-scope" id="files-scope"><button class="seg-btn active" data-scope="frame" data-i18n="dock.files.scope.frame">本会话</button><button class="seg-btn" data-scope="project" data-i18n="dock.files.scope.project">本项目</button></span></div>
+          <div id="results-list" class="files-grid"></div>
+          <div id="notes-block" class="notes-block hidden">
+            <div class="notes-add"><textarea id="note-input" rows="2" data-i18n-ph="dock.notes.placeholder" placeholder="添加一条笔记…"></textarea><button id="note-save" class="outline-btn small" data-i18n="common.add">添加</button></div>
+            <div id="notes-list"></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Preview modal -->
+  <div id="modal" class="modal hidden"><div class="modal-box"><div class="modal-head"><span id="modal-title" data-i18n="modal.title.preview">预览</span><div class="modal-actions"><a id="modal-download" class="outline-btn small" download><span class="ic" data-icon="download" data-icon-size="14"></span><span data-i18n="common.download">下载</span></a><button id="modal-close" class="icon-ghost" data-icon="x" data-icon-size="16"></button></div></div><div id="modal-body" class="modal-body"></div></div></div>
+
+  <!-- Customize modal -->
+  <div id="cust" class="modal hidden"><div class="modal-box cust-box"><div class="modal-head"><span data-i18n="common.settings">设置</span><button id="cust-close" class="icon-ghost" data-icon="x" data-icon-size="16"></button></div><div class="cust-body"><nav class="cust-tabs">
+    <button class="cust-tab active" data-tab="general" data-i18n="cust.general.title">通用</button><button class="cust-tab" data-tab="skills" data-i18n="palette.group.skills">Skills</button><button class="cust-tab" data-tab="specialists" data-i18n="cust.tab.specialists">Specialists</button><button class="cust-tab" data-tab="connectors" data-i18n="cust.tab.connectors">Connectors</button><button class="cust-tab" data-tab="compute" data-i18n="cust.compute.title">Compute</button><button class="cust-tab" data-tab="permissions" data-i18n="cust.perm.title">权限</button><button class="cust-tab" data-tab="network" data-i18n="cust.network.title">Network</button><button class="cust-tab" data-tab="memory" data-i18n="cust.memory.title">Memory</button><button class="cust-tab" data-tab="models" data-i18n="cust.tab.models">Models</button>
+  </nav><div id="cust-content" class="cust-content"></div></div></div></div>
+
+  <!-- New project modal -->
+  <div id="proj-modal" class="modal hidden"><div class="modal-box small-box"><div class="modal-head"><span data-i18n="projModal.title">New Project</span><button id="proj-modal-close" class="icon-ghost" data-icon="x" data-icon-size="16"></button></div><div class="form">
+    <label data-i18n="skill.label.name">Name</label><input id="pm-name" type="text" data-i18n-ph="projModal.name.placeholder" placeholder="Project name" />
+    <label data-i18n="skill.label.desc">Description</label><textarea id="pm-desc" rows="2" data-i18n-ph="projModal.desc.placeholder" placeholder="Shown in the project list"></textarea>
+    <label data-i18n="projModal.ctx.label">Agent Context</label><textarea id="pm-ctx" rows="3" data-i18n-ph="projModal.ctx.placeholder" placeholder="Included in every agent's prompt for this project"></textarea>
+    <div class="form-actions"><button id="pm-cancel" class="outline-btn" data-i18n="common.cancel">Cancel</button><button id="pm-create" class="solid-btn" data-i18n="projModal.create">Create</button></div>
+  </div></div></div>
+
+  <script src="/static/favicon.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
