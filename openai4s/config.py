@@ -47,6 +47,23 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
+# Obvious template stubs copied verbatim from .env.example — never a real key.
+# Filtering these means cfg.llm.api_key (and everything derived from it:
+# effective_api_key, profile seeding, has_api_key) can never mistake a template
+# stub for a configured secret. NOTE: deliberately excludes test values like
+# "test-key" — those are used by the offline test suite (tests/conftest.py).
+_PLACEHOLDER_API_KEYS = {
+    "your-api-key-here", "your_api_key_here", "your-api-key", "your_api_key",
+    "your-key-here", "your_key_here", "placeholder", "changeme", "replace-me",
+}
+
+
+def is_placeholder_api_key(k: str | None) -> bool:
+    """True if `k` is empty or an obvious template placeholder, not a real key."""
+    k = (k or "").strip().lower()
+    return (not k) or k in _PLACEHOLDER_API_KEYS
+
+
 def _default_data_dir() -> Path:
     env = os.environ.get("OPENAI4S_DATA_DIR")
     if env:
@@ -122,6 +139,12 @@ class LLMConfig:
                 if os.environ.get(native):
                     self.api_key = os.environ[native]
                     break
+
+        # Drop obvious placeholder stubs (e.g. a .env copied verbatim from
+        # .env.example) so they aren't mistaken for a real key downstream
+        # (has_api_key, profile seeding, effective_api_key, ...).
+        if self.api_key and is_placeholder_api_key(self.api_key):
+            self.api_key = ""
 
         # Fill provider built-in defaults so base_url/model are always concrete
         # (status pages, turn logs, etc. read cfg.llm.model directly). Lazy

@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from openai4s.agent.compaction import compact, should_compact
 from openai4s.agent.loop import SYSTEM_PROMPT, _extract_code, _format_observation
-from openai4s.config import Config, get_config
+from openai4s.config import Config, get_config, is_placeholder_api_key
 from openai4s.host_dispatch import build_dispatcher
 from openai4s.kernel import Kernel
 from openai4s.llm import ARK_PLAN_MODELS, PROVIDERS, chat
@@ -3961,6 +3961,17 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 store.set_setting("llm_model", str(prof.get("model") or "").strip())
                 store.set_setting("llm_api_key", str(prof.get("api_key") or "").strip())
                 store.set_setting("active_model_profile", prof["id"])
+                # Promote the newly-active profile to the top of the list so the
+                # configured APIs display it first (others shift down). In-place
+                # under the store lock; a no-op if it's already #1.
+                _pid = prof["id"]
+
+                def _to_front(ps):
+                    i = next((k for k, p in enumerate(ps) if p.get("id") == _pid), -1)
+                    if i > 0:
+                        ps.insert(0, ps.pop(i))
+
+                store.mutate_model_profiles(_to_front)
                 # Track the EFFECTIVE model id so the header selector matches what
                 # requests actually use: profile model → provider default → cfg.
                 _default_model["id"] = (
@@ -5078,7 +5089,8 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 "provider": p.get("provider") or "",
                 "base_url": p.get("base_url") or "",
                 "model": p.get("model") or "",
-                "has_api_key": bool((p.get("api_key") or "").strip()),
+                "has_api_key": bool((p.get("api_key") or "").strip())
+                and not is_placeholder_api_key(p.get("api_key")),
             }
 
         def _model_profiles_payload(self) -> dict:
