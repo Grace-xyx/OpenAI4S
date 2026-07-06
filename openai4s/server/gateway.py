@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from openai4s.agent.compaction import compact, should_compact
 from openai4s.agent.loop import SYSTEM_PROMPT, _extract_code, _format_observation
-from openai4s.config import Config, get_config
+from openai4s.config import Config, get_config, is_placeholder_api_key
 from openai4s.host_dispatch import build_dispatcher
 from openai4s.kernel import Kernel
 from openai4s.llm import ARK_PLAN_MODELS, PROVIDERS, chat
@@ -5078,7 +5078,8 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 "provider": p.get("provider") or "",
                 "base_url": p.get("base_url") or "",
                 "model": p.get("model") or "",
-                "has_api_key": bool((p.get("api_key") or "").strip()),
+                "has_api_key": bool((p.get("api_key") or "").strip())
+                and not is_placeholder_api_key(p.get("api_key")),
             }
 
         def _model_profiles_payload(self) -> dict:
