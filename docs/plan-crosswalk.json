@@ -227,11 +227,11 @@
       "integrated": "P1-A",
       "plan_conclusion": "提前为只读 P1，依赖 scoped source",
       "status": "closed",
-      "status_note": "the Artifact version retrieval-source panel is allowlisted, length-capped and redacted, and the route never sends the credential. Rendered by app.js `versions.retrievalSource`. The previous `open` label predated the work.",
+      "status_note": "the Artifact version retrieval-source panel remains allowlisted, length-capped, redacted and bound to its version; the route omits credentials. frontend/src/islands/viewer.ts renders recorded dataset identity and verification fields as source information, not as an attestation. The previous `open` label predated the work.",
       "tests": "tests/test_retrieval_source.py,tests/test_retrieval_provenance.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "d13e86658f7b7ac7d9fd2b135b9739468a24b76d049772fb3c112592c24d3485"
+      "evidence_digest": "86844f7c734f50806f84d9006c8bce63f20427bc87c10128074367931da718e3"
     },
     {
       "source": "R3",

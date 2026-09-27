@@ -61,10 +61,73 @@ export function retrievalSourcePanel(src: Record<string, unknown>): HTMLElement 
   RETRIEVAL_FIELD_ORDER.forEach((field) => {
     if (src[field] === undefined || src[field] === null || src[field] === "") return;
     const row = el("div", "ver-src-row");
-    row.appendChild(el("span", "ver-src-k", field));
+    const label = field === "response_sha256" && src.dataset
+      ? filesT("versions.datasetMetadataFingerprint") : field;
+    row.appendChild(el("span", "ver-src-k", label));
     row.appendChild(el("span", "ver-src-v", String(src[field])));
     box.appendChild(row);
   });
+  if (src.dataset && typeof src.dataset === "object" && !Array.isArray(src.dataset)) {
+    const dataset = src.dataset as Record<string, unknown>;
+    const section = el("div", "ver-src-dataset");
+    section.appendChild(el("div", "ver-src-head", filesT("versions.datasetSource")));
+    section.appendChild(el("div", "ver-src-note", filesT("versions.datasetRecordedNote")));
+    const fields: Array<[string, string]> = [
+      ["title", filesT("versions.datasetTitle")],
+      ["record_id", filesT("versions.datasetRecord")],
+      ["record_doi", filesT("versions.datasetRecordDoi")],
+      ["concept_doi", filesT("versions.datasetConceptDoi")],
+      ["version", filesT("versions.datasetVersion")],
+      ["record_url", filesT("versions.datasetRecordUrl")],
+      ["file_key", filesT("versions.datasetFile")],
+      ["declared_license", filesT("versions.datasetLicense")],
+      ["access_right", filesT("versions.datasetAccess")],
+      ["declared_size_bytes", filesT("versions.datasetDeclaredSize")],
+      ["declared_checksum", filesT("versions.datasetDeclaredChecksum")],
+      ["downloaded_bytes", filesT("versions.datasetRecordedSize")],
+      ["local_sha256", filesT("versions.datasetRecordedHash")],
+      ["file_verification", filesT("versions.datasetRecordedCheck")],
+    ];
+    fields.forEach(([field, label]) => {
+      if (!(field in dataset)) return;
+      const value = dataset[field];
+      if (value !== null && typeof value !== "string" && typeof value !== "number") return;
+      if (typeof value === "number" && !Number.isFinite(value)) return;
+      const row = el("div", "ver-src-row");
+      row.appendChild(el("span", "ver-src-k", label));
+      const rendered = value === null || value === ""
+        ? filesT("versions.datasetUnknown")
+        : field === "file_verification" && value === "size_and_source_checksum_verified"
+          ? filesT("versions.datasetChecksMatched")
+          : field === "file_verification" && value === "not_downloaded"
+            ? filesT("versions.datasetNotDownloaded")
+          : field === "file_key" && typeof value === "string" && value !== value.trim()
+            ? JSON.stringify(value)
+            : String(value);
+      let valueNode: HTMLElement = el("span", "ver-src-v", rendered);
+      if (field === "record_url" && typeof value === "string" &&
+          !(Array.isArray(dataset.truncated_fields) && dataset.truncated_fields.includes(field)) &&
+          !(Array.isArray(dataset.redacted_fields) && dataset.redacted_fields.includes(field))) {
+        try {
+          const url = new URL(value);
+          if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) {
+            const link = el("a", "ver-src-v", rendered) as HTMLAnchorElement;
+            link.href = url.href;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            valueNode = link;
+          }
+        } catch { /* Keep an invalid recorded URL as text. */ }
+      }
+      row.appendChild(valueNode);
+      section.appendChild(row);
+    });
+    if (Array.isArray(dataset.truncated_fields) && dataset.truncated_fields.length)
+      section.appendChild(el("div", "ver-src-note", translate("versions.retrievalTruncated", dataset.truncated_fields.join(", "))));
+    if (typeof dataset.undisclosed_field_count === "number" && dataset.undisclosed_field_count > 0)
+      section.appendChild(el("div", "ver-src-note", translate("versions.retrievalWithheld", dataset.undisclosed_field_count)));
+    box.appendChild(section);
+  }
   if (Array.isArray(src.truncated_fields) && src.truncated_fields.length) {
     box.appendChild(
       el(

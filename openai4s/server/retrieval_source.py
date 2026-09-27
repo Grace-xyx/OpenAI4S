@@ -28,6 +28,7 @@ the middle of a long string, which `redact` alone reads as "not opaque".
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from openai4s.observability import (
@@ -57,7 +58,30 @@ ALLOWED_FIELDS: dict[str, str] = {
     "normalization_version": "how the response was normalised",
     "response_sha256": "hash of what came back",
     "record_count": "how many records the response held",
+    "dataset": "bounded dataset and file declarations recorded with this version",
 }
+
+DATASET_FIELDS = frozenset(
+    {
+        "provider",
+        "record_id",
+        "record_url",
+        "record_doi",
+        "concept_doi",
+        "version",
+        "title",
+        "declared_license",
+        "license_status",
+        "access_right",
+        "file_key",
+        "declared_size_bytes",
+        "declared_checksum",
+        "file_verification",
+        "local_sha256",
+        "downloaded_bytes",
+    }
+)
+_DATASET_INTEGER_FIELDS = frozenset({"declared_size_bytes", "downloaded_bytes"})
 
 #: Per-value ceiling. A query can be a large POST body, and a provenance panel
 #: is not where anyone should discover that.
@@ -70,7 +94,67 @@ def _clip(value: str) -> tuple[str, bool]:
     return value[:MAX_VALUE_CHARS], True
 
 
-def public_source(envelope: Any) -> dict[str, Any] | None:
+def _public_dataset(value: Any, artifact_sha256: str | None) -> dict[str, Any] | None:
+    """Project recorded source data without treating it as an attestation.
+
+    The source column can also be supplied by a script. Consumers display the
+    record as provenance, not as proof of publisher identity or scientific
+    validity. Unknown values are retained and private fields are never copied.
+    """
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, Any] = {}
+    clipped: list[str] = []
+    redacted: list[str] = []
+    dropped = len(set(value) - DATASET_FIELDS)
+    for field in sorted(DATASET_FIELDS & value.keys()):
+        item = value[field]
+        if item is None:
+            result[field] = None
+        elif field in _DATASET_INTEGER_FIELDS:
+            if (
+                isinstance(item, int)
+                and not isinstance(item, bool)
+                and 0 <= item <= 9_007_199_254_740_991
+            ):
+                result[field] = item
+            else:
+                dropped += 1
+        elif isinstance(item, str):
+            if (
+                field == "local_sha256"
+                and isinstance(artifact_sha256, str)
+                and re.fullmatch(r"[0-9a-fA-F]{64}", artifact_sha256)
+                and item.lower() == artifact_sha256.lower()
+            ):
+                # This value is already public as the same version's checksum.
+                # An untrusted source cannot use a hash-shaped field to release
+                # a different opaque value; those still pass through redaction.
+                item = artifact_sha256.lower()
+            else:
+                safe = redact_url(item) if field == "record_url" else redact_text(item)
+                if safe != item:
+                    redacted.append(field)
+                item = safe
+            result[field], truncated = _clip(item)
+            if truncated:
+                clipped.append(field)
+        else:
+            dropped += 1
+    if not result:
+        return None
+    if clipped:
+        result["truncated_fields"] = clipped
+    if redacted:
+        result["redacted_fields"] = redacted
+    if dropped:
+        result["undisclosed_field_count"] = dropped
+    return result
+
+
+def public_source(
+    envelope: Any, *, artifact_sha256: str | None = None
+) -> dict[str, Any] | None:
     """The client-safe projection of one version's retrieval provenance.
 
     Returns None when there is nothing to show, which is the common case: most
@@ -91,6 +175,11 @@ def public_source(envelope: Any) -> dict[str, Any] | None:
         if field not in envelope:
             continue
         value = envelope[field]
+        if field == "dataset":
+            dataset = _public_dataset(value, artifact_sha256)
+            if dataset is not None:
+                out[field] = dataset
+            continue
         if value is None or value == "":
             continue
         if isinstance(value, (int, float, bool)):
