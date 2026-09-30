@@ -8,7 +8,7 @@ is refused to non-admins in team mode.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from openai4s.kernel.readiness import standard_profile_readiness
 from openai4s.onboarding import OnboardingService
@@ -51,8 +51,14 @@ def handle(
     cfg: Any,
     model_profiles: Any,
     model_discovery: Any,
+    model_auth_change: Callable[[Callable[[], Any]], Any] | None = None,
 ) -> bool:
-    """Answer an onboarding route, or report that this group does not own it."""
+    """Answer an onboarding route, or report that this group does not own it.
+
+    ``model_auth_change`` wraps the write to the live model settings so the
+    gateway can react to it as it does for every other model activation
+    (DataPro session invalidation, Agent Plan defaults).
+    """
 
     del q
     path = sub.split("?")[0]
@@ -69,8 +75,10 @@ def handle(
             self._json({"error": "admin only", "code": "admin_only"}, 403)
             return True
         service = _service(cfg, store)
+        wrap = model_auth_change or (lambda change: change())
         try:
-            service.complete(self._body())
+            body = self._body()
+            wrap(lambda: service.complete(body))
         except ValueError as error:
             self._json({"error": str(error)}, 400)
             return True

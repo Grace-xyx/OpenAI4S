@@ -24,11 +24,20 @@ TOOL_NAME = "dataPro_search"
 ENDPOINT = "https://datapro.hqd.cn-beijing.volces.com/mcp"
 
 AGENT_PLAN_KEY_SETTING = "agent_plan_key"
+# Who put the dedicated key there: "adopted" from an active Agent Plan model,
+# or anything else (a card save, or an install that predates this setting),
+# which is the user's own and never replaced automatically.
+AGENT_PLAN_KEY_ORIGIN_SETTING = "agent_plan_key_origin"
+_ADOPTED = "adopted"
+_SAVED = "saved"
 _AGENT_PLAN_SCOPE = "agent_plan"
 _ARK_PROVIDER = "ark"
 _EXTRA_INFO = "openai4s"
 # Hosts whose credentials this integration is allowed to forward to Volcengine.
 _VOLCENGINE_DOMAINS = ("volces.com", "volcengine.com", "volcengineapi.com")
+# Ark's Agent Plan gateway. The Coding Plan (`/api/coding/`) and pay-as-you-go
+# platform keys (`/api/v3`) live on the same hosts under other paths.
+_AGENT_PLAN_PATH = "/api/plan/"
 
 AUTH_FAILURE_CODE = 4011
 AUTH_FAILURE_MESSAGE = "Key 无效、额度不足，或者专业数据集 Harness 未开启。"
@@ -67,6 +76,8 @@ class DataProStore(Protocol):
     """The credential and connector subset used by this integration."""
 
     def get_setting(self, key: str, default: str | None = None) -> str | None: ...
+
+    def set_setting(self, key: str, value: str) -> None: ...
 
     def get_secret_setting(self, key: str) -> str: ...
 
@@ -182,27 +193,122 @@ def is_volcengine_endpoint(base_url: str) -> bool:
     )
 
 
+def is_agent_plan_endpoint(base_url: str) -> bool:
+    """True when an Ark endpoint is Volcengine's Agent Plan gateway.
+
+    One Volcengine host serves three credential families: the Agent Plan
+    (``/api/plan/v3``), the Coding Plan (``/api/coding/v3``) and platform keys
+    (``/api/v3``).  Only an Agent Plan key is the credential DataPro and Doubao
+    Search Custom are keyed on.  An empty URL is the provider default, which is
+    the Agent Plan gateway.
+    """
+
+    url = base_url.strip()
+    if not url:
+        return True
+    if not is_volcengine_endpoint(url):
+        return False
+    path = urllib.parse.urlsplit(url).path.lower().rstrip("/") + "/"
+    return path.startswith(_AGENT_PLAN_PATH)
+
+
+def _active_ark_base_url(store: DataProStore) -> str | None:
+    """The live Ark endpoint, or None when the active provider is not Ark."""
+
+    if _provider(store) != _ARK_PROVIDER:
+        return None
+    return str(store.get_setting("llm_base_url") or "")
+
+
 def ark_key_for_datapro(store: DataProStore) -> str:
     """Reuse the active Ark key, but never a key for a different account."""
 
-    if _provider(store) != _ARK_PROVIDER:
+    base_url = _active_ark_base_url(store)
+    if base_url is None:
         return ""
     # The provider name is not proof of ownership.  An ``ark``-protocol profile
     # pointed at a corporate gateway or any other compatible endpoint holds a
     # credential that endpoint issued; forwarding it to Volcengine (and, through
     # the shared resolver, to the Doubao search host) discloses it to two
     # parties that never issued it.
-    if not is_volcengine_endpoint(str(store.get_setting("llm_base_url") or "")):
+    if not is_volcengine_endpoint(base_url):
+        return ""
+    # A Coding Plan or platform key is Volcengine's, but not an Agent Plan key.
+    # It is still tried when nothing better exists; it must not shadow a
+    # dedicated Agent Plan Key -- one saved earlier, or adopted from an Agent
+    # Plan model before the user switched to this one.
+    if not is_agent_plan_endpoint(base_url) and _has_valid_agent_plan_key(
+        explicit_agent_plan_key(store)
+    ):
         return ""
     return _brokered(store, "llm_api_key")
+
+
+def active_agent_plan_key(store: DataProStore) -> str:
+    """The live model key when the active model is an Ark Agent Plan, else ''."""
+
+    base_url = _active_ark_base_url(store)
+    if base_url is None or not is_agent_plan_endpoint(base_url):
+        return ""
+    key = _brokered(store, "llm_api_key")
+    return key if _has_valid_agent_plan_key(key) else ""
+
+
+def _adopted(store: DataProStore) -> bool:
+    return str(store.get_setting(AGENT_PLAN_KEY_ORIGIN_SETTING) or "") == _ADOPTED
+
+
+def adopt_active_agent_plan_key(store: DataProStore) -> bool:
+    """Save an active Agent Plan model key as the managed products' own key.
+
+    Reusing the live key at read time lasts only while that model stays
+    selected: after a switch to another provider, DataPro and Doubao Search
+    were unauthorized again until the same key was pasted into their cards.
+    Persisting it as the dedicated Agent Plan Key keeps both working.
+
+    A key the user saved on a card is never replaced; an adopted one follows
+    the plan (a rotated or different Agent Plan key replaces it).  Returns True
+    only when the stored key changed -- a new Agent Plan was set up -- so a
+    caller can apply one-time defaults then, and never again over a later
+    choice of the user's while that same plan stays in use.
+    """
+
+    key = active_agent_plan_key(store)
+    if not key:
+        return False
+    current = explicit_agent_plan_key(store)
+    if current == key:
+        return False
+    if _has_valid_agent_plan_key(current) and not _adopted(store):
+        return False
+    store.set_secret_setting(AGENT_PLAN_KEY_SETTING, key, scope=_AGENT_PLAN_SCOPE)
+    store.set_setting(AGENT_PLAN_KEY_ORIGIN_SETTING, _ADOPTED)
+    return True
+
+
+def forget_adopted_agent_plan_key(store: DataProStore, value: str) -> bool:
+    """Clear an adopted dedicated key, but only when it is exactly ``value``.
+
+    Called when the credential it was copied from is removed (its profile is
+    deleted or re-keyed, or Volcengine is disconnected): a removed key must not
+    live on as a copy.  A key the user saved separately is theirs and stays.
+    """
+
+    key = str(value or "").strip()
+    if not key or not _adopted(store) or explicit_agent_plan_key(store) != key:
+        return False
+    store.set_secret_setting(AGENT_PLAN_KEY_SETTING, "", scope=_AGENT_PLAN_SCOPE)
+    store.set_setting(AGENT_PLAN_KEY_ORIGIN_SETTING, "")
+    return True
 
 
 def resolve_agent_plan_key(store: DataProStore) -> str:
     """Resolve the canonical DataPro credential from SecretBroker.
 
-    The brokered live Ark key wins while Ark is active, keeping model-profile
-    key rotation and DataPro in sync.  A dedicated Agent Plan Key is used when
-    another provider is active.  An OpenAI/Anthropic/etc. key must never be
+    The brokered live Ark key wins while an Agent Plan model is active, keeping
+    model-profile key rotation and DataPro in sync.  A dedicated Agent Plan Key
+    is used when another provider is active, and ahead of a Coding Plan or
+    platform key.  An OpenAI/Anthropic/etc. key must never be
     sent to Volcengine merely because it occupies ``llm_api_key``.
     """
 
@@ -228,17 +334,18 @@ def save_agent_plan_key(store: DataProStore, value: Any) -> None:
     two settings intentionally own separate broker entries so clearing either
     one cannot delete a secret still referenced by the other.
 
-    The mirror is symmetric with :func:`ark_key_for_datapro`, and gated on the
-    same endpoint check: an ``ark``-protocol profile pointed at a non-Volcengine
-    endpoint would otherwise have its LLM credential *replaced* by a
-    DataPro-scoped key, which is then sent as the bearer token to that endpoint.
+    The mirror is gated on the Agent Plan endpoint, not just on the provider:
+    an ``ark``-protocol profile pointed at a non-Volcengine endpoint would
+    otherwise have its LLM credential *replaced* by a DataPro-scoped key, which
+    is then sent as the bearer token to that endpoint -- and a Coding Plan or
+    platform model would lose the key it actually runs on.
     """
 
     key = _validated_agent_plan_key(value)
     store.set_secret_setting(AGENT_PLAN_KEY_SETTING, key, scope=_AGENT_PLAN_SCOPE)
-    if _provider(store) == _ARK_PROVIDER and is_volcengine_endpoint(
-        str(store.get_setting("llm_base_url") or "")
-    ):
+    store.set_setting(AGENT_PLAN_KEY_ORIGIN_SETTING, _SAVED)
+    base_url = _active_ark_base_url(store)
+    if base_url is not None and is_agent_plan_endpoint(base_url):
         store.set_secret_setting("llm_api_key", key, scope="llm")
 
 
@@ -540,6 +647,7 @@ def validate_query(value: Any) -> str:
 
 
 __all__ = [
+    "AGENT_PLAN_KEY_ORIGIN_SETTING",
     "AGENT_PLAN_KEY_SETTING",
     "AUTH_FAILURE_CODE",
     "AUTH_FAILURE_MESSAGE",
@@ -550,8 +658,12 @@ __all__ = [
     "ENDPOINT",
     "SKILL_NAME",
     "TOOL_NAME",
+    "active_agent_plan_key",
+    "adopt_active_agent_plan_key",
     "connector_runtime_config",
     "credential_state",
+    "forget_adopted_agent_plan_key",
+    "is_agent_plan_endpoint",
     "managed_connector_command",
     "is_volcengine_endpoint",
     "index_successful_search",

@@ -13400,6 +13400,93 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
         ):
             _disconnect_managed_datapro_session()
 
+    def _adopt_agent_plan_defaults(*, enable_products: bool = True) -> bool:
+        """Make an active Ark Agent Plan the managed products' saved default.
+
+        Its key becomes the shared Agent Plan Key, so Doubao Search stays the
+        primary web search and DataPro stays authorized after the user selects
+        another model.  Only when that key is new -- a fresh Agent Plan setup --
+        are DataPro's connector and Skill switched on, the same effect saving
+        the key on the DataPro card has.  Re-activating a plan already adopted
+        changes nothing, so a later choice of the user's is kept.
+        """
+
+        try:
+            adopted = datapro.adopt_active_agent_plan_key(store)
+        except Exception:  # noqa: BLE001 - a broker that refuses writes
+            # A read-only env backend or a host with no keychain keeps working
+            # exactly as before: the live key is still reused at read time.
+            traceback.print_exc()
+            return False
+        if not adopted or not enable_products:
+            return adopted
+        try:
+            if store.get_connector(datapro.CONNECTOR_ID):
+                store.set_connector_enabled(datapro.CONNECTOR_ID, True)
+            else:
+                _seed_datapro_connector(cfg)
+            if datapro.SKILL_NAME in _disabled_skills:
+                skill_customization.set_enabled(datapro.SKILL_NAME, True)
+        except Exception:  # noqa: BLE001 - the model switch itself succeeded
+            traceback.print_exc()
+        return True
+
+    def _after_model_auth_change(
+        previous_credential: str, previous_provider: str
+    ) -> None:
+        """Run after every write that can change the live model credential."""
+
+        _adopt_agent_plan_defaults()
+        _disconnect_datapro_if_auth_context_changed(
+            previous_credential, previous_provider
+        )
+
+    def _model_auth_change(change: Callable[[], Any]) -> Any:
+        """Apply `change` to the live model settings, then `_after_model_auth_change`."""
+
+        previous_credential = datapro.resolve_agent_plan_key(store)
+        previous_provider = (
+            str(store.get_setting("llm_provider") or cfg.llm.provider or "")
+            .strip()
+            .lower()
+        )
+        result = change()
+        _after_model_auth_change(previous_credential, previous_provider)
+        return result
+
+    def _profile_key(profile_id: str) -> str:
+        profile = next(
+            (
+                item
+                for item in store.list_model_profiles()
+                if item.get("id") == profile_id and not item.get("deleted_at")
+            ),
+            None,
+        )
+        return model_profiles.resolve_key(profile) if profile else ""
+
+    def _release_adopted_agent_plan_key(removed_key: str) -> None:
+        """Forget the adopted copy of a credential the user just removed.
+
+        A removed profile key must not stay in the keychain as the managed
+        products' default -- unless another saved profile still holds it.
+        """
+
+        if not removed_key:
+            return
+        if any(
+            not item.get("deleted_at")
+            and model_profiles.resolve_key(item) == removed_key
+            for item in store.list_model_profiles()
+        ):
+            return
+        datapro.forget_adopted_agent_plan_key(store, removed_key)
+
+    # An install already running an Agent Plan predates the adoption above.
+    # Save its key now so DataPro and Doubao Search survive a model switch, but
+    # leave the connector and Skill as they are: nobody chose anything here.
+    _adopt_agent_plan_defaults(enable_products=False)
+
     def _save_shared_agent_plan_key(value: Any) -> None:
         """Save the one Ark Agent Plan credential used by managed products.
 
@@ -13438,7 +13525,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             active_id
             and profile is not None
             and str(profile.get("provider") or "").strip().lower() == "ark"
-            and datapro.is_volcengine_endpoint(str(profile.get("base_url") or ""))
+            and datapro.is_agent_plan_endpoint(str(profile.get("base_url") or ""))
         ):
             try:
                 model_profiles.edit(active_id, {"api_key": value})
@@ -13611,9 +13698,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
         activation, effective_model = model_profiles.activate(profile_id)
         store.set_setting("volcengine_plan_key", material.plan_key)
         _default_model["id"] = effective_model or model
-        _disconnect_datapro_if_auth_context_changed(
-            previous_datapro_credential, previous_provider
-        )
+        _after_model_auth_change(previous_datapro_credential, previous_provider)
         return {
             "ok": True,
             "active_id": activation["active_id"],
@@ -15812,6 +15897,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 cfg=cfg,
                 model_profiles=model_profiles,
                 model_discovery=model_discovery,
+                model_auth_change=_model_auth_change,
             ):
                 return
             if diagnostics_routes.handle(self, method, sub, cfg=cfg):
@@ -15883,7 +15969,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                         store.set_secret_setting("llm_api_key", "", scope="llm")
                     if b.get("model"):
                         _default_model["id"] = str(b["model"]).strip()
-                    _disconnect_datapro_if_auth_context_changed(
+                    _after_model_auth_change(
                         previous_datapro_credential, previous_provider
                     )
                     self._json(
@@ -16025,7 +16111,11 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     store.get_setting("volcengine_model_profile_id") or ""
                 ).strip()
                 if profile_id:
+                    removed_key = _profile_key(profile_id)
                     model_profiles.delete(profile_id)
+                    # "Remove this Volcengine configuration" includes the copy
+                    # of its key adopted as the managed products' default.
+                    _release_adopted_agent_plan_key(removed_key)
                 store.set_setting("volcengine_model_profile_id", "")
                 store.set_setting("volcengine_plan_key", "")
                 _disconnect_datapro_if_credential_changed(previous)
@@ -16099,7 +16189,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     elif chosen:
                         _default_model["id"] = chosen
                         store.set_setting("llm_model", chosen)
-                    _disconnect_datapro_if_auth_context_changed(
+                    _after_model_auth_change(
                         previous_datapro_credential, previous_provider
                     )
                     self._json({"default_model_id": _default_model["id"]})
@@ -16180,9 +16270,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     self._json({"error": str(exc)}, exc.status_code)
                     return
                 _default_model["id"] = effective_model or _default_model["id"]
-                _disconnect_datapro_if_auth_context_changed(
-                    previous_datapro_credential, previous_provider
-                )
+                _after_model_auth_change(previous_datapro_credential, previous_provider)
                 activated = next(
                     (
                         item
@@ -16213,6 +16301,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     .strip()
                     .lower()
                 )
+                previous_profile_key = _profile_key(m.group(1))
                 try:
                     profile, effective_model = model_profiles.edit(
                         m.group(1), self._body()
@@ -16222,9 +16311,9 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     return
                 if effective_model:
                     _default_model["id"] = effective_model
-                _disconnect_datapro_if_auth_context_changed(
-                    previous_datapro_credential, previous_provider
-                )
+                _after_model_auth_change(previous_datapro_credential, previous_provider)
+                if _profile_key(m.group(1)) != previous_profile_key:
+                    _release_adopted_agent_plan_key(previous_profile_key)
                 self._json(profile)
                 return
             m = re.fullmatch(r"/model-profiles/([^/]+)", sub)
@@ -16232,7 +16321,9 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 deleting_active_profile = str(
                     store.get_setting("active_model_profile") or ""
                 ) == m.group(1)
+                removed_key = _profile_key(m.group(1))
                 model_profiles.delete(m.group(1))
+                _release_adopted_agent_plan_key(removed_key)
                 if deleting_active_profile:
                     _disconnect_managed_datapro_session()
                 self._json({"ok": True})

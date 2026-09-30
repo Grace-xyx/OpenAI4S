@@ -203,8 +203,12 @@ The client resolves the same Agent Plan Key used by Ark and DataPro from
 SecretBroker immediately before each outbound request. The credential is sent
 only as the upstream Authorization value and is never returned by the config
 route, search response, DOM, or diagnostic text. Saving it from Customize →
-Network therefore authorizes both managed products once; an active Ark API key
-is reused only when the selected provider is Ark.
+Network therefore authorizes both managed products once. An active Ark model
+key is reused only when the selected provider is Ark on a Volcengine endpoint.
+When that model is an Agent Plan (`/api/plan/v3`, the provider default),
+activating it also saves its key as this dedicated credential, so both products
+stay authorized after the user selects another model; a Coding Plan or platform
+key is never saved this way and no longer shadows a dedicated key.
 
 The dedicated `POST /doubao-search/search` product check has no fallback. It
 does not call Tavily, DuckDuckGo, Bing, Mojeek, or an identifier resolver after
@@ -222,7 +226,12 @@ above. It is one fixed, managed MCP Streamable HTTP connector named
 `volcengine-datapro`, and exposes only `dataPro_search(query:string)` to its
 bundled Skill. The endpoint is not user-selectable. The Agent Plan Key is stored
 through SecretBroker and resolved only as each outbound POST is assembled; an
-active Ark model key is reused only when the active provider is Ark.
+active Ark model key is reused only when the active provider is Ark. Activating
+an Agent Plan model whose key is not yet the saved one also switches the
+connector and Skill on — a new plan is a fresh authorization — while
+re-activating a plan already adopted leaves both as the user last set them.
+Disconnecting Volcengine removes the adopted copy of its key, not a different
+key saved separately.
 
 The Customize → Connectors card performs the actual search call and persists
 its result as a JSON Artifact. Every successful response is indexed without a
