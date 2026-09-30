@@ -527,6 +527,12 @@ jobs:
       # The C1 workbench scene creates a real unsaved matplotlib figure so
       # it covers the daemon's figure capture and immutable version binding.
       - name: Install the server, scientific browser fixtures, and browser driver
+        # `playwright install --with-deps` runs apt-get with no timeout of its
+        # own. A stalled runner mirror once held this step until the 45-minute
+        # job limit, before any test ran. Over 15 green runs the step peaked at
+        # 42s (chromium), 270s (firefox) and 683s (webkit), so 20 minutes fails
+        # a hung mirror early without cutting off a slow but healthy install.
+        timeout-minutes: 20
         run: |
           if [ "${{ matrix.engine }}" = "chromium" ]; then
             uv sync --locked --extra science
