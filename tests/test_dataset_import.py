@@ -447,6 +447,30 @@ def test_repository_destination_and_workspace_root_are_refused(tmp_path):
         require_capturable_destination(tmp_path, tmp_path)
 
 
+def _case_insensitive(directory: Path) -> bool:
+    probe = directory / "case-probe"
+    probe.mkdir()
+    try:
+        return (directory / "CASE-PROBE").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_destination_must_use_an_existing_entrys_exact_spelling(tmp_path):
+    (tmp_path / "datasets").mkdir()
+    (tmp_path / "datasets" / "spectra.csv").write_bytes(b"old")
+    require_capturable_destination(tmp_path, tmp_path / "datasets/spectra.csv")
+    require_capturable_destination(tmp_path, tmp_path / "datasets/new/x.csv")
+    for spelling in ("DATASETS/spectra.csv", "datasets/SPECTRA.csv"):
+        if _case_insensitive(tmp_path):
+            # The file would be published under `datasets/`, where the capture
+            # sweep names it, while the receipt names the requested spelling.
+            with pytest.raises(ValueError, match="exact name"):
+                require_capturable_destination(tmp_path, tmp_path / spelling)
+        else:
+            require_capturable_destination(tmp_path, tmp_path / spelling)
+
+
 def test_visibility_matches_real_artifact_snapshot(tmp_path):
     from tests.test_artifact_manager import ArtifactHarness
 
@@ -801,6 +825,41 @@ def test_native_import_keeps_same_byte_sources_immutable_across_store_reopen(
         assert len(reopened.list_versions(first["artifact_id"])) == 2
     finally:
         reopened.close()
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="native Artifact capture tests require POSIX file operations",
+)
+def test_native_import_into_a_differently_spelled_directory_never_half_succeeds(
+    tmp_path, monkeypatch
+):
+    from openai4s.tools.registry import execute_tool_call
+
+    with native_dataset_session(tmp_path, monkeypatch, stage1=False) as (
+        runner,
+        state,
+        _document,
+        reads,
+        _invoke,
+    ):
+        (state.workspace / "datasets").mkdir(parents=True, exist_ok=True)
+        arguments = {**spec(), "path": "DATASETS/spectra.csv"}
+        call = {"id": "case", "name": "science_import_dataset", "arguments": arguments}
+        observation, ok = runner._invoke_control_with_artifacts(
+            state,
+            call,
+            lambda _event: None,
+            lambda: execute_tool_call(runner._ensure_runtime(state), call),
+        )
+        if _case_insensitive(state.workspace):
+            assert ok is False
+            assert "exact name" in observation
+            assert reads == []
+            assert list((state.workspace / "datasets").iterdir()) == []
+        else:
+            assert ok is True, observation
+            assert (state.workspace / "DATASETS/spectra.csv").read_bytes() == BODY
 
 
 @pytest.mark.skipif(

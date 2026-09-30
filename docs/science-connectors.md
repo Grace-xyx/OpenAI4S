@@ -205,7 +205,10 @@ request to 1–120 seconds (default 60). `max_bytes=0` admits only an empty file
 A missing declaration or a declaration above the explicit budget is refused
 before I/O. File keys keep their exact spelling and are never local paths.
 Destinations excluded from Artifact capture (hidden/dependency/repository
-paths) are refused.
+paths) are refused. So is a destination that reaches an existing
+workspace entry spelled differently (letter case or Unicode normalization on
+a case-insensitive filesystem), because the capture would record the stored
+spelling rather than the requested one.
 
 The import has its own `science_import_dataset` permission targeting
 `zenodo.org`. A standing `web_download` deny for that host also refuses the
