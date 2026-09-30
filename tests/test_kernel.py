@@ -1658,3 +1658,125 @@ def test_one_print_cannot_put_an_unbounded_frame_on_the_protocol_pipe():
     # The captured result stays bounded too, and says what it counted.
     assert len(result["stdout"]) <= 1_000_000 + 64
     assert "characters" in result["stdout"]
+
+
+def _degraded_kernel_sandbox(tmp_path):
+    from openai4s.security.sandbox import KernelSandbox, SandboxStatus
+
+    private = tmp_path / "private"
+    private.mkdir()
+    return KernelSandbox(
+        status=SandboxStatus(
+            mode="off",
+            state="disabled",
+            backend=None,
+            enforced=False,
+            self_test_passed=None,
+            network_policy="not_enforced",
+            workspace=str(tmp_path),
+            temp_dir=str(private),
+            detail="injected",
+        ),
+        temp_dir=str(private),
+    )
+
+
+def test_allowlist_refuses_every_origin_before_a_frame_or_fifo(monkeypatch, tmp_path):
+    """The gate sits after the liveness check and before any worker byte."""
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    kernel = Kernel(
+        dispatcher=_echo_dispatcher,
+        cwd=str(tmp_path),
+        sandbox=_degraded_kernel_sandbox(tmp_path),
+        capture_sinks=True,
+    )
+    writes: list[str] = []
+    opened: list[bool] = []
+    real_write = kernel._transport.write_line
+    real_open = kernel._sinks.open
+
+    def spy_write(line: str) -> None:
+        writes.append(line)
+        real_write(line)
+
+    def spy_open(*args, **kwargs):
+        opened.append(True)
+        return real_open(*args, **kwargs)
+
+    kernel._transport.write_line = spy_write
+    kernel._sinks.open = spy_open
+    try:
+        for origin in ("agent", "user", "system", "recovery", "sidecar_recovery"):
+            with pytest.raises(EgressBoundaryUnavailable) as caught:
+                kernel.execute("print('refused')", origin=origin)
+            assert caught.value.code == "egress_boundary_unavailable"
+            assert caught.value.decision["sandbox"]["network_policy"] == "not_enforced"
+        assert writes == []
+        assert opened == []
+        monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+        kernel._transport.write_line = real_write
+        kernel._sinks.open = real_open
+        result = kernel.execute("print('after-off')", origin="agent")
+        assert result["error"] is None
+        assert result["stdout"] == "after-off\n"
+    finally:
+        kernel.shutdown()
+
+
+def test_allowlist_refuses_a_remote_kernel_without_writing(monkeypatch, tmp_path):
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    monkeypatch.delenv("OPENAI4S_KERNEL_SANDBOX", raising=False)
+
+    class _Remote:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+            self.stderr_tail = None
+            self.process = None
+            self.closed = False
+
+        def write_line(self, line: str) -> None:
+            self.writes.append(line)
+
+        def read_line(self) -> str:
+            return ""
+
+        def alive(self) -> bool:
+            return not self.closed
+
+        def interrupt(self) -> bool:
+            return False
+
+        def kill(self) -> None:
+            self.closed = True
+
+        def close(self, *, graceful: bool = True) -> None:
+            self.closed = True
+
+    transport = _Remote()
+    kernel = Kernel(
+        cwd=str(tmp_path),
+        argv=["/bin/true"],
+        sandbox=_degraded_kernel_sandbox(tmp_path),
+        capture_sinks=True,
+        transport_factory=lambda: transport,
+    )
+    opened: list[bool] = []
+    kernel._sinks.open = lambda *args, **kwargs: opened.append(True)
+    try:
+        status = kernel.sandbox_status
+        assert status["backend"] == "remote"
+        assert status["network_policy"] == "unproven"
+        with pytest.raises(EgressBoundaryUnavailable) as caught:
+            kernel.execute("print('remote')", origin="agent")
+        assert caught.value.code == "egress_boundary_unavailable"
+        assert caught.value.decision["sandbox"]["backend"] == "remote"
+        assert "reason" not in caught.value.decision["sandbox"]
+        assert transport.writes == []
+        assert opened == []
+    finally:
+        kernel.shutdown()
