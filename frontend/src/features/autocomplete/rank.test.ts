@@ -52,6 +52,16 @@ describe("composer candidate ranking", () => {
     expect(merged.map((a) => a.artifact_id)).toEqual(["a1", "a2"]);
   });
 
+  it("keeps the project page's version when the session lists the same artifact", () => {
+    const merged = mergeArtifactCandidates(
+      [{ filename: "plot.png", artifact_id: "a1", version_id: "v-project" }],
+      [{ filename: "plot.png", artifact_id: "a1", version_id: "v-session" }],
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.version_id).toBe("v-project");
+    expect(artifactToAcItem(merged[0]!, null, "").insert).toBe("plot.png#v-project");
+  });
+
   it("pins the version on insert and marks a file from another session", () => {
     const item = artifactToAcItem(
       {

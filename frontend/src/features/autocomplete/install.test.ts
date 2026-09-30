@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isReady } from "../../compat/stub";
+import { acUpdate } from "./composer";
 import { autocompleteReady, installAutocomplete, watchEditAreas } from "./index";
 
 afterEach(() => {
@@ -15,6 +16,7 @@ describe("F-12 window exports", () => {
     expect(isReady(target.edacTeardown)).toBe(true);
     expect(isReady(target.bindEditorAutocomplete)).toBe(true);
     expect(autocompleteReady(target)).toBe(true);
+    expect(target.acUpdate).toBe(acUpdate);
   });
 
   it("does not watch every mutation of the document for editor textareas", () => {

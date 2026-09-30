@@ -62,6 +62,9 @@ const COPY: CopyTable = {
     "prov.env.noSnapshot": "此版本未记录生产时环境（上传文件，或早于环境捕获功能生成）；不会用守护进程的实时环境替代。",
     "prov.env.packagesUnknown": "未知",
     "prov.env.packagesNotApplicable": "不适用",
+    "ac.files.searching": "正在搜索项目文件…",
+    "ac.files.failed": "项目文件搜索失败，仅显示本会话文件",
+    "ac.files.recent": "显示最近的项目文件，输入文件名可搜索全部",
   },
   en: {
     "artifact.invalidMetadata": "The response does not contain valid artifact metadata. Export stopped.",
@@ -119,6 +122,9 @@ const COPY: CopyTable = {
     "prov.env.noSnapshot": "No environment was recorded for this version (uploaded file, or produced before environment capture existed); the live daemon environment is not substituted.",
     "prov.env.packagesUnknown": "unknown",
     "prov.env.packagesNotApplicable": "n/a",
+    "ac.files.searching": "Searching project files…",
+    "ac.files.failed": "Project file search failed. Showing only this session's files.",
+    "ac.files.recent": "Showing the most recent project files. Type a filename to search all of them.",
   },
 };
 

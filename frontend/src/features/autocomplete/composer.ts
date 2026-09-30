@@ -2,16 +2,22 @@
  * Composer autocomplete. Port of app.js:12946-13033, 13125 + the keydown
  * branch at 13403-13411.
  *
- * `@` files (project + session, version-pinned), `#` sessions, `/` skills.
- * Popup is `#composer-ac`. `ac` is the live controller hung on window so
- * F-11's send() keydown can see `ac.open`.
+ * `@` files (one artifact-index page + this session, version-pinned),
+ * `#` sessions, `/` skills. Popup is `#composer-ac`. `ac` is the live
+ * controller hung on window so F-11's send() keydown can see `ac.open`.
+ *
+ * `@` does not keep a project-wide cache and does not call
+ * `GET /projects/{pid}/artifacts`. A page is one filename query, limit 20.
+ * A response whose project, session, or update generation no longer matches
+ * is discarded. Hidden rows (`priority < 0`) stay out.
  */
 
 import { t } from "../../i18n/runtime";
 import { artifacts } from "../../stores/artifacts";
 import { currentId, sessions } from "../../stores/session";
+import { fetchArtifactIndexPage } from "../artifacts/api";
+import { filesT } from "../artifacts/copy";
 import { effProject } from "../customize/host";
-import { api } from "../sessions/api";
 import { $, el, grow } from "../sessions/dom";
 import { renderComposerRefChips } from "../sessions/transcript";
 import { loadSkillsCatalog } from "./catalog";
@@ -42,11 +48,117 @@ export const ac: AcState = {
   start: 0,
 };
 
-const acFiles: { pid: string | null; at: number; list: ArtifactLike[] } = {
-  pid: null,
-  at: 0,
-  list: [],
+/** Input settles for this long before an `@` index request. `#` and `/` do not wait. */
+export const AC_DEBOUNCE_MS = 150;
+/** Rows asked of artifact-index. The popup still caps at `AC_LIMIT` (8). */
+export const AC_INDEX_LIMIT = 20;
+
+type AcNotice = "loading" | "error" | "recent";
+
+const NOTICE_KEY: Record<AcNotice, string> = {
+  loading: "ac.files.searching",
+  error: "ac.files.failed",
+  recent: "ac.files.recent",
 };
+
+type AcToken = {
+  pid: string;
+  sessionKey: string;
+  query: string;
+  seq: number;
+};
+
+type AcDecision =
+  | { kind: "apply"; now: ComposerDetect }
+  | { kind: "drop" }
+  | { kind: "local" }
+  | { kind: "close" };
+
+/** Bumped by every `acUpdate`. A load that settles after a newer one started is dropped. */
+let acSeq = 0;
+let acNotice: AcNotice | null = null;
+let acTimer: ReturnType<typeof setTimeout> | null = null;
+let acAbort: AbortController | null = null;
+let debounceResolve: (() => void) | null = null;
+
+function projectId(): string {
+  return effProject() || "";
+}
+
+function sessionKey(): string {
+  return currentId.value || "";
+}
+
+function isShownArtifact(row: ArtifactLike | null | undefined): row is ArtifactLike {
+  if (!row || !row.filename) return false;
+  const priority = (row as { priority?: number | null }).priority;
+  return !(typeof priority === "number" && priority < 0);
+}
+
+function sessionCandidates(): ArtifactLike[] {
+  return ((artifacts.value || []) as ArtifactLike[]).filter(isShownArtifact);
+}
+
+function toItems(rows: ArtifactLike[]): AcItem[] {
+  return rows.map((a) => artifactToAcItem(a, currentId.value, t("ac.fromOtherSession")));
+}
+
+function isAbortError(err: unknown): boolean {
+  return !!err && typeof err === "object" && (err as { name?: string }).name === "AbortError";
+}
+
+function clearDebounce(): void {
+  if (acTimer !== null) {
+    clearTimeout(acTimer);
+    acTimer = null;
+  }
+  if (debounceResolve) {
+    const resolve = debounceResolve;
+    debounceResolve = null;
+    resolve();
+  }
+}
+
+function abortInFlight(): void {
+  const ctrl = acAbort;
+  acAbort = null;
+  if (ctrl) ctrl.abort();
+}
+
+function cancelFileSearch(): void {
+  clearDebounce();
+  abortInFlight();
+}
+
+/**
+ * A newer keystroke owns the popup: leave it alone.
+ * The project or session moved under this same update: do not render the
+ * page that was fetched for the old one.
+ * The caret left the token this update searched: close.
+ */
+function decide(token: AcToken): AcDecision {
+  if (token.seq !== acSeq) return { kind: "drop" };
+  if (token.pid !== projectId() || token.sessionKey !== sessionKey()) return { kind: "local" };
+  const now = acDetect();
+  if (!now || now.trigger !== "@" || now.query !== token.query) return { kind: "close" };
+  return { kind: "apply", now };
+}
+
+function settle(token: AcToken, rows: ArtifactLike[], notice: AcNotice | null): void {
+  const decision = decide(token);
+  if (decision.kind === "drop") return;
+  if (decision.kind === "apply") {
+    showFilePopup(rows, decision.now, notice);
+    return;
+  }
+  if (decision.kind === "local") {
+    const now = acDetect();
+    if (!now || now.trigger !== "@") acClose();
+    else showFilePopup(sessionCandidates(), now, null);
+    return;
+  }
+  acClose();
+}
 
 export function acDetect(): ComposerDetect | null {
   const c = $("#composer") as HTMLTextAreaElement | null;
@@ -56,20 +168,21 @@ export function acDetect(): ComposerDetect | null {
   return acDetectFrom(before, pos);
 }
 
-export async function acProjectFiles(): Promise<ArtifactLike[]> {
-  const pid = effProject() || null;
-  if (pid && (acFiles.pid !== pid || Date.now() - acFiles.at > 4000)) {
-    try {
-      const a = await api(`/projects/${pid}/artifacts`);
-      acFiles.list = Array.isArray(a) ? (a as ArtifactLike[]) : [];
-      acFiles.pid = pid;
-      acFiles.at = Date.now();
-    } catch {
-      /* keep last good list */
-    }
-  }
-  const sessionList = (artifacts.value || []) as ArtifactLike[];
-  return mergeArtifactCandidates(pid ? acFiles.list : [], sessionList);
+/**
+ * One index page for `query` (empty → most recent page, no `q`), merged with
+ * this session's visible files. No shared cache: callers that outlive their
+ * `{pid, sessionKey, query, seq}` token drop the array.
+ */
+export async function acProjectFiles(query = "", signal?: AbortSignal): Promise<ArtifactLike[]> {
+  const pid = projectId();
+  const sessionList = sessionCandidates();
+  if (!pid) return sessionList;
+  const page = await fetchArtifactIndexPage(pid, {
+    q: query,
+    limit: AC_INDEX_LIMIT,
+    signal,
+  });
+  return mergeArtifactCandidates(page.artifacts.filter(isShownArtifact), sessionList);
 }
 
 export function ensureComposerAc(): HTMLElement | null {
@@ -94,8 +207,29 @@ export function ensureComposerAc(): HTMLElement | null {
 
 export function acClose(): void {
   ac.open = false;
+  ac.items = [];
+  ac.idx = 0;
+  acNotice = null;
+  cancelFileSearch();
   const b = $("#composer-ac");
-  if (b) b.classList.add("hidden");
+  if (!b) return;
+  b.classList.add("hidden");
+  b.innerHTML = "";
+}
+
+function showFilePopup(rows: ArtifactLike[], d: ComposerDetect, notice: AcNotice | null): void {
+  const items = rankComposerItems(toItems(rows), d.query);
+  if (!items.length && !notice) {
+    acClose();
+    return;
+  }
+  acNotice = notice;
+  ac.items = items;
+  ac.idx = 0;
+  ac.trigger = d.trigger;
+  ac.start = d.start;
+  ac.open = items.length > 0;
+  acRender();
 }
 
 export function acRender(): void {
@@ -112,6 +246,7 @@ export function acRender(): void {
     };
     box.appendChild(row);
   });
+  if (acNotice) box.appendChild(el("div", "ac-hint", filesT(NOTICE_KEY[acNotice])));
   box.classList.remove("hidden");
 }
 
@@ -132,23 +267,58 @@ export function acPick(i: number): void {
   c.focus();
 }
 
-/** Bumped by every `acUpdate`; an update whose load settles after a newer one started is dropped. */
-let acSeq = 0;
-
-export async function acUpdate(): Promise<void> {
-  const seq = ++acSeq;
+async function runFileSearch(seq: number): Promise<void> {
+  if (seq !== acSeq) return;
   const d = acDetect();
-  if (!d) {
+  if (!d || d.trigger !== "@") {
     acClose();
     return;
   }
+  const token: AcToken = {
+    pid: projectId(),
+    sessionKey: sessionKey(),
+    query: d.query,
+    seq,
+  };
+  if (!token.pid) {
+    settle(token, sessionCandidates(), null);
+    return;
+  }
+  showFilePopup(sessionCandidates(), d, "loading");
+  const ctrl = new AbortController();
+  acAbort = ctrl;
+  try {
+    const merged = await acProjectFiles(token.query, ctrl.signal);
+    settle(token, merged, token.query ? null : "recent");
+  } catch (err) {
+    if (isAbortError(err)) return;
+    settle(token, sessionCandidates(), "error");
+  } finally {
+    if (acAbort === ctrl) acAbort = null;
+  }
+}
+
+function scheduleFileSearch(seq: number): Promise<void> {
+  clearDebounce();
+  abortInFlight();
+  const d = acDetect();
+  if (!d || d.trigger !== "@" || seq !== acSeq) return Promise.resolve();
+  // Session rows are local. With no project there is no index to query.
+  showFilePopup(sessionCandidates(), d, null);
+  if (!projectId()) return Promise.resolve();
+  return new Promise((resolve) => {
+    debounceResolve = resolve;
+    acTimer = setTimeout(() => {
+      acTimer = null;
+      debounceResolve = null;
+      void runFileSearch(seq).then(resolve, resolve);
+    }, AC_DEBOUNCE_MS);
+  });
+}
+
+async function finishOther(seq: number, d: ComposerDetect): Promise<void> {
   let items: AcItem[] = [];
-  if (d.trigger === "@") {
-    const files = await acProjectFiles();
-    items = files.map((a) =>
-      artifactToAcItem(a, currentId.value, t("ac.fromOtherSession")),
-    );
-  } else if (d.trigger === "#") {
+  if (d.trigger === "#") {
     const rows = (sessions.value || []) as Array<{
       name?: string;
       task_summary?: string;
@@ -159,11 +329,8 @@ export async function acUpdate(): Promise<void> {
     const sk = await loadSkillsCatalog().catch(() => []);
     items = sk.map(skillToAcItem);
   }
-  // The file and skill lists load asynchronously. Keystrokes in the
-  // meantime started newer updates, and the caret may have moved without
-  // one: filter by, and anchor the replacement on, the token at the caret
-  // now. The one read before the await let Enter replace from a stale start
-  // and swallow what was typed after it.
+  // The skill list loads asynchronously. Keystrokes in the meantime started
+  // newer updates, and the caret may have moved without one.
   if (seq !== acSeq) return;
   const now = acDetect();
   if (!now || now.trigger !== d.trigger) {
@@ -171,6 +338,7 @@ export async function acUpdate(): Promise<void> {
     return;
   }
   items = rankComposerItems(items, now.query);
+  acNotice = null;
   if (!items.length) {
     acClose();
     return;
@@ -183,9 +351,31 @@ export async function acUpdate(): Promise<void> {
   acRender();
 }
 
+export function acUpdate(): Promise<void> {
+  const seq = ++acSeq;
+  const d = acDetect();
+  if (!d) {
+    acClose();
+    return Promise.resolve();
+  }
+  if (d.trigger !== "@") {
+    cancelFileSearch();
+    acNotice = null;
+    return finishOther(seq, d);
+  }
+  return scheduleFileSearch(seq);
+}
+
 function onComposerKeydown(e: KeyboardEvent): void {
   if (e.isComposing || e.keyCode === 229) return;
-  if (!ac.open) return;
+  if (!ac.open && !acNotice) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    acClose();
+    return;
+  }
+  if (!ac.open || ac.items.length === 0) return;
   if (e.key === "ArrowDown") {
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -205,11 +395,6 @@ function onComposerKeydown(e: KeyboardEvent): void {
     e.stopImmediatePropagation();
     acPick(ac.idx);
     return;
-  }
-  if (e.key === "Escape") {
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    acClose();
   }
 }
 

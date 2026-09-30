@@ -721,6 +721,7 @@ body.sidebar-collapsed #sidebar{width:0;min-width:0;padding:0;overflow:hidden;bo
 .ac-item.on,.ac-item:hover{background:var(--bg-200)}
 .ac-item .ac-lbl{font-weight:500;font-size:14px;white-space:nowrap}
 .ac-item .ac-sub{font-size:11.5px;color:var(--text-400);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.composer-ac .ac-hint{padding:6px 8px;font-size:12px;line-height:1.4;color:var(--text-400)}
 
 /* ---- artifact editor (edit function) ---- */
 .edit-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;border-bottom:.5px solid var(--border);background:var(--bg-100)}
