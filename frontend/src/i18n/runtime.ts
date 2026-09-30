@@ -29,6 +29,13 @@ export const languageRevision = signal(0);
 // I18N.zh / I18N.en are populated by loadLocale (dynamic import of zh.ts / en.ts).
 export const I18N: { zh: I18nDict; en: I18nDict } = { zh: {}, en: {} };
 
+/**
+ * The pick made in this page, kept for when storage refuses it: with site data
+ * blocked, a pick used to be forgotten at once, so the language control showed
+ * "system" over an explicit choice and a browser language change undid it.
+ */
+let sessionPick: Lang | null = null;
+
 /** The language the user picked in this browser, or null when they never did. */
 export function savedLang(): Lang | null {
   try {
@@ -70,7 +77,7 @@ export function detectLang(): Lang {
 
 /** What the language control shows: a saved pick, or "system" when there is none. */
 export function langPreference(): LangPreference {
-  return savedLang() ?? "system";
+  return savedLang() ?? sessionPick ?? "system";
 }
 
 export let LANG: Lang = detectLang();
@@ -274,6 +281,7 @@ export function onLanguageChange(hook: (lang: Lang) => void): () => void {
  */
 export async function setLang(lang: string): Promise<void> {
   if (lang === "system") {
+    sessionPick = null;
     try {
       localStorage.removeItem("os-lang");
     } catch {
@@ -283,6 +291,7 @@ export async function setLang(lang: string): Promise<void> {
     return;
   }
   LANG = lang === "en" ? "en" : "zh";
+  sessionPick = LANG;
   try {
     localStorage.setItem("os-lang", LANG);
   } catch {
@@ -303,7 +312,7 @@ async function applyLang(lang: Lang): Promise<void> {
  * language here. Wired to the window's `languagechange` event below.
  */
 export async function syncSystemLanguage(): Promise<void> {
-  if (savedLang() !== null) return;
+  if (langPreference() !== "system") return;
   const next = systemLang();
   if (next !== LANG) await applyLang(next);
 }

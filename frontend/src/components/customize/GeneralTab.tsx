@@ -89,7 +89,7 @@ export function GeneralTab() {
           ]}
           onPick={(val) => {
             void setLang(val);
-            setLangChoice(val as LangPreference);
+            setLangChoice(langPreference());
           }}
         />
       </CustRow>

@@ -99,7 +99,9 @@ beforeEach(() => {
   mocks.theme = "light";
   mocks.layout = "comfortable";
   mocks.lang = "system";
-  mocks.setLang.mockReset();
+  mocks.setLang.mockReset().mockImplementation((value: string) => {
+    mocks.lang = value;
+  });
   mocks.custTab.mockReset();
   mocks.fetch.mockReset().mockImplementation(() => Promise.resolve(new Response("{}")));
   vi.stubGlobal("fetch", mocks.fetch);

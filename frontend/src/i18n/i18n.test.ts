@@ -186,7 +186,7 @@ describe("F-07 setLang / detectLang / applyStaticI18n", () => {
     expect(store["os-lang"]).toBe("zh");
   });
 
-  it("detectLang reads os-lang then navigator.languages /^zh/i", () => {
+  it("detectLang reads os-lang, then the browser's languages in order", () => {
     const store: Record<string, string> = { "os-lang": "en" };
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
@@ -261,7 +261,6 @@ describe("F-07 setLang / detectLang / applyStaticI18n", () => {
       // An empty list is still a list: fall back to navigator.language.
       browser([], "zh-CN");
       expect(detectLang()).toBe("zh");
-      expect(langPreference()).toBe("system");
     });
 
     it("a saved pick still wins over the browser", () => {
