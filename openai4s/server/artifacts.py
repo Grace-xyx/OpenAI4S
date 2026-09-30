@@ -22,6 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
+from openai4s.artifact_paths import ignored_artifact_path
 from openai4s.artifact_restore import (
     ArtifactRestoreDenied,
     ArtifactRestoreRefused,
@@ -36,7 +37,6 @@ from openai4s.storage.artifacts import (
     ArtifactDeliveryReferenceError,
 )
 
-_JUNK_DIR_SEGMENTS = frozenset({"__pycache__", "node_modules", "site-packages", "venv"})
 _EMBEDDED_IMAGE_TYPES = frozenset(
     {"image/gif", "image/jpeg", "image/png", "image/webp"}
 )
@@ -3110,7 +3110,7 @@ class ArtifactManager:
             repo_roots = set()
         result: WorkspaceSnapshot = {}
         for path in workspace.rglob("*"):
-            if _ignored_file(path.relative_to(workspace)):
+            if ignored_artifact_path(path.relative_to(workspace)):
                 continue
             if repo_roots and any(root in path.parents for root in repo_roots):
                 continue
@@ -4008,18 +4008,6 @@ def _capture_snippet(index: int) -> str:
         "except Exception: pass\n"
         "print('__OSFIGS__'+__oj.dumps(__osfigs))\n"
     )
-
-
-def _ignored_file(path: Path) -> bool:
-    parts = path.parts
-    if any(part.startswith(".") for part in parts):
-        return True
-    if any(
-        part in _JUNK_DIR_SEGMENTS or part.endswith((".egg-info", ".dist-info"))
-        for part in parts
-    ):
-        return True
-    return path.name.endswith((".pyc", ".pyo"))
 
 
 def is_text_editable(filename: str | None, content_type: str | None) -> bool:

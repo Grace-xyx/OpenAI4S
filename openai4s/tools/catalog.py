@@ -301,6 +301,7 @@ _TOOL_GROUP = {
     "lineage_graph": "data",
     "science_list_dbs": "science",
     "science_search": "science",
+    "science_import_dataset": "science",
     "read_todos": "workflow",
     "write_todos": "workflow",
     "read_plan": "workflow",
@@ -513,12 +514,12 @@ class SessionToolCatalog:
                 tool for tool in tools if self._group_for(tool) in self._active_groups
             ]
         visible_tools = [tool.name for tool in active_tools]
-        hidden: list[str] = []
+        hidden: list[Tool] = []
         if offered is not None:
             # Outside the lock: the projection reads permission state.
-            hidden = [tool.name for tool in active_tools if not offered(tool)]
+            hidden = [tool for tool in active_tools if not offered(tool)]
             if hidden:
-                excluded = set(hidden)
+                excluded = {tool.name for tool in hidden}
                 visible_tools = [name for name in visible_tools if name not in excluded]
                 for _score, group in matches:
                     group["tools"] = [
@@ -535,7 +536,15 @@ class SessionToolCatalog:
         }
         if hidden:
             result["unavailable_tools"] = [
-                {"name": name, "reason": "approval_unreachable"} for name in hidden
+                {
+                    "name": tool.name,
+                    "reason": (
+                        "native_capture_unavailable"
+                        if getattr(tool, "requires_native_capture", False)
+                        else "approval_unreachable"
+                    ),
+                }
+                for tool in hidden
             ]
         return result
 
