@@ -10,6 +10,7 @@
  */
 
 import { LANG, t, tOptional } from "../../i18n/runtime";
+import { provenanceT } from "../execution/copy";
 import { publicText } from "../scrub/scrub";
 import { pendingReplIdentity } from "../../stores/notebook";
 import { nbFindCell } from "../notebook/cells";
@@ -3450,6 +3451,107 @@ export async function steerDelegationChild(
   }
 }
 
+function evidenceReason(code: string): string | null {
+  switch (code) {
+    case "other_frame":
+      return provenanceT("evidenceReasonOtherFrame");
+    case "no_checksum":
+      return provenanceT("evidenceReasonNoChecksum");
+    case "no_snapshot":
+      return provenanceT("evidenceReasonNoSnapshot");
+    case "snapshot_missing":
+      return provenanceT("evidenceReasonSnapshotMissing");
+    case "size_mismatch":
+      return provenanceT("evidenceReasonSizeMismatch");
+    case "cell_not_recorded":
+      return provenanceT("evidenceReasonCellNotRecorded");
+    case "cell_failed":
+      return provenanceT("evidenceReasonCellFailed");
+    case "cell_other_frame":
+      return provenanceT("evidenceReasonCellOtherFrame");
+    case "no_cell_receipt":
+      return provenanceT("evidenceReasonNoCellReceipt");
+    default:
+      return null;
+  }
+}
+
+function evidenceRow(item: any): HTMLElement {
+  const row = el("div", "delegation-evidence-row");
+  const verified = item && item.verdict === "verified_version_and_producer";
+  const checksum = item && typeof item.checksum === "string" ? item.checksum.slice(0, 12) : "";
+  row.appendChild(el("span", "delegation-evidence-name", (item && item.filename) || ""));
+  row.appendChild(el("span", "timeline-pill", (item && item.version_id) || ""));
+  row.appendChild(
+    el("span", "timeline-pill", checksum ? "sha256 " + checksum : provenanceT("evidenceNoChecksum")),
+  );
+  row.appendChild(
+    el(
+      "span",
+      "timeline-pill",
+      item && item.cell_status
+        ? provenanceT("evidenceCell", item.cell_status)
+        : provenanceT("evidenceNoCell"),
+    ),
+  );
+  if (item && item.capture_kind) {
+    row.appendChild(el("span", "timeline-pill", String(item.capture_kind)));
+  }
+  row.appendChild(
+    el(
+      "span",
+      "dlg-chip " + (verified ? "completed" : "warning"),
+      verified ? provenanceT("evidenceVerified") : provenanceT("evidenceInsufficient"),
+    ),
+  );
+  const reasons = item && Array.isArray(item.reasons) ? item.reasons : [];
+  reasons.forEach((code: string) => {
+    const text = evidenceReason(String(code));
+    if (text) row.appendChild(el("span", "delegation-evidence-reasons", text));
+  });
+  return row;
+}
+
+function appendChildEvidence(row: HTMLElement, child: any): void {
+  const evidence = child && child.artifact_evidence;
+  if (!evidence || evidence.scope !== "version_and_producer") return;
+  const block = el("div", "delegation-evidence");
+  const summary = el("div", "delegation-evidence-summary");
+  if (evidence.unavailable === true) {
+    summary.appendChild(el("span", "timeline-pill", provenanceT("evidenceUnavailable")));
+    block.appendChild(summary);
+    row.appendChild(block);
+    return;
+  }
+  const items = Array.isArray(evidence.items) ? evidence.items : [];
+  const verified = items.filter(
+    (item: any) => item && item.verdict === "verified_version_and_producer",
+  ).length;
+  const insufficient = items.filter(
+    (item: any) => item && item.verdict === "insufficient_evidence",
+  ).length;
+  summary.appendChild(
+    el("span", "timeline-pill", provenanceT("evidenceSummary", verified, insufficient)),
+  );
+  if (evidence.truncated === true) {
+    summary.appendChild(
+      el(
+        "span",
+        "timeline-pill",
+        provenanceT("evidenceTruncated", evidence.total == null ? items.length : evidence.total),
+      ),
+    );
+  }
+  block.appendChild(summary);
+  if (items.length) {
+    const details = el("details", "delegation-evidence-list");
+    details.appendChild(el("summary", "", provenanceT("evidenceDetails")));
+    items.forEach((item: any) => details.appendChild(evidenceRow(item)));
+    block.appendChild(details);
+  }
+  row.appendChild(block);
+}
+
 function delegateTaskChip(view: any): HTMLElement {
   const ts = view && view.task_status;
   let cls = "neutral",
@@ -3500,6 +3602,9 @@ export function renderDelegationPanel(): HTMLElement {
     ),
   );
   panel.appendChild(summary);
+  if ((state.children || []).some((child: any) => child && child.artifact_evidence)) {
+    panel.appendChild(el("p", "delegation-evidence-scope", provenanceT("evidenceScope")));
+  }
   (state.children || []).forEach((child: any) => {
     const row = el("div", "delegation-child status-" + String(child.status || "unknown").toLowerCase());
     row.style.setProperty("--delegation-indent", Math.min(child.depth || 0, 4) * 10 + "px");
@@ -3547,6 +3652,7 @@ export function renderDelegationPanel(): HTMLElement {
       details.appendChild(ref);
     }
     row.appendChild(details);
+    appendChildEvidence(row, child);
     if (child.error || child.stop_reason)
       row.appendChild(el("div", "delegation-child-message", child.error || child.stop_reason));
     if (["running", "pending"].includes(String(child.status || "").toLowerCase())) {
