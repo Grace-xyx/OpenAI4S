@@ -113,6 +113,66 @@ def test_chat_model_passes_native_schemas_and_is_blocking_by_default():
     assert "on_delta" not in calls[0][2]
 
 
+def test_chat_model_call_state_carries_the_configured_retry_policy():
+    """The turn's CallState is built here, and ``client.chat`` prefers it over
+    its own, so this is the one place the retry policy reaches an Agent turn."""
+
+    from openai4s.config import LLMConfig
+
+    cfg = LLMConfig(
+        provider="deepseek", max_retries=5, retry_budget_s=90, retry_max_delay_s=20
+    )
+    seen = []
+
+    def fake_chat(messages, received_cfg, **kwargs):
+        seen.append(kwargs["should_cancel"].call_state)
+        return {"content": "done"}
+
+    ChatModel(cfg, fake_chat).complete([], lambda _delta: None)
+
+    (state,) = seen
+    assert (state.max_attempts, state.retry_budget, state.max_delay) == (6, 90, 20)
+
+
+@pytest.mark.parametrize("retries", [0, 4])
+def test_an_agent_turn_sends_exactly_the_configured_attempts(monkeypatch, retries):
+    """End to end through the real ``chat`` and transport: the unit tests of
+    ``CallState.from_config`` stay green even if this seam is unwired."""
+
+    import io
+    import urllib.error
+
+    from openai4s.config import LLMConfig
+    from openai4s.llm import chat
+    from openai4s.llm.models import TransportError
+
+    sends = []
+
+    def urlopen(*_args, **_kwargs):
+        sends.append(1)
+        raise urllib.error.HTTPError(
+            "https://x.invalid/v1", 429, "limited", {}, io.BytesIO(b"{}")
+        )
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    cfg = LLMConfig(
+        provider="chatgpt",
+        api_key="test-key",
+        model="test-model",
+        base_url="https://x.invalid/v1",
+        max_retries=retries,
+        retry_budget_s=600,
+    )
+
+    with pytest.raises(TransportError):
+        ChatModel(cfg, chat).complete(
+            [{"role": "user", "content": "hi"}], lambda _delta: None
+        )
+
+    assert len(sends) == retries + 1
+
+
 def test_chat_model_refreshes_callable_session_catalog_each_turn():
     first = ToolSpec("first", "", {"type": "object", "properties": {}})
     second = ToolSpec("second", "", {"type": "object", "properties": {}})

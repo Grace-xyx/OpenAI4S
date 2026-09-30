@@ -9283,12 +9283,29 @@ class SessionRunner:
                 "`OPENAI4S_LLM_API_KEY` in `.env` and restart."
             )
         if failure_code == "llm_rate_limited":
+            if getattr(exc, "output_committed", False):
+                return (
+                    "**模型服务正在限流。** 这一轮已经产生部分输出，系统为避免重复执行没有自动重试。"
+                    "请稍后在当前会话继续，或临时切换模型。"
+                    if zh
+                    else "**The model provider is rate-limiting requests.** This turn "
+                    "had already produced partial output, so it was not retried "
+                    "automatically to avoid repeating work. Continue this session "
+                    "later or temporarily switch models."
+                )
+            # The retry policy is the one knob a user on an RPM-limited relay
+            # can turn; name it the way the 408 branch names its timeout.
             return (
-                "**模型服务正在限流。** 系统已自动退避重试；若仍未恢复，请稍后在当前会话继续或更换模型。"
+                "**模型服务正在限流。** 系统已按重试策略自动退避重试；若仍未恢复，请稍后在当前会话继续或更换模型。"
+                "使用限制 RPM 的中转或公益服务时，可在 `.env` 调大 `OPENAI4S_LLM_MAX_RETRIES`、"
+                "`OPENAI4S_LLM_RETRY_BUDGET` 与 `OPENAI4S_LLM_RETRY_MAX_DELAY` 后重启。"
                 if zh
                 else "**The model provider is rate-limiting requests.** Automatic "
-                "backoff retries were attempted; if it still does not recover, "
-                "continue this session later or switch models."
+                "backoff retries were attempted under the retry policy; if it still "
+                "does not recover, continue this session later or switch models. "
+                "For a relay with a requests-per-minute limit, raise "
+                "`OPENAI4S_LLM_MAX_RETRIES`, `OPENAI4S_LLM_RETRY_BUDGET` and "
+                "`OPENAI4S_LLM_RETRY_MAX_DELAY` in `.env` and restart."
             )
         if status == 408:
             return (

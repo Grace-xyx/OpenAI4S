@@ -279,6 +279,32 @@ def test_local_resource_errors_use_safe_bilingual_projection(kind):
         assert friendly and "private" not in friendly
 
 
+@pytest.mark.parametrize("language", ["zh", "en"])
+def test_a_rate_limit_names_the_retry_knobs_and_never_claims_a_vetoed_retry(
+    language,
+):
+    """A user on an RPM-limited relay kept seeing "continue later" with no hint
+    that anything was tunable. And when output was already committed the
+    transport cannot replay, so "retries were attempted" would be false."""
+    from openai4s.llm.models import TransportError, llm_failure_code
+    from openai4s.server.gateway import SessionRunner
+
+    limited = TransportError("private upstream body", status=429, retryable=True)
+    assert llm_failure_code(limited) == "llm_rate_limited"
+    friendly = SessionRunner._friendly_error(limited, language=language)
+    assert "OPENAI4S_LLM_MAX_RETRIES" in friendly
+    assert "OPENAI4S_LLM_RETRY_BUDGET" in friendly
+    assert "private" not in friendly
+
+    committed = TransportError(
+        "private upstream body", status=429, retryable=True, output_committed=True
+    )
+    friendly = SessionRunner._friendly_error(committed, language=language)
+    assert "private" not in friendly
+    assert ("没有自动重试" if language == "zh" else "not retried") in friendly
+    assert ("已按重试策略" if language == "zh" else "were attempted") not in friendly
+
+
 @pytest.mark.parametrize("wire", ["review", "scientific"])
 @pytest.mark.parametrize(
     "attested,total",

@@ -821,3 +821,26 @@ def test_sse_error_then_http_stream_refusal_uses_remaining_compatibility_send(
         )
     assert sends == [True, True, False]
     assert raised.value.request_id == "final-json"
+
+
+@pytest.mark.parametrize("retries", [0, 5])
+def test_chat_sends_exactly_the_configured_attempts(monkeypatch, retries):
+    """host.llm, titles, the reviewer and the profile probe reach the
+    transport through ``chat()``'s own CallState, not the Agent runtime's."""
+    import dataclasses
+
+    sends = []
+
+    def urlopen(req, **kwargs):
+        sends.append(True)
+        raise _http_error(429)
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    cfg = dataclasses.replace(_cfg(), max_retries=retries, retry_budget_s=600)
+
+    with pytest.raises(TransportError) as raised:
+        chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _piece: None)
+
+    assert len(sends) == retries + 1
+    assert raised.value.status == 429

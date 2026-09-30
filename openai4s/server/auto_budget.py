@@ -202,9 +202,11 @@ def token_upper_bound_parts(
             pass  # injected adapters retain their explicit bound contract
     attempts = value("provider_attempt_upper_bound")
     if attempts is None:
-        from openai4s.llm.transport import DEFAULT_MAX_ATTEMPTS
+        # The same conversion ``CallState.from_config`` makes for this cfg, so
+        # a raised ``OPENAI4S_LLM_MAX_RETRIES`` is reserved for, not just sent.
+        from openai4s.llm.transport import max_attempts_for_retries
 
-        attempts = DEFAULT_MAX_ATTEMPTS
+        attempts = max_attempts_for_retries(value("max_retries"))
     if type(attempts) is not int or attempts <= 0:
         return None
     prompt = value("input_token_upper_bound")
@@ -265,9 +267,10 @@ def token_upper_bound(
     Otherwise, for the exact JSON request, UTF-8 bytes upper-bound ordinary
     tokenizer tokens; the per-node allowance covers provider wire wrappers and
     chat control tokens. The per-attempt value is multiplied by the transport's
-    audited attempt ceiling. Non-JSON request content fails closed before
-    provider spend. Model-catalog context sizes are deliberately not used: a
-    provider default is not proof about the exact configured endpoint.
+    attempt ceiling for this config (``max_retries + 1``). Non-JSON request
+    content fails closed before provider spend. Model-catalog context sizes
+    are deliberately not used: a provider default is not proof about the exact
+    configured endpoint.
 
     The arithmetic lives in :func:`token_upper_bound_parts`; this is its sum,
     plus the one case that has no parts -- an adapter publishing an audited
