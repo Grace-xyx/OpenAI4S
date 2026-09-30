@@ -148,6 +148,20 @@ describe("another tab", () => {
     expect(here.LANG).toBe("zh");
   });
 
+  it("while storage works, the preference is what storage holds", async () => {
+    const values: Record<string, string> = {};
+    storage(values);
+    browser(["zh-CN"]);
+    const here = await freshRuntime();
+    await here.setLang("en");
+    expect(here.langPreference()).toBe("en");
+
+    // Cleared from outside (another tab, site-data settings) with no event.
+    delete values["os-lang"];
+
+    expect(here.langPreference()).toBe("system");
+  });
+
   it("ignores changes to other keys", async () => {
     storage({ "os-lang": "en" });
     browser(["zh-CN"]);
