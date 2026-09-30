@@ -47,6 +47,7 @@ LIVE_SYSTEMS = frozenset({"B1", "J1", "J2"})
 CASE_FIELDS = ("id", "lang", "category", "query", "gold", "notes", "split")
 
 _LOADER: Any = None
+_LOADER_KEY: tuple[str, str] | None = None
 _GLOSSARY: tuple[dict[str, str], ...] | None = None
 
 
@@ -401,14 +402,28 @@ def score_predictions(
 
 
 def _skill_loader():
-    global _LOADER
-    if _LOADER is None:
-        from openai4s.config import Config
+    """The lexical baseline's loader for the data dir in effect *now*.
+
+    Cached per resolved data dir and skills root, never once per process. A
+    ``SkillLoader`` pins ``cfg.db_path`` and ``user-skills`` when it is built,
+    so a process-wide cache kept whichever data dir the first caller saw. The
+    offline suite's first caller was a module-scoped fixture, which pytest
+    instantiates before the per-test ``OPENAI4S_DATA_DIR`` redirect: every
+    later B0/B2 search then opened -- and against an older schema, migrated --
+    the developer's real ``~/.openai4s/openai4s.db``.
+    """
+
+    global _LOADER, _LOADER_KEY
+    from openai4s.config import Config
+
+    cfg = Config()
+    key = (str(cfg.data_dir.resolve()), str(cfg.skills_dir.resolve()))
+    if _LOADER is None or _LOADER_KEY != key:
         from openai4s.skills_loader import SkillLoader
 
-        loader = SkillLoader(cfg=Config())
+        loader = SkillLoader(cfg=cfg)
         loader.discover()
-        _LOADER = loader
+        _LOADER, _LOADER_KEY = loader, key
     return _LOADER
 
 

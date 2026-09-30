@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +21,10 @@ def cases() -> list[dict]:
     return ev.load_cases(CASES_PATH)
 
 
-@pytest.fixture(scope="module")
+# Function-scoped on purpose. A module-scoped fixture is instantiated before
+# conftest's per-test `isolated_openai4s_home`, so it resolved the developer's
+# real ~/.openai4s -- see `test_skill_names_are_read_under_this_tests_data_dir`.
+@pytest.fixture
 def skill_names() -> set[str]:
     return ev.known_skill_names()
 
@@ -66,6 +72,64 @@ def test_gold_names_exist_in_the_loader(
         if name not in skill_names
     ]
     assert missing == []
+
+
+def test_skill_names_are_read_under_this_tests_data_dir(
+    skill_names: set[str], tmp_path: Path
+) -> None:
+    """The loader behind ``skill_names`` sees this test's isolated data dir.
+
+    When the fixture was module-scoped it ran before the per-test redirect:
+    the developer's real ``user-skills`` fed the gold-name check, and the
+    loader it cached carried the real ``openai4s.db`` into every later search.
+    """
+
+    assert skill_names
+    loader = ev._LOADER  # the one the fixture built, not a fresh lookup
+    assert loader is not None
+    assert loader.cfg.data_dir == Path(os.environ["OPENAI4S_DATA_DIR"])
+    assert tmp_path in loader.cfg.data_dir.parents
+
+
+def test_lexical_baseline_follows_the_data_dir_in_effect_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loader built under an earlier data dir must not outlive a redirect.
+
+    The shape of the leak: the first loader was built before the suite's
+    isolation took effect, and every later search reused it. The earlier dir
+    here holds a database from a newer schema, so opening it at all raises
+    ``FutureSchemaError`` -- the failure a developer with a newer real
+    ``~/.openai4s/openai4s.db`` saw.
+    """
+
+    from openai4s.storage.migrations import SCHEMA_VERSION
+
+    monkeypatch.setattr(ev, "_LOADER", None)
+    monkeypatch.setattr(ev, "_LOADER_KEY", None, raising=False)
+    earlier = tmp_path / "earlier-data-dir"
+    earlier.mkdir()
+    future_db = earlier / "openai4s.db"
+    conn = sqlite3.connect(future_db)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+    before = future_db.read_bytes()
+
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(earlier))
+    stale = ev._skill_loader()
+    assert stale.cfg.data_dir == earlier
+
+    current = tmp_path / "current-data-dir"
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(current))
+    assert ev.lexical_top3("single-cell RNA-seq clustering")
+    loader = ev._skill_loader()
+    assert loader is not stale
+    assert loader.cfg.db_path == current / "openai4s.db"
+    assert loader.cfg.db_path.exists()  # the search's Store opened here
+    assert ev._skill_loader() is loader  # still cached within one data dir
+    assert future_db.read_bytes() == before
+    assert sorted(path.name for path in earlier.iterdir()) == ["openai4s.db"]
 
 
 def test_lock_file_matches_the_frozen_test_split(cases: list[dict]) -> None:
