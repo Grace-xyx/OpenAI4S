@@ -13405,11 +13405,12 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
 
         Its key becomes the shared Agent Plan Key, so Doubao Search stays the
         primary web search and DataPro stays authorized after the user selects
-        another model.  The first adoption -- no dedicated key saved before --
-        also switches DataPro's connector and Skill on, the same effect saving
-        the key on the DataPro card has.  A later rotation, or a switch between
-        two Agent Plans, only updates the key: a switch the user turned off
-        stays off.
+        another model.  The first adoption on this install also switches
+        DataPro's connector and Skill on, the same effect saving the key on the
+        DataPro card has.  Every later one -- a rotation, another Agent Plan,
+        a re-adoption after the copy was released -- only updates the key, so a
+        switch the user turned off stays off.  An adoption at daemon start uses
+        up that one chance without switching anything: nobody chose anything.
         """
 
         try:
@@ -13425,8 +13426,13 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 file=sys.stderr,
             )
             return False
-        if adopted != datapro.ADOPTED_FIRST or not enable_products:
-            return bool(adopted)
+        if not adopted:
+            return False
+        if store.get_setting(datapro.AGENT_PLAN_DEFAULTS_APPLIED_SETTING):
+            return True
+        store.set_setting(datapro.AGENT_PLAN_DEFAULTS_APPLIED_SETTING, "1")
+        if not enable_products:
+            return True
         try:
             if store.get_connector(datapro.CONNECTOR_ID):
                 store.set_connector_enabled(datapro.CONNECTOR_ID, True)

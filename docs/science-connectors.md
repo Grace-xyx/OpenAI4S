@@ -229,9 +229,10 @@ above. It is one fixed, managed MCP Streamable HTTP connector named
 bundled Skill. The endpoint is not user-selectable. The Agent Plan Key is stored
 through SecretBroker and resolved only as each outbound POST is assembled; an
 active Ark model key is reused only when the active provider is Ark. The first
-time an Agent Plan model's key is saved this way (no dedicated key yet), the
-connector and Skill are also switched on; a later rotation or another Agent
-Plan only updates the key and leaves both as the user last set them. A key the
+time an install saves an Agent Plan model's key this way, the connector and
+Skill are also switched on; every later save (a rotation, another Agent Plan,
+or a re-adoption after the copy was removed) only updates the key and leaves
+both as the user last set them. A key the
 user saved on a card is never replaced. Removing the source key — deleting or
 re-keying its profile, clearing the live key, or disconnecting Volcengine —
 removes the adopted copy too, unless another profile still holds it.

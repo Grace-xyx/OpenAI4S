@@ -31,6 +31,10 @@ AGENT_PLAN_KEY_SETTING = "agent_plan_key"
 AGENT_PLAN_KEY_ORIGIN_SETTING = "agent_plan_key_origin"
 _ADOPTED = "adopted"
 _SAVED = "saved"
+# Set once an adoption has had its one chance to switch DataPro on.  Without it
+# a released copy (a deleted profile) made the next adoption "first" again and
+# undid a switch the user had turned off in between.
+AGENT_PLAN_DEFAULTS_APPLIED_SETTING = "agent_plan_defaults_applied"
 _AGENT_PLAN_SCOPE = "agent_plan"
 _ARK_PROVIDER = "ark"
 _EXTRA_INFO = "openai4s"
@@ -678,6 +682,7 @@ def validate_query(value: Any) -> str:
 
 
 __all__ = [
+    "AGENT_PLAN_DEFAULTS_APPLIED_SETTING",
     "AGENT_PLAN_KEY_ORIGIN_SETTING",
     "AGENT_PLAN_KEY_SETTING",
     "AUTH_FAILURE_CODE",

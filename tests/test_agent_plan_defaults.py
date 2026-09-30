@@ -755,3 +755,51 @@ def test_an_env_owned_secret_store_adopts_nothing_and_stays_quiet(
     assert "Traceback" not in err
     # The environment owns the credential: there is nothing to report.
     assert "Agent Plan key not saved" not in err
+
+
+@pytest.mark.stubbed_backend
+def test_readopting_after_a_release_keeps_a_switch_the_user_turned_off(gateway):
+    _cfg_, store, call = gateway
+    first = _agent_plan_profile(call, name="Ark A")
+    second = _agent_plan_profile(
+        call, key="agent-plan-second-account-key", name="Ark B"
+    )
+    assert call("POST", f"/model-profiles/{first}/activate")[0] == 200
+    _switch_off_datapro(call)
+    assert call("POST", f"/model-profiles/{second}/activate")[0] == 200
+    _switch_to_another_model(call)
+    assert call("DELETE", f"/model-profiles/{second}")[0] == 200
+    assert datapro.explicit_agent_plan_key(store) == ""
+
+    # The copy was released, so this adoption finds no dedicated key -- but
+    # the one chance to switch DataPro on was used by the first plan.
+    assert call("POST", f"/model-profiles/{first}/activate")[0] == 200
+
+    assert datapro.explicit_agent_plan_key(store) == PLAN_KEY
+    state = _datapro_state(call)
+    assert state["connector_enabled"] is False
+    assert state["skill_enabled"] is False
+
+
+@pytest.mark.stubbed_backend
+def test_an_adoption_at_start_uses_up_the_one_time_switch(tmp_path, monkeypatch):
+    from openai4s import mcp_client
+
+    monkeypatch.setattr(mcp_client, "manager", lambda: _Manager())
+    cfg = _cfg(tmp_path)
+    gateway_mod._seed_datapro_connector(cfg)
+    store = get_store(cfg.db_path)
+    _live(store, "ark", PLAN_URL, PLAN_KEY)
+    store.set_connector_enabled(datapro.CONNECTOR_ID, False)
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    try:
+        call = _Route(cfg, runner)
+        assert datapro.explicit_agent_plan_key(store) == PLAN_KEY
+        # Rotating the live key later is an adoption too; it switches nothing.
+        rotated = "agent-plan-rotated-model-key"
+        body = {"provider": "ark", "base_url": PLAN_URL, "api_key": rotated}
+        assert call("POST", "/config/llm", body)[0] == 200
+        assert datapro.explicit_agent_plan_key(store) == rotated
+        assert _datapro_state(call)["connector_enabled"] is False
+    finally:
+        runner.close()
