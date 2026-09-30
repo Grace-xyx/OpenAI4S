@@ -338,6 +338,12 @@ s.settimeout(0.4)
 sys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)
 PROBE
 then
+  # app.out no longer contains the token. Ask the running daemon for the
+  # sign-in URL (token in single-user mode, /login in team mode) and fall
+  # back to the bare origin if that command fails. First start is unchanged
+  # and still opens $URL.
+  SIGN_IN_URL="$("$PY" -m openai4s url 2>/dev/null | tail -n 1)" || SIGN_IN_URL=""
+  URL="${SIGN_IN_URL:-$URL}"
   open_url
   exit 0
 fi

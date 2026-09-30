@@ -263,7 +263,11 @@ s.settimeout(0.4)
 sys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)
 PROBE
 then
-  exec /usr/bin/open "$URL"
+  # app.out no longer contains the token. Ask the running daemon for the
+  # sign-in URL (token in single-user mode, /login in team mode) and fall
+  # back to the bare origin if that command fails.
+  SIGN_IN_URL="$("$PY" -m openai4s url 2>/dev/null | tail -n 1)" || SIGN_IN_URL=""
+  exec /usr/bin/open "${SIGN_IN_URL:-$URL}"
 fi
 
 # -u: the log is the only way to diagnose a Finder-launched daemon, and block

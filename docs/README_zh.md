@@ -22,7 +22,7 @@
 | `backend-refactor-architecture.md` | backend refactor 的历史设计记录。它记的是当时定下的方案，不能用来证明当前已经端到端实现。 |
 | `compute.md` | 远程计算、BYOC provider 与 `host.fold` 的行为和限制。 |
 | `configuration.md` | provider、环境、daemon、内核与数据目录分别怎么配置。 |
-| `docker.md` | 双语容器指南：镜像、`compose.yaml`、Kubernetes 清单，以及通配绑定究竟改变了什么。它把容器与内核沙箱之间的取舍说清楚，而不是暗示容器能替代沙箱；写明镜像期望的 `OPENAI4S_SECRET_<SCOPE>_<NAME>` 推导变量名；也列出了今天真实存在的限制——没有 R、不支持 IPv6、没有访问日志、启动横幅里带着凭据。 |
+| `docker.md` | 双语容器指南：镜像、`compose.yaml`、Kubernetes 清单，以及通配绑定究竟改变了什么。它把容器与内核沙箱之间的取舍说清楚，而不是暗示容器能替代沙箱；写明镜像期望的 `OPENAI4S_SECRET_<SCOPE>_<NAME>` 推导变量名；也列出了今天真实存在的限制——没有 R、不支持 IPv6、没有访问日志。启动日志不含访问令牌；`docker exec … openai4s url` 会打印登录链接。 |
 | `jupyter.md` | 可选的 Jupyter 适配器：它对外暴露什么、执行边界划在哪里，以及相关的兼容说明。 |
 | `model-backend-bringup.md` | 模型 backend bring-up 与准入指南的英文版。 |
 | `model-backend-bringup_zh.md` | 框架级加速器路由、checkpoint staging、真实推理 canary 准入、connector 可移植性，以及依赖 checkpoint 的模型工具扩展契约。 |

@@ -140,6 +140,25 @@ def load_or_mint(data_dir: Path | str) -> str:
     )
 
 
+def startup_auth_banner(host: str, port: int, *, team_mode: bool) -> str:
+    """The startup notice for how to sign in. It never includes the access token.
+
+    Single-user mode names ``openai4s url``. Team mode names ``/login``,
+    because a ``?token=`` link is not a browser login there and would only
+    land in history. Host rendering matches ``openai4s.cli.main._url``: a
+    wildcard bind is ``localhost``, and an IPv6 address is bracketed. Kept
+    here so the gateway and the benchmark probe share one sentence.
+    """
+    reachable = "localhost" if host in ("0.0.0.0", "::", "") else host
+    authority = f"[{reachable}]" if ":" in reachable else reachable
+    if team_mode:
+        return f"[openai4s] team mode: sign in at http://{authority}:{port}/login"
+    return (
+        "[openai4s] access token required.\n"
+        "  sign in: run `openai4s url` on this host to print a sign-in link"
+    )
+
+
 def matches(supplied: str | None, expected: str | None) -> bool:
     """Constant-time comparison that tolerates absent values.
 
@@ -157,5 +176,6 @@ __all__ = [
     "load_or_mint",
     "matches",
     "read_token",
+    "startup_auth_banner",
     "token_path",
 ]

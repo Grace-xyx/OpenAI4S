@@ -6,9 +6,9 @@
 # A Dockerfile that no gate builds is not evidence of anything, and "the image
 # built" is not the claim worth making — the claim is that the daemon boots
 # unprivileged, answers its probe, refuses an unauthenticated caller, accepts
-# the token it minted, and comes back after being killed. Each of those is a
-# way containerization has broken this program specifically, so each is checked
-# here rather than assumed.
+# the token it minted, keeps that token out of container logs, and comes back
+# after being killed. Each of those is a way containerization has broken this
+# program specifically, so each is checked here rather than assumed.
 #
 # Needs a Docker daemon and a host `python3` (the probe speaks HTTP with it, so
 # that nothing here depends on curl). Both are checked before the build, since
@@ -141,6 +141,20 @@ case "$url" in
   *"$token") ok "\`openai4s url\` hands back the same token" ;;
   *) fail "\`openai4s url\` printed '${url}', which does not carry the minted token" ;;
 esac
+
+# Startup and daemon logs must not carry the access token. `fail` reprints
+# `docker logs`, which would echo the token on this exact failure, so a hit
+# exits on its own.
+logs="$(docker logs "$CONTAINER" 2>&1)" || {
+  echo "container smoke: FAIL — could not read container logs" >&2
+  exit 1
+}
+if printf '%s' "$logs" | grep -F -q -- "$token"; then
+  echo "container smoke: FAIL — container logs contain the access token" >&2
+  exit 1
+fi
+unset logs
+ok "container logs do not contain the access token"
 
 # The science stack is what makes the default image worth its size. Import it
 # rather than trusting that pip reported success.

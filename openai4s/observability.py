@@ -200,10 +200,12 @@ def redact_text(text: str) -> str:
             # once — and `_looks_opaque` deliberately answers False for it,
             # because redacting every URL would gut the log. The credential is
             # *inside*, in a query value or a path segment, so it needs the
-            # structural pass instead. The daemon's own startup banner is this
-            # exact shape: `listening at http://127.0.0.1:8760/?token=…`,
-            # printed to stdout, which every packaged launcher redirects into
-            # the file the support bundle collects.
+            # structural pass instead. A line of the shape
+            # `listening at http://127.0.0.1:8760/?token=…` used to be the
+            # daemon's startup banner on stdout, which packaged launchers
+            # redirect into the file the support bundle collects. Startup no
+            # longer prints the token; an older log or a cell can still emit
+            # that shape, and the redactor still has to catch it.
             out.append(word.replace(stripped, redact_url(stripped)))
         elif stripped and _looks_opaque(stripped):
             out.append(word.replace(stripped, f"<redacted:{fingerprint(stripped)}>"))

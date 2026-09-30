@@ -13,6 +13,8 @@
 #     `make_handler`: `local_auth.load_or_mint`), so the token — not
 #     the Host-header allowlist, which a wildcard bind necessarily turns off —
 #     is the control standing between a caller and endpoints that execute code.
+#     Startup logs do not include that token. `openai4s url` prints the
+#     sign-in link; team mode prints `/login` instead.
 #
 #   * It selects the environment-injection secret backend. Credentials arrive
 #     as `OPENAI4S_SECRET_<SCOPE>_<NAME>` and nothing credential-shaped is ever
@@ -20,9 +22,10 @@
 #     cannot have rather than a fallback from it. `auto` would fail closed here
 #     — correctly, since storing a key unprotected must be a decision — but
 #     failing closed also means a `SecretStoreUnavailable` traceback ahead of
-#     the startup banner on every boot, for a migration with nothing to
-#     migrate. Choosing the backend that a server actually has removes the
-#     noise without weakening anything. See docs/docker.md.
+#     the startup notice on every boot, for a migration with nothing to
+#     migrate. That notice does not include the access token. Choosing the
+#     backend that a server actually has removes the noise without weakening
+#     anything. See docs/docker.md.
 
 # --- build stage: turn this tree into the same wheel CI builds ---------------
 #

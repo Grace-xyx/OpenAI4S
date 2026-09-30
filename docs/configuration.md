@@ -156,7 +156,9 @@ paths share one seeder.
 
 `OPENAI4S_TOKEN` — the daemon access token, for CLI subcommands when the token
 file under the data dir is not readable by the calling user (a daemon running
-under another account). Normally unset: the CLI reads the file.
+under another account). The token lives in `<data_dir>/access-token` on the
+host the daemon runs on, and `openai4s url` prints a sign-in link that
+includes it. Normally unset: the CLI reads the file.
 
 `OPENAI4S_REQUIRE_TOKEN` — **removed in 0.3.0; ignored.** Up to 0.2.x, `0`
 turned the access-token gate off on a loopback bind. That opt-out was granted

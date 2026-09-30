@@ -435,8 +435,12 @@ def _unauthorized_page() -> bytes:
         "credential \u2014 even on this machine.</p>"
         "<p>Run this in a terminal and open the URL it prints:</p>"
         "<p><code>openai4s url</code></p>"
-        "<p>The same URL is printed on startup. Opening it once sets a cookie "
-        "for this browser; you will not need it again.</p>"
+        "<p>Opening that link once sets a cookie for this browser; you will "
+        "not need it again.</p>"
+        "<p>If you launched the desktop app, quit it and open it again. The "
+        "app opens a page that is already signed in.</p>"
+        "<p>In a container, run "
+        "<code>docker exec &lt;container&gt; openai4s url</code>.</p>"
     ).encode("utf-8")
 
 
@@ -573,8 +577,9 @@ _GUEST_AUTH_PATHS = frozenset(
 #: handed the file to whoever held the link -- precisely the thing that
 #: docstring promised could not happen. A subtractive rule re-opens that hole
 #: every time a non-API route is added; an allowlist fails closed, and the root
-#: page is the only URL this product ever hands to a person (`openai4s url`,
-#: the startup banner, the .app).
+#: page is the only URL this product ever hands to a person (`openai4s url`
+#: in single-user mode, and the .app). The startup notice names that command
+#: and does not carry the token.
 _BOOTSTRAP_PATHS = frozenset({"/", "/index.html"})
 
 
@@ -13719,18 +13724,19 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
     _auth_token = local_auth.load_or_mint(cfg.data_dir)
     # stderr and flushed, like every other startup notice here. On plain
     # `print` this went to stdout, which is block-buffered whenever it is not a
-    # TTY -- so under nohup, systemd, Docker or any redirect to a log file, the
-    # one line a user needs in order to open their own daemon sat in a buffer
-    # and did not appear. It showed up in a terminal, which is exactly why it
-    # survived: the configuration that hides it is the one nobody develops in.
-    # Rendered, not echoed. A wildcard bind names interfaces rather than an
-    # address, so `http://0.0.0.0:8760/` is a URL nothing dials -- and a
-    # container has no other way to be reachable, which makes the one line
-    # an operator needs the one line that was wrong for them.
-    _reachable = "localhost" if cfg.host in ("0.0.0.0", "::", "") else cfg.host
+    # TTY -- so under nohup, systemd, Docker or any redirect to a log file the
+    # notice sat in a buffer and did not appear. The banner never includes the
+    # access token: single-user mode names `openai4s url`, and team mode names
+    # `/login`. Rendered, not echoed. A wildcard bind names interfaces rather
+    # than an address, so `http://0.0.0.0:8760/` is a URL nothing dials -- and
+    # a container has no other way to be reachable, which makes a team-mode
+    # `/login` line that still says `0.0.0.0` the one line that is wrong.
     print(
-        f"[openai4s] access token required.\n"
-        f"  open: http://{_reachable}:{cfg.port}/?token={_auth_token}",
+        local_auth.startup_auth_banner(
+            cfg.host,
+            cfg.port,
+            team_mode=bool(getattr(cfg, "team_mode", False)),
+        ),
         file=sys.stderr,
         flush=True,
     )
@@ -14800,13 +14806,13 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                         # cookie and a script can send the header.
                         self.close_connection = True
                         if _wants_html(self.headers) and method == "GET":
-                            # A person, in a browser, who opened the URL the CLI
-                            # and the .app print. They used to get raw JSON —
-                            # and `/static/app.js` is behind this same gate, so
-                            # the SPA cannot load and cannot offer a way in. The
-                            # only working URL went to stderr, which the .app
-                            # redirects into a log file. Say what to do, in the
-                            # one place they are actually looking.
+                            # A person, in a browser, who opened a page without
+                            # a session. They used to get raw JSON — and
+                            # `/static/app.js` is behind this same gate, so the
+                            # SPA cannot load and cannot offer a way in.
+                            # Startup logs do not carry the token. The page
+                            # names `openai4s url`, and the desktop-app and
+                            # container recoveries that actually work.
                             self._send(
                                 401, _unauthorized_page(), "text/html; charset=utf-8"
                             )
@@ -14814,8 +14820,9 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                         self._json(
                             {
                                 "error": (
-                                    "unauthorized — open the printed URL once to "
-                                    f"set the cookie, or send {_TOKEN_HEADER}"
+                                    "unauthorized — run `openai4s url` and open "
+                                    "that link once to set the cookie, or send "
+                                    f"{_TOKEN_HEADER}"
                                 )
                             },
                             401,

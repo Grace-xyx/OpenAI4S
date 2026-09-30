@@ -563,7 +563,10 @@ def test_acceptance_ketcher_loopback_probe_repeats_without_stream_leak(
         )
         assert observed["http_status"] == 200
         assert observed["route"] == "/ketcher"
-        assert "credential banner was captured and verified" in evidence[0].detail
+        assert (
+            "startup banner was captured and verified to contain no access token"
+            in evidence[0].detail
+        )
         assert "read-only env-injection backend" in evidence[0].detail
         assert not (run_root / "ketcher-route-data" / "access-token").exists()
 

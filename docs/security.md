@@ -440,9 +440,11 @@ word and a URL has no spaces, so the whole thing arrives as one word — and
 `http://`, because fingerprinting every URL would gut the log. The secret is
 *inside*, in a query value or a path segment, so URL-shaped words go through
 `observability.redact_url`, which keeps the parameter name as provenance and
-fingerprints the value. The daemon's own startup banner is exactly this shape —
-`listening at http://127.0.0.1:8760/?token=…`, printed to stdout, which the
-launchers redirect into `app.out`, which the bundle collects.
+fingerprints the value. Daemon startup no longer prints that shape: the
+listening line and the gateway notice omit the access token. The packaged
+launchers still redirect stdout and stderr into `app.out`, which the bundle
+collects. A `?token=` URL in the log, from an older line or from a cell, is
+still fingerprinted.
 
 What leaves in the bundle is decided **deny-by-default**, and that is a
 different layer from the redaction above. `redact`/`redact_text`/
@@ -857,9 +859,11 @@ token gate below still applies to it. Details:
 [Windows / WSL2 guide](windows-wsl.md).
 
 The server requires an access token by default, on loopback too. It is minted
-once under the data dir (`access-token`, mode 0600), survives restarts, and is
-printed at startup as a URL you open once to set the cookie. Scripts send it as
-`Authorization: Bearer <token>` or `X-OpenAI4S-Token`.
+once under the data dir (`access-token`, mode 0600) and survives restarts.
+Startup logs do not include it. Run `openai4s url` on the daemon's host to
+print the sign-in URL — `http://<host>:<port>/?token=…` in single-user mode,
+`/login` in team mode — and open that single-user URL once to set the cookie.
+Scripts send the token as `Authorization: Bearer <token>` or `X-OpenAI4S-Token`.
 
 The `?token=` form in that startup URL works for one thing only: opening the
 app at `/`. Every other path refuses it — including `/preview/<id>`, which
