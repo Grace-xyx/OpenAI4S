@@ -751,4 +751,7 @@ def test_an_env_owned_secret_store_adopts_nothing_and_stays_quiet(
     finally:
         runner.close()
 
-    assert "Traceback" not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    # The environment owns the credential: there is nothing to report.
+    assert "Agent Plan key not saved" not in err
