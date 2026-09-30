@@ -33,6 +33,8 @@ import os
 import re
 import threading
 import urllib.parse
+from collections.abc import Mapping
+from typing import Any
 
 # --------------------------------------------------------------------------- #
 #  Canonical allowlist — the single source of truth for both enforcement and
@@ -370,3 +372,92 @@ def scan_command(command: str) -> str | None:
         if not domain_allowed(host):
             return host
     return None
+
+
+EGRESS_BOUNDARY_UNAVAILABLE = "egress_boundary_unavailable"
+
+_BOUNDARY_REASON = (
+    "OPENAI4S_EGRESS=allowlist admits a new Cell only when this kernel's OS "
+    "sandbox has proven it blocks raw network: macOS Seatbelt or Linux "
+    "bubblewrap, OPENAI4S_KERNEL_SANDBOX=enforce, enforced, self-test passed, "
+    "and network_policy blocked. Set OPENAI4S_EGRESS=off to admit Cells "
+    "without that proof. Remote kernels are always refused under allowlist."
+)
+
+_BOUNDARY_REMEDY = (
+    "Use macOS Seatbelt or Linux bubblewrap and set "
+    "OPENAI4S_KERNEL_SANDBOX=enforce so the kernel self-test reports "
+    "enforced, self_test_passed, and network_policy blocked.",
+    "Set OPENAI4S_EGRESS=off to admit Cells without a proven raw-network block.",
+    "Remote kernels are refused for as long as OPENAI4S_EGRESS=allowlist.",
+)
+
+_SANDBOX_PROJECTION_KEYS = (
+    "mode",
+    "state",
+    "backend",
+    "enforced",
+    "self_test_passed",
+    "network_policy",
+)
+
+
+class EgressBoundaryUnavailable(RuntimeError):
+    """Allowlist mode cannot prove this kernel blocks raw network."""
+
+    stable_reason = _BOUNDARY_REASON
+    stable_remedy = _BOUNDARY_REMEDY
+
+    def __init__(self, decision: Mapping[str, Any]) -> None:
+        payload = dict(decision)
+        code = str(payload.get("code") or EGRESS_BOUNDARY_UNAVAILABLE)
+        reason = str(payload.get("reason") or self.stable_reason)
+        payload["code"] = code
+        payload["reason"] = reason
+        self.code = code
+        self.decision = payload
+        super().__init__(f"{code}: {reason}")
+
+
+def cell_admission_refusal(sandbox_status: Any) -> dict[str, Any] | None:
+    """Refuse a new Cell unless allowlist mode has a proven raw-network block.
+
+    ``None`` means the Cell may proceed: egress is off, or ``boundary_holds``
+    is true. Any other posture returns a decision dict and does not raise.
+    """
+
+    if egress_mode() != "allowlist":
+        return None
+    from openai4s.security.sandbox import boundary_holds
+
+    if boundary_holds(sandbox_status):
+        return None
+    return _boundary_decision(sandbox_status)
+
+
+def _project_sandbox(sandbox_status: Any) -> dict[str, Any]:
+    projected = {key: None for key in _SANDBOX_PROJECTION_KEYS}
+    values: Mapping[str, Any] | None
+    if isinstance(sandbox_status, Mapping):
+        values = sandbox_status
+    elif sandbox_status is not None and hasattr(sandbox_status, "to_dict"):
+        raw = sandbox_status.to_dict()
+        values = raw if isinstance(raw, Mapping) else None
+    else:
+        values = None
+    if values is None:
+        return projected
+    for key in _SANDBOX_PROJECTION_KEYS:
+        if key in values:
+            projected[key] = values[key]
+    return projected
+
+
+def _boundary_decision(sandbox_status: Any) -> dict[str, Any]:
+    return {
+        "code": EGRESS_BOUNDARY_UNAVAILABLE,
+        "reason": _BOUNDARY_REASON,
+        "egress_mode": egress_mode(),
+        "sandbox": _project_sandbox(sandbox_status),
+        "remedy": list(_BOUNDARY_REMEDY),
+    }

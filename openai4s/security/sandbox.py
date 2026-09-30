@@ -101,11 +101,29 @@ class SandboxStatus:
     def host_only_boundary_holds(self) -> bool:
         """True when this kernel cannot raw-socket and Host is the network path."""
 
-        return (
-            self.enforced is True
-            and self.self_test_passed is True
-            and self.network_policy == "blocked"
-        )
+        return boundary_holds(self)
+
+
+def boundary_holds(status: Mapping[str, Any] | SandboxStatus | None) -> bool:
+    """True only when a kernel has proven it blocks raw network.
+
+    A mapping, a ``SandboxStatus``, or ``None`` are all accepted. Remote
+    kernels report ``backend == "remote"`` and are never treated as proven.
+    """
+
+    if isinstance(status, SandboxStatus):
+        values: Mapping[str, Any] = status.to_dict()
+    elif isinstance(status, Mapping):
+        values = status
+    else:
+        return False
+    if values.get("backend") == "remote":
+        return False
+    return (
+        values.get("enforced") is True
+        and values.get("self_test_passed") is True
+        and values.get("network_policy") == "blocked"
+    )
 
 
 @dataclass(frozen=True)

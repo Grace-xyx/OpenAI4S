@@ -9,6 +9,7 @@ There is no test_security.py in this tree, so this mirrors the
 test_permissions.py (broker + real HostDispatcher) and test_webtools.py styles.
 """
 
+import json
 import threading
 import time
 
@@ -472,3 +473,150 @@ def test_sdk_facade_sends_request_network_access(monkeypatch):
     # available on the analysis kernel too (not a control-plane-only symbol)
     ah = build_host(lambda m, a: None, mode="python")
     assert hasattr(ah, "request_network_access")
+
+
+def _proven_status(**overrides):
+    from openai4s.security.sandbox import SandboxStatus
+
+    fields = {
+        "mode": "enforce",
+        "state": "enabled",
+        "backend": "seatbelt",
+        "enforced": True,
+        "self_test_passed": True,
+        "network_policy": "blocked",
+        "workspace": "/tmp/openai4s-should-not-leak",
+        "temp_dir": "/tmp/openai4s-private-should-not-leak",
+        "detail": "measured",
+        "warning": None,
+    }
+    fields.update(overrides)
+    return SandboxStatus(**fields)
+
+
+def _assert_refusal_shape(decision):
+    assert decision["code"] == egress.EGRESS_BOUNDARY_UNAVAILABLE
+    assert decision["egress_mode"] == "allowlist"
+    assert set(decision) == {
+        "code",
+        "reason",
+        "egress_mode",
+        "sandbox",
+        "remedy",
+    }
+    assert set(decision["sandbox"]) == {
+        "mode",
+        "state",
+        "backend",
+        "enforced",
+        "self_test_passed",
+        "network_policy",
+    }
+    rendered = json.dumps(decision)
+    assert "should-not-leak" not in rendered
+    assert "workspace" not in decision["sandbox"]
+    assert isinstance(decision["remedy"], list)
+    assert decision["remedy"]
+    assert "Seatbelt" in decision["reason"] or "bubblewrap" in decision["reason"]
+    assert "OPENAI4S_KERNEL_SANDBOX=enforce" in decision["reason"]
+    assert "OPENAI4S_EGRESS=off" in decision["reason"]
+    raised = egress.EgressBoundaryUnavailable(decision)
+    assert str(raised) == f"{decision['code']}: {decision['reason']}"
+    assert raised.code == decision["code"]
+    assert raised.decision["code"] == decision["code"]
+
+
+def test_cell_admission_is_skipped_when_egress_is_off():
+    assert egress.cell_admission_refusal(None) is None
+    assert egress.cell_admission_refusal({"network_policy": "not_enforced"}) is None
+
+
+def test_cell_admission_allows_a_proven_boundary(monkeypatch):
+    _allowlist(monkeypatch)
+    status = _proven_status()
+    assert egress.cell_admission_refusal(status) is None
+    assert egress.cell_admission_refusal(status.to_dict()) is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"enforced": False, "self_test_passed": True, "network_policy": "not_enforced"},
+        {
+            "enforced": True,
+            "self_test_passed": True,
+            "network_policy": "raw_allowed",
+            "backend": "seatbelt",
+            "workspace": "/tmp/openai4s-should-not-leak",
+        },
+        {
+            "enforced": False,
+            "self_test_passed": False,
+            "network_policy": "unproven",
+            "backend": "remote",
+            "reason": "remote node /tmp/openai4s-should-not-leak",
+        },
+        {
+            "enforced": True,
+            "self_test_passed": None,
+            "network_policy": "blocked",
+            "backend": "seatbelt",
+        },
+        {},
+        object(),
+        "not-a-mapping",
+        3,
+    ],
+)
+def test_cell_admission_refuses_an_unproven_boundary(monkeypatch, status):
+    _allowlist(monkeypatch)
+    decision = egress.cell_admission_refusal(status)
+    assert decision is not None
+    _assert_refusal_shape(decision)
+    if isinstance(status, dict):
+        for key in decision["sandbox"]:
+            assert decision["sandbox"][key] == status.get(key)
+    else:
+        assert set(decision["sandbox"].values()) == {None}
+
+
+def test_cell_admission_follows_a_live_mode_switch(monkeypatch):
+    degraded = {
+        "mode": "auto",
+        "state": "degraded",
+        "backend": None,
+        "enforced": False,
+        "self_test_passed": False,
+        "network_policy": "not_enforced",
+    }
+    assert egress.cell_admission_refusal(degraded) is None
+    _allowlist(monkeypatch)
+    refused = egress.cell_admission_refusal(degraded)
+    assert refused is not None
+    assert refused["sandbox"]["network_policy"] == "not_enforced"
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    assert egress.cell_admission_refusal(degraded) is None
+
+
+def test_boundary_holds_rejects_a_remote_backend_on_sandbox_status():
+    from openai4s.security.sandbox import boundary_holds
+    from openai4s.server.skill_network_admission import host_only_boundary_holds
+
+    proven = _proven_status()
+    assert boundary_holds(proven) is True
+    assert proven.host_only_boundary_holds() is True
+    remote = _proven_status(backend="remote", network_policy="blocked")
+    assert boundary_holds(remote) is False
+    assert remote.host_only_boundary_holds() is False
+    assert host_only_boundary_holds(proven.to_dict()) is True
+    assert host_only_boundary_holds(remote.to_dict()) is False
+    assert host_only_boundary_holds(None) is False
+    assert host_only_boundary_holds(proven) is False
+    assert boundary_holds(None) is False
+    assert boundary_holds(object()) is False
+
+
+def test_allowlist_still_permits_a_catalog_domain(monkeypatch):
+    _allowlist(monkeypatch)
+    assert egress.check_url("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/") is None
+    assert egress.domain_allowed("eutils.ncbi.nlm.nih.gov") is True
