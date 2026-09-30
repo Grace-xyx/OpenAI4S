@@ -1138,9 +1138,6 @@ class Agent:
         """
 
         specs = tool_catalog.specs_for(messages)
-        store = getattr(self.dispatcher, "store", None)
-        if store is None or not self.frame_id:
-            return with_finalize_response(specs)
         reachable: dict[str, bool] = {}
         visible = [
             spec
@@ -1157,13 +1154,21 @@ class Agent:
         """Whether this run's projection offers ``tool`` to the model.
 
         The one predicate behind both the provider ``tools=`` list and what
-        ``search_capabilities`` calls visible. A tool that needs no approval
-        is always offered; an approval-required one only when some approval
-        path in this process could allow its method. ``_reachable`` memoizes
-        per method within one projection.
+        ``search_capabilities`` calls visible. A tool that needs the Web
+        gateway's native capture transaction is never offered here. Otherwise
+        a tool that needs no approval is always offered; an approval-required
+        one only when some approval path in this process could allow its
+        method. ``_reachable`` memoizes per method within one projection.
         """
 
-        if tool is None or not getattr(tool, "requires_approval", False):
+        if tool is None:
+            return True
+        if getattr(tool, "requires_native_capture", False):
+            # Only the Web gateway binds a native Artifact capture transaction.
+            # This Agent (the CLI root or a delegated child) never does, so the
+            # Host refuses every such call whatever the approval posture.
+            return False
+        if not getattr(tool, "requires_approval", False):
             return True
         store = getattr(self.dispatcher, "store", None)
         if store is None or not self.frame_id:

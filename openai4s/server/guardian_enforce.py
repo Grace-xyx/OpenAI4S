@@ -121,8 +121,8 @@ def _flag(value: str) -> bool:
 
 
 # Permission targets are not uniformly paths: glob/grep target their pattern,
-# and web_download targets its domain. Only inspect the argument that the file
-# tool will actually resolve or open.
+# and web_download/science_import_dataset target a domain. Only inspect the
+# argument that the file tool will actually resolve or open.
 _FILE_PATH_ARGUMENTS = {
     "read_file": "path",
     "write_file": "path",
@@ -131,6 +131,7 @@ _FILE_PATH_ARGUMENTS = {
     "grep": "path",
     "list_dir": "path",
     "web_download": "path",
+    "science_import_dataset": "path",
     "save_artifact": "path",
     "materialise_artifact": "filename",
 }
@@ -146,7 +147,9 @@ _DIRECT_PATH_TARGET_TOOLS = frozenset(
 # These tools write to a path that is not their permission target. If their
 # canonical arguments do not expose that path, an unattended reviewer cannot
 # safely infer it from the domain/version target and must fail closed.
-_PATH_REQUIRED_FOR_REVIEW = frozenset({"web_download", "materialise_artifact"})
+_PATH_REQUIRED_FOR_REVIEW = frozenset(
+    {"web_download", "science_import_dataset", "materialise_artifact"}
+)
 # ``grep`` discovers and opens files only after approval. A base directory is
 # not enough to apply the unattended basename tier to every eventual read, so
 # its data-dependent file set needs a human review.
@@ -171,7 +174,7 @@ def _file_path_argument(
             return str(value)
     # These tools use their path itself as the permission target, so it is a
     # safe fail-closed fallback when canonical arguments are missing/malformed.
-    # Never do this for glob/grep (pattern targets) or web_download (domain).
+    # Never do this for glob/grep (pattern targets) or domain-targeted downloads.
     if tool in _DIRECT_PATH_TARGET_TOOLS and target:
         return target
     return None
