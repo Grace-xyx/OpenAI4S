@@ -927,7 +927,7 @@ describe("delegation evidence panel", () => {
         ],
       };
       const panel = renderDelegationPanel();
-      const text = panel.textContent;
+      const text = panel.textContent ?? "";
       expect(panel.querySelectorAll(".delegation-evidence-scope")).toHaveLength(1);
       expect(panel.querySelector(".delegation-evidence-scope")?.textContent).toBe(scope);
       expect(text.split(scope).length - 1).toBe(1);
