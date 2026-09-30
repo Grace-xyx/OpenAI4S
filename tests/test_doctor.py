@@ -894,3 +894,59 @@ def test_an_enforced_allowlist_is_reported_as_such(cfg, monkeypatch):
     check = _by_name(doctor.report(cfg))["connectors"]
     assert check["status"] == doctor.OK
     assert "allowlist enforced" in check["detail"]
+
+
+def test_allowlist_fails_isolation_when_the_sandbox_is_off(cfg, monkeypatch):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "off")
+    check = _by_name(doctor.report(cfg))["isolation"]
+    assert check["status"] == doctor.FAIL
+    assert check["detail"].startswith("egress_boundary_unavailable:")
+    assert "OPENAI4S_EGRESS=off" in check["remedy"]
+    assert "Seatbelt" in check["remedy"] or "bubblewrap" in check["remedy"]
+
+
+def test_allowlist_keeps_a_proven_sandbox_and_fails_raw_network(cfg, monkeypatch):
+    from openai4s.security.sandbox import KernelSandbox, SandboxStatus
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "enforce")
+
+    def proven(workspace, **_kwargs):
+        return KernelSandbox(
+            status=SandboxStatus(
+                mode="enforce",
+                state="enabled",
+                backend="seatbelt",
+                enforced=True,
+                self_test_passed=True,
+                network_policy="blocked",
+                workspace=str(workspace),
+                temp_dir=None,
+                detail="proven",
+            )
+        )
+
+    monkeypatch.setattr("openai4s.security.sandbox.create_kernel_sandbox", proven)
+    check = _by_name(doctor.report(cfg))["isolation"]
+    assert check["status"] == doctor.OK
+
+    def raw_allowed(workspace, **_kwargs):
+        return KernelSandbox(
+            status=SandboxStatus(
+                mode="enforce",
+                state="enabled",
+                backend="seatbelt",
+                enforced=True,
+                self_test_passed=True,
+                network_policy="raw_allowed",
+                workspace=str(workspace),
+                temp_dir=None,
+                detail="raw network escape hatch",
+            )
+        )
+
+    monkeypatch.setattr("openai4s.security.sandbox.create_kernel_sandbox", raw_allowed)
+    check = _by_name(doctor.report(cfg))["isolation"]
+    assert check["status"] == doctor.FAIL
+    assert "egress_boundary_unavailable" in check["detail"]

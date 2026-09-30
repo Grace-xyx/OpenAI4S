@@ -1718,3 +1718,156 @@ def test_raw_network_environment_flag_is_reflected_in_status(tmp_path, monkeypat
         assert "--unshare-net" not in sandbox.wrap_command(["/bin/true"])
     finally:
         sandbox.close()
+
+
+_BLOCKED_ERRNOS = {1, 13, 45, 65, 100, 101, 113}
+
+
+def _enforce_boundary_available() -> bool:
+    import tempfile
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="openai4s-enforce-probe-") as probe:
+            sandbox = create_kernel_sandbox(probe, mode="enforce")
+            try:
+                status = sandbox.status
+                return bool(
+                    status.enforced is True
+                    and status.self_test_passed is True
+                    and status.network_policy == "blocked"
+                )
+            finally:
+                sandbox.close()
+    except Exception:
+        return False
+
+
+_ENFORCE_BOUNDARY = _enforce_boundary_available()
+
+
+def _connection_was_blocked(info: object) -> bool:
+    if not isinstance(info, dict) or info.get("connected"):
+        return False
+    if info.get("cls") == "PermissionError":
+        return True
+    errno = info.get("errno")
+    return errno in _BLOCKED_ERRNOS
+
+
+@pytest.mark.skipif(
+    not _ENFORCE_BOUNDARY,
+    reason="this machine cannot enforce a kernel sandbox that blocks raw network",
+)
+def test_allowlist_enforce_runs_a_cell_and_blocks_raw_network(monkeypatch, tmp_path):
+    """A proven sandbox is admitted, and the Cell's own sockets stay blocked.
+
+    Removing the admission gate leaves this green: the OS boundary, not the
+    gate, is what makes the connect fail. The refusal tests cover the gate.
+    """
+
+    import json as json_mod
+
+    from openai4s.config import Config, LLMConfig
+    from openai4s.host_dispatch import build_dispatcher
+
+    monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "enforce")
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    cfg = Config(
+        data_dir=tmp_path / ".data",
+        llm=LLMConfig(provider="deepseek", api_key="test-only"),
+    )
+    dispatcher = build_dispatcher(cfg, workspace=tmp_path)
+    frame_id = dispatcher.store.new_frame(kind="turn")
+    dispatcher.frame_id = frame_id
+    dispatcher.store.set_permission_rule(
+        scope="conversation",
+        scope_id=frame_id,
+        tool="bash",
+        pattern="*",
+        decision="allow",
+    )
+    cell = """
+import json, socket, sys
+sock_info = {"connected": True}
+try:
+    sock = socket.socket()
+    sock.settimeout(2)
+    sock.connect(("192.0.2.1", 9))
+except OSError as exc:
+    sock_info = {"errno": exc.errno, "cls": type(exc).__name__}
+finally:
+    try:
+        sock.close()
+    except Exception:
+        pass
+open("probe_net.py", "w", encoding="utf-8").write(
+    "import json, socket\\n"
+    "try:\\n"
+    "    sock = socket.socket()\\n"
+    "    sock.settimeout(2)\\n"
+    "    sock.connect(('192.0.2.1', 9))\\n"
+    "    print(json.dumps({'connected': True}))\\n"
+    "except OSError as exc:\\n"
+    "    print(json.dumps({'errno': exc.errno, 'cls': type(exc).__name__}))\\n"
+    "finally:\\n"
+    "    try:\\n"
+    "        sock.close()\\n"
+    "    except Exception:\\n"
+    "        pass\\n"
+)
+bash = host.bash(sys.executable + " probe_net.py")
+print(json.dumps({
+    "socket": sock_info,
+    "bash_exit": bash.get("exit_code"),
+    "bash_stdout": bash.get("stdout") or "",
+}))
+"""
+    with Kernel(dispatcher=dispatcher, cwd=str(tmp_path)) as kernel:
+        result = kernel.execute(cell, origin="agent")
+    assert result["error"] is None, result
+    payload = json_mod.loads(result["stdout"].strip().splitlines()[-1])
+    assert _connection_was_blocked(payload["socket"]), payload
+    child = json_mod.loads(payload["bash_stdout"].strip().splitlines()[-1])
+    assert _connection_was_blocked(child), payload
+
+
+@pytest.mark.skipif(
+    not _ENFORCE_BOUNDARY,
+    reason="this machine cannot enforce a kernel sandbox that blocks raw network",
+)
+def test_allowlist_enforce_blocks_raw_network_from_r(monkeypatch, tmp_path):
+    from openai4s.kernel.r_kernel import resolve_r_interpreter, spawn_r_kernel
+
+    if not resolve_r_interpreter():
+        pytest.skip("Rscript is not available")
+    monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "enforce")
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    cell = """
+msg <- tryCatch({
+  con <- socketConnection(host="192.0.2.1", port=9, blocking=TRUE, open="rb", timeout=1)
+  close(con)
+  "connected"
+}, error=function(e) conditionMessage(e))
+cat(msg, "\\n")
+"""
+    kernel = spawn_r_kernel(cwd=str(tmp_path))
+    try:
+        result = kernel.execute(cell, origin="agent")
+    finally:
+        kernel.shutdown()
+    assert not result.get("error"), result
+    text = str(result.get("stdout") or "").lower()
+    assert "connected" not in text
+    assert "timed out" not in text and "timeout" not in text
+    assert any(
+        marker in text
+        for marker in (
+            "permission",
+            "unreachable",
+            "denied",
+            "cannot",
+            "failed",
+            "refused",
+            "not permitted",
+        )
+    ), text

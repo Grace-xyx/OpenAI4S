@@ -166,6 +166,10 @@ for what the gate stands in front of.
 
 `OPENAI4S_NOTEBOOK_REPL` (`off`) — set to `1` to re-enable the web UI's in-Notebook developer REPL (arbitrary kernel code from the right panel); off by default, so the Notebook is a read-only execution trace (see [Security](security.md)).
 
+`OPENAI4S_EGRESS` (`off`) — `allowlist` applies the host domain allowlist to `web_fetch`, `web_search`, and authorized `host.bash`. In that mode a new Python or R Cell is also admitted only when the kernel sandbox is enforced, its self-test passed, and `network_policy` is `blocked`. Anything else, including a remote kernel, is refused before the Cell runs with `egress_boundary_unavailable`. `off` leaves Cell execution unchanged. See [Security](security.md).
+
+`OPENAI4S_KERNEL_SANDBOX` (`auto`) — `enforce` fails closed when Seatbelt or bubblewrap cannot prove the boundary; `auto` warns and continues unsandboxed; `off` disables the OS boundary. Under `OPENAI4S_EGRESS=allowlist`, Cell admission needs the enforced, self-tested, `network_policy=blocked` posture. `OPENAI4S_KERNEL_ALLOW_RAW_NETWORK=1` reports `raw_allowed` and is refused while allowlist is on.
+
 `OPENAI4S_WEBUI` — unset (the default) serves the committed Vite workbench (`openai4s/server/webui/dist/index.html`) as the SPA shell at `/` and at deep links such as `/projects/{pid}/frames/{fid}`. Set to exactly `legacy` to serve the frozen `webui/index.html` + `app.js` escape hatch. Any other value (including `1` / `next` / `true`) keeps the new UI, so a typo cannot silently fall back. `/static/dist/` is ordinary static files under `WEBUI_DIR` either way. The retired `OPENAI4S_WEBUI_NEXT` name is ignored.
 
 ## Auto Mode rollout flags

@@ -142,7 +142,7 @@ inside the sandbox.
 | **`dlopen` audit hook** | `OPENAI4S_SAFETY_AUDIT_HOOK` (on) | `sys.addaudithook` refuses `ctypes.dlopen` of a `.so` from an agent-writable path |
 | **Biosecurity screener** | `OPENAI4S_BIOSECURITY` (on) | trajectory screener (ALLOW / ESCALATE / BLOCK) on biosecurity-relevant content |
 | **Injection detector** | `OPENAI4S_INJECTION_SCAN` (on) | annotates tool-returned content (web / PDF / MCP) so the model treats it as **data, not instructions** |
-| **Egress allowlist** | `OPENAI4S_EGRESS` (`off`) | application policy for `web_fetch` / `web_search` and authorized `host.bash`; the OS sandbox is the separate raw-network boundary |
+| **Egress allowlist** | `OPENAI4S_EGRESS` (`off`) | application policy for `web_fetch` / `web_search` and authorized `host.bash`; the OS sandbox is the separate raw-network boundary. Under allowlist a new Cell is admitted only when that sandbox has proven it blocks raw network (`enforced`, self-test passed, and `network_policy` `blocked`); otherwise the Cell is refused before it runs, with `egress_boundary_unavailable`. A remote kernel is always refused |
 | **Fake-IP DNS bridge** | `OPENAI4S_ALLOW_FAKE_IP_DNS` (`off`) | accepts RFC 2544 `198.18.0.0/15` proxy answers only for a hostname in the built-in/user-approved egress catalog; IP literals and every other private/metadata range remain blocked |
 | **Remote-compute confinement** | `OPENAI4S_COMPUTE_CONFINEMENT` (`auto`) | the provider helper runs inside a real OS boundary — Seatbelt on macOS, bubblewrap on Linux — that puts the user's home out of reach — a `tmpfs` over it on Linux; on macOS a denial of `file-read-data` *and* `file-read-xattr`, since an xattr on macOS routinely holds the file's own bytes and `getxattr` was serving what `open` refused — confines writes to the job's stage directory, and (macOS) denies the keychain services, because the credential is read *by securityd* and no file rule covers that. `available()` proves it by establishing a boundary and probing it, not by `which`; the helper re-checks from inside before reading a credential and exits 71 without acting if it does not hold. **The network is deliberately not isolated** (`network_isolated: false`) — calling a provider's REST API is the helper's whole job, so outbound egress is a separate capability and is not enabled. `enforce` refuses `byoc:*` ops only where no boundary can be established: no `bwrap`/`sandbox-exec` on `PATH`, a host that fails the self-test (e.g. unprivileged user namespaces disabled), or a platform with no backend — and it refuses on *every* op, not just submit. `auto` degrades visibly in those same cases; `off` skips the wrapping entirely (see [`docs/compute.md`](compute.md)) |
 | **Secret store** | `OPENAI4S_SECRET_STORE` (`auto`) | credentials behind an opaque reference in the system keychain (after a real round-trip self-test) or the process environment; `auto` **fails closed** when neither is available. Plaintext is reachable only by asking for it by name, and no obfuscated-file fallback exists |
@@ -212,6 +212,28 @@ persist the selected standing rule. A `once` choice instead creates one exact
 `root_frame_id` + tool + permission-target grant, expires after 15 minutes, and
 is consumed atomically only when a fresh matching action reaches an `ask`
 decision. Stored/redacted approval payloads are never executed as arguments.
+
+### Egress allowlist requires a proven kernel boundary
+
+`OPENAI4S_EGRESS=allowlist` keeps host-side `web_fetch`, `web_search`, and the
+authorized `host.bash` preflight on the domain allowlist. It also refuses a
+new Python or R Cell unless that Cell's kernel has already measured a raw
+network block. The measurement is three facts together: `enforced` is true,
+`self_test_passed` is true, and `network_policy` is `blocked`. A remote kernel
+reports `network_policy` `unproven` and is refused for as long as allowlist
+stays on. The same check runs for every origin, including `system`,
+`recovery`, and `sidecar_recovery`, because skill sidecar bootstrap is
+third-party code.
+
+The refusal code is `egress_boundary_unavailable`. On a supported platform the
+remedy is macOS Seatbelt or Linux bubblewrap with
+`OPENAI4S_KERNEL_SANDBOX=enforce` (or `auto` after that self-test passes and
+still reports `network_policy=blocked`). `OPENAI4S_EGRESS=off`, the default,
+does not add this gate. A Cell that is already running is left alone; the
+mode is read again at the next Cell. `host.bash` inside a Cell is a
+subprocess of that kernel, so it inherits the kernel's network block. The
+host process's own domain check still applies before that subprocess is
+started.
 
 ### Executable Artifact previews use a scoped alternate origin
 
