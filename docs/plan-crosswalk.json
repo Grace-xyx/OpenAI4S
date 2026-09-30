@@ -67,7 +67,7 @@
       "tests": "tests/test_delegation_control.py,tests/test_delegation_persistence.py",
       "browser_evidence": "tests/browser_p1_controls.mjs",
       "external_evidence": "",
-      "evidence_digest": "fb7807a090d78a5cffb02b91e878145df920b04bb4ba2957d703c9c67e2551b4"
+      "evidence_digest": "2f5fa30a2cc53bbe7b2f6074fbcf932731e2500882878cbeaf9dc97b77804cce"
     },
     {
       "source": "R1",
