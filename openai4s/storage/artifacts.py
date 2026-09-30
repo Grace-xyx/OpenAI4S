@@ -44,6 +44,19 @@ SameFilePath = Callable[[str, str], bool]
 DeleteArtifactRelated = Callable[[str], None]
 PublishUpload = Callable[[str, str], str]
 
+# Stay under SQLite's default variable limit when a frame observed many versions.
+_SQL_VARIABLE_CHUNK = 200
+
+_VERSION_EVIDENCE_SQL = (
+    "SELECT v.version_id AS version_id, v.artifact_id AS artifact_id, "
+    "COALESCE(NULLIF(v.filename, ''), a.filename) AS filename, "
+    "v.checksum AS checksum, v.size_bytes AS size_bytes, "
+    "v.snapshot_path AS snapshot_path, v.path AS path, "
+    "v.producing_cell_id AS producing_cell_id, v.frame_id AS frame_id, "
+    "v.created_at AS created_at, v.content_type AS content_type "
+    "FROM artifact_versions v JOIN artifacts a ON a.artifact_id=v.artifact_id"
+)
+
 
 class ArtifactDeliveryReferenceError(RuntimeError):
     """A durable completion message still addresses this Artifact's bytes."""
@@ -1771,6 +1784,129 @@ class ArtifactRepository:
                 (frame_id, frame_id),
             ).fetchall()
         return [row["filename"] for row in rows]
+
+    def artifact_evidence_rows_for_frame(
+        self, frame_id: str, *, limit: int
+    ) -> dict[str, Any]:
+        """Raw version, observation, and Cell rows for one producer frame.
+
+        A version counts when its own ``frame_id`` is this frame, or when a
+        capture observation on this frame names that ``version_id`` (a reused
+        head keeps the original version's frame). Same filename on another
+        frame is not a row. ``total`` is the distinct version count before
+        ``limit``. Rows are ordered by the frame's capture time descending,
+        then ``version_id``: an owned version uses its own ``created_at``; a
+        version reached only through an observation uses that observation's
+        ``created_at``. No verdict is decided here, and no content hash is
+        computed. There is no ``frame_id`` index; this scans, like
+        ``artifact_names_for_frame``.
+        """
+        empty: dict[str, Any] = {
+            "versions": [],
+            "observations": [],
+            "cells": {},
+            "total": 0,
+        }
+        if not isinstance(frame_id, str) or not frame_id.strip():
+            return empty
+        frame_id = frame_id.strip()
+        cap = max(0, int(limit))
+        with self._lock:
+            versions = [
+                dict(row)
+                for row in self._connection.execute(
+                    _VERSION_EVIDENCE_SQL + " WHERE v.frame_id=?",
+                    (frame_id,),
+                ).fetchall()
+            ]
+            observations = [
+                dict(row)
+                for row in self._connection.execute(
+                    "SELECT observation_id,artifact_id,version_id,"
+                    "producing_cell_id,frame_id,capture_kind,filename,checksum,"
+                    "size_bytes,snapshot_path,created_at "
+                    "FROM artifact_capture_observations WHERE frame_id=?",
+                    (frame_id,),
+                ).fetchall()
+            ]
+            by_id = {str(row["version_id"]): row for row in versions}
+            extra_ids = [
+                str(row["version_id"])
+                for row in observations
+                if str(row["version_id"]) not in by_id
+            ]
+            for row in self._version_rows_by_id(list(dict.fromkeys(extra_ids))):
+                by_id.setdefault(str(row["version_id"]), row)
+            obs_by_version: dict[str, list[dict[str, Any]]] = {}
+            for row in observations:
+                obs_by_version.setdefault(str(row["version_id"]), []).append(row)
+
+            def capture_time(version_id: str) -> int:
+                version = by_id[version_id]
+                if version.get("frame_id") == frame_id:
+                    return int(version.get("created_at") or 0)
+                stamps = [
+                    int(item.get("created_at") or 0)
+                    for item in obs_by_version.get(version_id, ())
+                ]
+                if stamps:
+                    return max(stamps)
+                return int(version.get("created_at") or 0)
+
+            ordered = sorted(
+                by_id,
+                key=lambda version_id: (-capture_time(version_id), version_id),
+            )
+            total = len(ordered)
+            kept = ordered[:cap]
+            kept_set = set(kept)
+            cell_ids: list[str] = []
+            for version_id in kept:
+                cell_id = by_id[version_id].get("producing_cell_id")
+                if isinstance(cell_id, str) and cell_id:
+                    cell_ids.append(cell_id)
+            kept_observations = [
+                row for row in observations if str(row["version_id"]) in kept_set
+            ]
+            for row in kept_observations:
+                cell_id = row.get("producing_cell_id")
+                if isinstance(cell_id, str) and cell_id:
+                    cell_ids.append(cell_id)
+            return {
+                "versions": [by_id[version_id] for version_id in kept],
+                "observations": kept_observations,
+                "cells": self._execution_cells(list(dict.fromkeys(cell_ids))),
+                "total": total,
+            }
+
+    def _version_rows_by_id(self, version_ids: list[str]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for start in range(0, len(version_ids), _SQL_VARIABLE_CHUNK):
+            chunk = version_ids[start : start + _SQL_VARIABLE_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            fetched = self._connection.execute(
+                _VERSION_EVIDENCE_SQL + f" WHERE v.version_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            rows.extend(dict(row) for row in fetched)
+        return rows
+
+    def _execution_cells(self, cell_ids: list[str]) -> dict[str, dict[str, Any]]:
+        cells: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(cell_ids), _SQL_VARIABLE_CHUNK):
+            chunk = cell_ids[start : start + _SQL_VARIABLE_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            fetched = self._connection.execute(
+                "SELECT producing_cell_id,status,frame_id FROM execution_log "
+                f"WHERE producing_cell_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            for row in fetched:
+                cells[str(row["producing_cell_id"])] = {
+                    "status": row["status"],
+                    "frame_id": row["frame_id"],
+                }
+        return cells
 
     def resolve_artifact_path(self, ident: str) -> str | None:
         with self._lock:

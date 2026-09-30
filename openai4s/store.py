@@ -4281,6 +4281,9 @@ class Store:
     def artifact_names_for_frame(self, frame_id: str) -> list[str]:
         return self._artifacts.artifact_names_for_frame(frame_id)
 
+    def artifact_evidence_rows_for_frame(self, frame_id: str, *, limit: int) -> dict:
+        return self._artifacts.artifact_evidence_rows_for_frame(frame_id, limit=limit)
+
     def resolve_artifact_path(self, ident: str) -> str | None:
         return self._artifacts.resolve_artifact_path(ident)
 
