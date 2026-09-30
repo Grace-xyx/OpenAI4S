@@ -379,3 +379,33 @@ def test_an_unfiltered_catalog_search_is_unchanged():
         "background", offered=lambda _tool: True
     )
     assert everything == plain
+
+
+def test_native_capture_tools_are_never_offered_outside_the_web_gateway(
+    tmp_path, monkeypatch
+):
+    """`science_import_dataset` succeeds only inside the Web gateway's native
+    Artifact capture transaction, which a CLI root or delegated child Agent
+    never binds. Even a posture that could approve it must not offer it: every
+    call would be refused after costing the model a turn."""
+
+    from openai4s.agent import loop as loop_mod
+
+    monkeypatch.setenv("OPENAI4S_UNATTENDED_APPROVAL", "allow")
+    agent = loop_mod.Agent(
+        cfg=_cfg(tmp_path),
+        use_skills=False,
+        allow_delegate=False,
+        workspace=str(tmp_path),
+    )
+    catalog = agent.dispatcher.tool_catalog()
+    assert catalog.get("science_import_dataset").requires_native_capture
+    catalog.activate_groups("science")
+    offered = {spec.name for spec in agent._model_tool_specs(catalog, [])}
+    assert "science_search" in offered
+    assert "science_import_dataset" not in offered
+
+    result = agent.dispatcher("search_capabilities", [{"query": "zenodo dataset"}])
+    assert "science_import_dataset" not in result["visible_tools"]
+    unavailable = {row["name"]: row["reason"] for row in result["unavailable_tools"]}
+    assert unavailable["science_import_dataset"] == "native_capture_unavailable"

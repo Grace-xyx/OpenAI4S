@@ -228,7 +228,10 @@ or permission to reuse data. Repeated imports may create separate versions;
 earlier source records are immutable, including after Store reopen.
 
 Standalone CLI, Python Cell and background calls cannot provide the immediate
-native capture transaction and refuse before metadata or file I/O. If capture
+native capture transaction and refuse before metadata or file I/O. The CLI and
+delegated child agents therefore never offer the tool to their model;
+`search_capabilities` lists it under `unavailable_tools` with reason
+`native_capture_unavailable`. If capture
 fails after file publication, the action fails with `output_committed` to veto
 automatic replay; the workspace file may remain. Inspect the file and version
 history before explicitly retrying. The generic `web_download` and its SDK

@@ -44,6 +44,7 @@ class ScienceImportDatasetTool(Tool):
     }
     read_only = False
     writes_files = True
+    requires_native_capture = True
     needs_network = True
     screen_untrusted_output = True
     secret_path_key = "path"
