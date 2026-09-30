@@ -93,6 +93,11 @@ def test_allowlisted_read_is_allow_once():
             "example.com",
             {"url": "https://example.com/data", "path": "config.json"},
         ),
+        (
+            "science_import_dataset",
+            "zenodo.org",
+            {"record_id": "123", "file_key": "data.csv", "path": "config.json"},
+        ),
         ("save_artifact", "known_hosts", {"path": "known_hosts"}),
         (
             "materialise_artifact",
@@ -214,6 +219,7 @@ def test_non_path_targets_remain_non_paths_without_usable_arguments(
     ("tool", "target"),
     [
         ("web_download", "credentials.example"),
+        ("science_import_dataset", "zenodo.org"),
         ("materialise_artifact", "v-source"),
     ],
 )
@@ -583,3 +589,32 @@ def test_auto_review_is_adjudicated_whether_or_not_a_browser_is_open():
             interactive=interactive,
         )
         assert denied is False, interactive
+
+
+def test_every_caller_named_file_path_reaches_the_unattended_fence():
+    """A tool that declares a caller-named file path must hand it to review.
+
+    `science_import_dataset` shipped with `secret_path_key = "path"` but was
+    absent from both path maps, so with a standing allow rule and automatic
+    review its `config.json` destination skipped the allow-to-ask upgrade that
+    the same destination through `web_download` receives. Derive the
+    requirement from the registry so the next writing tool cannot repeat it.
+    """
+
+    from openai4s.host_dispatch import _GUARDIAN_FILE_PATH_KEYS
+    from openai4s.server.guardian_enforce import (
+        _FILE_PATH_ARGUMENTS,
+        _PATH_REQUIRED_FOR_REVIEW,
+    )
+    from openai4s.tools.registry import TOOL_TYPES
+
+    assert _GUARDIAN_FILE_PATH_KEYS == _FILE_PATH_ARGUMENTS
+    for tool_type in TOOL_TYPES:
+        tool = tool_type()
+        if not tool.secret_path_key:
+            continue
+        assert (
+            _FILE_PATH_ARGUMENTS.get(tool.host_method) == tool.secret_path_key
+        ), tool.name
+        if tool.writes_files and tool.permission_target_key != tool.secret_path_key:
+            assert tool.host_method in _PATH_REQUIRED_FOR_REVIEW, tool.name
