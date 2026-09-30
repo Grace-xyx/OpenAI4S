@@ -205,9 +205,15 @@ Shadow channels emit `judgment_shadow` with `kind`, `existing_verdict`,
 `shadow_answers`, `agree`, `status`, `latency_ms`, and `state_sha256` —
 not the code or the request text.
 
-The dispatcher envelope `log_host_call(method="judge")` still records the
-RPC spec, including state. That is a separate audit surface from the named
-`judgment` event.
+The dispatcher envelope `log_host_call(method="judge")` stores a projected
+`args_preview`: a template id matching `^[A-Za-z0-9_.:-]{1,100}$`, or
+`<invalid template>`, plus `<redacted judge state>`, and
+`<redacted judge params>` when the call carried params. Schema migration 33
+rewrites historical rows with the same projection. `result_preview`,
+`result_digest`, and the replay tape are unchanged. Copies that can still
+hold the original state are listed in
+[security.md](security.md#outbound-data-flow-semantic-judgment-experimental).
+This remains a separate audit surface from the named `judgment` event.
 
 A session package export may attach `judgment_manifest.json` (capabilities
 used, backend, model, template versions, call and token counts). It must
@@ -390,9 +396,11 @@ when `api.typesafe.ai` is outside an enforced allowlist.
 
 Open for W2: `tests/conftest.py` still does not purge `OPENAI4S_*JUDGMENT*`,
 and a runtime path now exists for it to leak into. `host.judge` is deliberately
-absent from `GATEABLE_TOOLS`, `_SCREENED_METHODS` and `_m_capabilities()`. The
-dispatcher envelope's `log_host_call(method="judge")` still records the raw
-state even though the named `judgment` audit event does not.
+absent from `GATEABLE_TOOLS`, `_SCREENED_METHODS` and `_m_capabilities()`.
+Schema migration 33, added after W2, changed the envelope:
+`log_host_call(method="judge")` stores the projected `args_preview` (a safe
+template id and fixed state/params markers). The named `judgment` event
+includes raw state only when `experimental.judgment.audit_raw_state` is on.
 
 ### W2 — 2026-09-20
 

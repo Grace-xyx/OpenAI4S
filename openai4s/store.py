@@ -1651,6 +1651,10 @@ class Store:
                         "artifact_browse_index",
                         self._apply_artifact_browse_index,
                     ),
+                    33: (
+                        "redact_judge_host_call_args",
+                        self._apply_redact_judge_host_call_args,
+                    ),
                 },
             )
             if report["migrated"]:
@@ -1841,6 +1845,41 @@ class Store:
             "CREATE INDEX IF NOT EXISTS ix_artifacts_project_created "
             "ON artifacts(project_id, created_at DESC, artifact_id DESC)"
         )
+
+    def _apply_redact_judge_host_call_args(self, conn: sqlite3.Connection) -> None:
+        """Version 33: redact raw host.judge state in the generic RPC audit.
+
+        ``host_call_log.args_preview`` for ``method='judge'`` is rewritten
+        with :func:`openai4s.storage.metadata.redact_stored_judge_args_preview`,
+        the same projection new writes use. A stored preview is a
+        500-character ``json.dumps`` cut and usually not valid JSON. A safe
+        template id is taken from the prefix; every other preview becomes
+        the state-only marker. A row that already matches is left unchanged.
+
+        ``PRAGMA secure_delete`` is on for the rewrite so the replaced bytes
+        are zeroed in the page, then restored. Runs inside the transaction
+        owned by ``run_migrations``; it must not commit.
+        """
+
+        from openai4s.storage.metadata import redact_stored_judge_args_preview
+
+        previous_row = conn.execute("PRAGMA secure_delete").fetchone()
+        previous = int(previous_row[0]) if previous_row is not None else 0
+        try:
+            conn.execute("PRAGMA secure_delete = ON").fetchall()
+            rows = conn.execute(
+                "SELECT call_id, args_preview FROM host_call_log "
+                "WHERE method = 'judge'"
+            ).fetchall()
+            for row in rows:
+                updated = redact_stored_judge_args_preview(row["args_preview"])
+                if updated != row["args_preview"]:
+                    conn.execute(
+                        "UPDATE host_call_log SET args_preview = ? WHERE call_id = ?",
+                        (updated, row["call_id"]),
+                    )
+        finally:
+            conn.execute(f"PRAGMA secure_delete = {previous}").fetchall()
 
     def _apply_team_governance(self, conn: sqlite3.Connection) -> None:
         """Version 20: membership, invites, usage ledger, quotas (M2).

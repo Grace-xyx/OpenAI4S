@@ -258,13 +258,22 @@ def test_a_database_from_a_newer_release_fails_the_data_check(
     assert cfg.db_path.read_bytes() == before
 
 
+# 31 is the version before the last step that can be forced to fail: migration
+# 32 creates ``ix_artifacts_project_created``, and a table of that name makes
+# the upgrade fail. Later data migrations re-run together with that step, so
+# the conflict still fails and a dropped index is still rebuilt.
+_OLDER_SCHEMA = 31
+
+
 def _older_database(db_path, *, conflicting: bool = False) -> None:
-    """A real database one schema behind this release. With ``conflicting`` its
-    upgrade fails in any process: the name the last step's index needs is
-    taken by a table, so the Store rolls back and keeps its backup."""
+    """A real database pinned at ``_OLDER_SCHEMA``.
+
+    With ``conflicting`` the upgrade fails in any process: the name migration
+    32's index needs is taken by a table, so the Store rolls back and keeps
+    its backup.
+    """
     import sqlite3
 
-    from openai4s.storage.migrations import SCHEMA_VERSION
     from openai4s.store import Store
 
     Store(db_path).close()
@@ -272,8 +281,8 @@ def _older_database(db_path, *, conflicting: bool = False) -> None:
         conn.execute("DROP INDEX IF EXISTS ix_artifacts_project_created")
         if conflicting:
             conn.execute("CREATE TABLE ix_artifacts_project_created(x)")
-        conn.execute(f"DELETE FROM schema_migrations WHERE version>={SCHEMA_VERSION}")
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+        conn.execute(f"DELETE FROM schema_migrations WHERE version > {_OLDER_SCHEMA}")
+        conn.execute(f"PRAGMA user_version = {_OLDER_SCHEMA}")
 
 
 def _user_version(db_path) -> int:
@@ -308,19 +317,19 @@ def test_doctor_does_not_upgrade_a_database_from_an_older_release(
     cfg.ensure_dirs()
     _older_database(cfg.db_path, conflicting=conflicting)
     before = cfg.db_path.read_bytes()
-    backup = cfg.db_path.with_name(f"openai4s.db.v{SCHEMA_VERSION - 1}.bak")
+    backup = cfg.db_path.with_name(f"openai4s.db.v{_OLDER_SCHEMA}.bak")
 
     assert cli.main(["doctor", "--json"]) != 0
     result = json.loads(capsys.readouterr().out)
     checks = _by_name(result)
     data = checks["data"]
     assert data["status"] == doctor.WARN
-    assert f"schema {SCHEMA_VERSION - 1}" in data["detail"]
+    assert f"schema {_OLDER_SCHEMA}" in data["detail"]
     assert f"schema {SCHEMA_VERSION}" in data["detail"]
     assert "migrat" in data["detail"]
     assert data["remedy"]
     assert data["facts"]["upgrade_pending"] is True
-    assert data["facts"]["schema_version"] == SCHEMA_VERSION - 1
+    assert data["facts"]["schema_version"] == _OLDER_SCHEMA
     # No probe opened it and hid what opening it did.
     assert all("connector_store_error" not in c["facts"] for c in result["checks"])
 
@@ -328,7 +337,7 @@ def test_doctor_does_not_upgrade_a_database_from_an_older_release(
     assert "All checks passed" not in capsys.readouterr().out
 
     assert cfg.db_path.read_bytes() == before
-    assert _user_version(cfg.db_path) == SCHEMA_VERSION - 1
+    assert _user_version(cfg.db_path) == _OLDER_SCHEMA
     assert not backup.exists()
 
 
@@ -341,7 +350,7 @@ def test_doctor_fails_the_data_check_after_an_upgrade_that_did_not_complete(
     import os
 
     import openai4s.config as config_mod
-    from openai4s.storage.migrations import SCHEMA_VERSION, MigrationError
+    from openai4s.storage.migrations import MigrationError
     from openai4s.store import Store
 
     cli = importlib.import_module("openai4s.cli.main")
@@ -353,7 +362,7 @@ def test_doctor_fails_the_data_check_after_an_upgrade_that_did_not_complete(
     _older_database(cfg.db_path, conflicting=True)
     with pytest.raises(MigrationError):
         Store(cfg.db_path)  # what `serve` / `run` did before exiting 2
-    backup = cfg.db_path.with_name(f"openai4s.db.v{SCHEMA_VERSION - 1}.bak")
+    backup = cfg.db_path.with_name(f"openai4s.db.v{_OLDER_SCHEMA}.bak")
     assert backup.exists()
     os.utime(backup, (1_000_000_000, 1_000_000_000))
     before = cfg.db_path.read_bytes()
@@ -366,7 +375,7 @@ def test_doctor_fails_the_data_check_after_an_upgrade_that_did_not_complete(
     assert data["remedy"]
     assert data["facts"]["kept_backup"] == str(backup)
     assert cfg.db_path.read_bytes() == before
-    assert _user_version(cfg.db_path) == SCHEMA_VERSION - 1
+    assert _user_version(cfg.db_path) == _OLDER_SCHEMA
     # Not re-attempted: the kept backup was not rewritten.
     assert backup.stat().st_mtime == 1_000_000_000
 

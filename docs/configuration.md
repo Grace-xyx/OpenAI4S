@@ -301,7 +301,9 @@ the UI cannot override it. An environment enable treats the operator as
 informed and logs a warning; the UI path also requires a current-version
 disclosure acknowledgement (`experimental.judgment.disclosure_ack`). Optional
 `experimental.judgment.audit_raw_state` (default off) includes raw state in
-the named `judgment` audit event.
+the named `judgment` audit event. The generic `host_call_log` row for
+`judge` always stores the projected arguments; this setting is not a bypass
+into that table.
 
 `api.typesafe.ai` is **not** a built-in egress group. In allowlist mode grant
 it with `host.request_network_access(domain="api.typesafe.ai")`. Status:

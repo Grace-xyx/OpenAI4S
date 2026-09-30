@@ -577,25 +577,25 @@ def test_the_bundle_does_not_upgrade_a_database_from_an_older_release(
     read-only way and records the pending upgrade instead of performing it."""
     from openai4s.diagnostics import archive_safe
     from openai4s.storage.migrations import SCHEMA_VERSION
-    from tests.test_doctor import _older_database, _user_version
+    from tests.test_doctor import _OLDER_SCHEMA, _older_database, _user_version
 
     _older_database(cfg.db_path, conflicting=conflicting)
     before = cfg.db_path.read_bytes()
-    backup = cfg.db_path.with_name(f"openai4s.db.v{SCHEMA_VERSION - 1}.bak")
+    backup = cfg.db_path.with_name(f"openai4s.db.v{_OLDER_SCHEMA}.bak")
     target = tmp_path / "bundle.zip"
 
     assert _cli_diagnostics(monkeypatch, cfg, target) == 0
     capsys.readouterr()
 
     assert cfg.db_path.read_bytes() == before
-    assert _user_version(cfg.db_path) == SCHEMA_VERSION - 1
+    assert _user_version(cfg.db_path) == _OLDER_SCHEMA
     assert not backup.exists()
     with zipfile.ZipFile(target) as archive:
         security = json.loads(archive.read("report.json"))["security"]
     assert security["schema"] == {
         "status": "skipped",
         "code": "upgrade_pending",
-        "version": SCHEMA_VERSION - 1,
+        "version": _OLDER_SCHEMA,
         "expected": SCHEMA_VERSION,
         "current": False,
     }

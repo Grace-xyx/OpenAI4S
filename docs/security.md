@@ -357,7 +357,7 @@ it:
   still trips it.
 - Because the denylist is a table-name match, a query that reads the unrelated `agents.connectors` *column* is also refused; no bundled skill relies on that read.
 
-Credential values passed to `host.credentials.set(name, value)` are held only in an in-memory vault (never persisted). To keep that true end to end, the **RPC audit log** redacts them: `credentials_get` / `credentials_list` are not logged at all, and `credentials_set` is logged for audit **with its args redacted** — the plaintext value never enters `host_call_log`. The replay tape recorder likewise skips `credentials_set`, so an exported notebook cannot carry a plaintext credential.
+Credential values passed to `host.credentials.set(name, value)` are held only in an in-memory vault (never persisted). To keep that true end to end, the **RPC audit log** redacts them: `credentials_get` / `credentials_list` are not logged at all, and `credentials_set` is logged for audit **with its args redacted** — the plaintext value never enters `host_call_log`. The replay tape recorder likewise skips `credentials_set`, so an exported notebook cannot carry a plaintext credential. `host.judge` is a different projection on the same log: `args_preview` keeps a safe template id and replaces state and params with fixed markers (`<redacted judge state>`, `<redacted judge params>`). The call stays on the replay tape, and `result_preview` / `result_digest` stay.
 
 ### Correlation IDs and structured logs
 
@@ -783,9 +783,35 @@ $0.042 / million tokens. Do not enable this for sensitive data. Kill switch:
 Named audit event `judgment` records purpose, template, status, usage,
 latency, `state_sha256`, and full probabilities. Raw state is omitted unless
 `experimental.judgment.audit_raw_state` is true. Shadow events
-(`judgment_shadow`) carry hashes and verdict labels, not the code. The
-dispatcher envelope `log_host_call(method="judge")` still records the RPC
-spec, including state.
+(`judgment_shadow`) carry hashes and verdict labels, not the code. That
+setting does not open a second copy in the generic RPC audit.
+
+`host_call_log.args_preview` for `method="judge"` stores a projection on
+every path that reaches `HostCallRepository.log` (success, soft failure,
+early return, and exception). A template id is kept when it matches
+`^[A-Za-z0-9_.:-]{1,100}$`; any other template string is stored as
+`<invalid template>`. State is always `<redacted judge state>`. When the call
+carried params, those are `<redacted judge params>`. A call whose arguments
+are not a one-element list of an object stores only the state marker.
+`result_preview` and `result_digest` are unchanged, and the call stays on
+the replay tape. Schema migration 33 rewrites historical `judge` rows with
+the same helper: a preview that still begins with a safe template id keeps
+that id and the state marker, and every other preview becomes the state-only
+marker. For that rewrite the migration sets `PRAGMA secure_delete = ON` and
+restores the previous value before the migration transaction commits, so the
+replaced bytes are zeroed in the page.
+
+Copies of the original state can remain outside that row:
+
+- The pre-upgrade backup `<data_dir>/openai4s.db.v32.bak` holds the original
+  text. A successful migration deletes it. A failed migration keeps it.
+- SQLite's rollback journal or WAL, and free pages the secure-delete pass
+  did not overwrite.
+- Any backup taken outside this process.
+- `openai4s_tape.json`, written while `OPENAI4S_RECORD_TAPE` is set. The
+  recorder stores the raw arguments.
+- A session package exported before the upgrade. The export copies
+  `args_preview` as stored and is not rewritten later.
 
 `safety_shadow` never changes `classify_code` / `scan_tool_result` /
 `screen_trajectory`. The existing function computes the verdict, the shadow

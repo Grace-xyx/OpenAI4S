@@ -170,8 +170,13 @@ status、`error_code`、usage、延迟、`state_sha256`、完整概率、`cache_
 `judgment_shadow`，字段是 `kind`、`existing_verdict`、`shadow_answers`、
 `agree`、`status`、`latency_ms`、`state_sha256`——没有代码原文，也没有请求文本。
 
-dispatcher 信封 `log_host_call(method="judge")` 仍会记下 RPC spec，包括 state。
-那是和命名事件 `judgment` 分开的另一处审计面。
+dispatcher 信封 `log_host_call(method="judge")` 写入的 `args_preview` 是投影：
+模板 id 须匹配 `^[A-Za-z0-9_.:-]{1,100}$`，否则记为 `<invalid template>`；
+state 换成 `<redacted judge state>`；调用带了 params 时换成
+`<redacted judge params>`。schema 迁移 33 用同一投影改写历史行。
+`result_preview`、`result_digest` 和回放 tape 不变。仍可能留有原文的副本列在
+[security.md](security.md#outbound-data-flow-semantic-judgment-experimental)。
+这仍是和命名事件 `judgment` 分开的另一处审计面。
 
 Session package 导出时可附带 `judgment_manifest.json`（用过的能力、后端、
 模型、模板版本、调用次数和 token 数）。**不含 key**。
@@ -302,8 +307,10 @@ W1-C 的路由测试又把 probe 打了桩，两边都照不到。`BackendReply.
 
 W2 待办：`tests/conftest.py` 仍不清除 `OPENAI4S_*JUDGMENT*`，而现在已经有运行时
 路径会让它泄漏进来。`host.judge` 刻意不在 `GATEABLE_TOOLS`、`_SCREENED_METHODS`
-和 `_m_capabilities()` 里。dispatcher 信封的 `log_host_call(method="judge")`
-仍会记下原始 state，尽管命名审计事件 `judgment` 不记。
+和 `_m_capabilities()` 里。W2 之后的 schema 迁移 33 改了信封：
+`log_host_call(method="judge")` 的 `args_preview` 改为投影（安全的模板 id，
+以及 state / params 的固定标记）。命名事件 `judgment` 只有在
+`experimental.judgment.audit_raw_state` 打开时才带原始 state。
 
 ### W2 — 2026-09-20
 
