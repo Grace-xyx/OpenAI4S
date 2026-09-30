@@ -27,7 +27,10 @@ export function GeneralTab() {
   // move the highlighted segment.
   const [theme, setThemeChoice] = useState<ThemeMode>(getTheme);
   const [layout, setLayoutChoice] = useState<LayoutName>(getLayout);
-  const [lang, setLangChoice] = useState<LangPreference>(langPreference);
+  // Read on every render, not cached at mount: the Shell repaints on each
+  // language change, including one made in another tab. The tick only
+  // repaints this tab at once after a pick here.
+  const [, setLangTick] = useState(0);
 
   useEffect(() => {
     void (async () => {
@@ -81,15 +84,15 @@ export function GeneralTab() {
       </CustRow>
       <CustRow name={t("cust.general.language")} desc={t("cust.general.languageDesc")}>
         <Seg
-          value={lang}
+          value={langPreference()}
           options={[
             ["zh", "中文"],
             ["en", "English"],
             ["system", (LANG === "zh" ? COPY.zh : COPY.en).langSystem],
           ]}
           onPick={(val) => {
-            void setLang(val);
-            setLangChoice(langPreference());
+            void setLang(val as LangPreference);
+            setLangTick((tick) => tick + 1);
           }}
         />
       </CustRow>

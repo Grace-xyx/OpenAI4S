@@ -14,6 +14,7 @@ export {
   refreshLangToggle,
   savedLang,
   setLang,
+  syncSavedLanguage,
   syncSystemLanguage,
   systemLang,
   t,

@@ -803,3 +803,108 @@ def test_an_adoption_at_start_uses_up_the_one_time_switch(tmp_path, monkeypatch)
         assert _datapro_state(call)["connector_enabled"] is False
     finally:
         runner.close()
+
+
+@pytest.mark.stubbed_backend
+def test_a_copy_adopted_while_the_proxy_override_was_missing_is_dropped(
+    tmp_path, monkeypatch
+):
+    """One start without OPENAI4S_ARK_BASE_URL must not leak the proxy key for good."""
+
+    from openai4s import mcp_client
+
+    monkeypatch.setattr(mcp_client, "manager", lambda: _Manager())
+    cfg = _cfg(tmp_path)
+    store = get_store(cfg.db_path)
+    proxy_key = "corp-proxy-issued-key-canary"
+    _live(store, "ark", "", proxy_key)
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    try:
+        _Route(cfg, runner)  # started without the override: adopted
+        assert datapro.explicit_agent_plan_key(store) == proxy_key
+
+        monkeypatch.setenv("OPENAI4S_ARK_BASE_URL", "https://llm-proxy.corp.example/v1")
+        _Route(cfg, runner)  # started again with it
+
+        assert datapro.explicit_agent_plan_key(store) == ""
+        assert datapro.resolve_agent_plan_key(store) == ""
+    finally:
+        runner.close()
+
+
+@pytest.mark.stubbed_backend
+def test_a_protocol_change_that_also_releases_drops_datapro_once(gateway):
+    _cfg_, store, call = gateway
+    profile_id = _agent_plan_profile(call)
+    assert call("POST", f"/model-profiles/{profile_id}/activate")[0] == 200
+    call.manager.disconnects.clear()
+
+    body = {
+        "provider": "claude",
+        "base_url": "",
+        "api_key": "sk-ant-other-provider-key",
+    }
+    assert call("PATCH", f"/model-profiles/{profile_id}", body)[0] == 200
+
+    assert datapro.explicit_agent_plan_key(store) == ""
+    assert call.manager.disconnects == [
+        (datapro.CONNECTOR_ID, datapro.runtime_cache_scope(store))
+    ]
+
+
+@pytest.mark.stubbed_backend
+def test_reprovisioning_from_another_provider_drops_datapro_once(gateway):
+    _cfg_, store, call = gateway
+    assert call("POST", "/volcengine/configure", {"plan_key": "agent-plan"})[0] == 201
+    _switch_to_another_model(call)
+    call.manager.disconnects.clear()
+
+    call.connector.api_key = OTHER_KEY
+    call.connector.plan_key = "coding-plan"
+    assert call("POST", "/volcengine/configure", {"plan_key": "coding-plan"})[0] == 201
+
+    assert datapro.explicit_agent_plan_key(store) == ""
+    assert call.manager.disconnects == [
+        (datapro.CONNECTOR_ID, datapro.runtime_cache_scope(store))
+    ]
+
+
+@pytest.mark.stubbed_backend
+def test_deleting_the_active_profile_releases_a_rotated_live_key_too(gateway):
+    _cfg_, store, call = gateway
+    profile_id = _agent_plan_profile(call)
+    assert call("POST", f"/model-profiles/{profile_id}/activate")[0] == 200
+    rotated = "agent-plan-live-rotated-key"
+    assert call("POST", "/config/llm", {"api_key": rotated})[0] == 200
+    assert datapro.explicit_agent_plan_key(store) == rotated
+
+    assert call("DELETE", f"/model-profiles/{profile_id}")[0] == 200
+
+    assert store.get_secret_setting("llm_api_key") == ""
+    assert datapro.explicit_agent_plan_key(store) == ""
+
+
+@pytest.mark.stubbed_backend
+def test_no_agent_plan_means_no_broker_touch_and_no_warning(
+    tmp_path, monkeypatch, capsys
+):
+    """A host with no secure secret store says nothing when there is nothing to adopt."""
+
+    from openai4s import mcp_client
+    from openai4s.security.secret_broker import SecretBroker, SecretStoreUnavailable
+
+    def _unavailable(self):
+        raise SecretStoreUnavailable("no secure secret store on this host")
+
+    monkeypatch.setattr(SecretBroker, "read_only", property(_unavailable))
+    monkeypatch.setattr(mcp_client, "manager", lambda: _Manager())
+    cfg = _cfg(tmp_path)
+    store = get_store(cfg.db_path)
+    store.set_setting("llm_provider", "chatgpt")
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    try:
+        _Route(cfg, runner)
+    finally:
+        runner.close()
+
+    assert "Agent Plan key not saved" not in capsys.readouterr().err

@@ -108,6 +108,62 @@ describe("following the browser's language", () => {
   });
 });
 
+describe("another tab", () => {
+  function sharedWindow(): Array<{ type: string; listener: (event: unknown) => void }> {
+    const listeners: Array<{ type: string; listener: (event: unknown) => void }> = [];
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        addEventListener: (type: string, listener: (event: unknown) => void) => {
+          listeners.push({ type, listener });
+        },
+      },
+    });
+    return listeners;
+  }
+
+  it("follows a language saved there, and its return to System", async () => {
+    storage();
+    browser(["en-US"]);
+    const listeners = sharedWindow();
+    const here = await freshRuntime();
+    await here.i18nReady();
+    const onStorage = listeners.find((l) => l.type === "storage")!.listener;
+    const there = await freshRuntime();
+    await there.i18nReady();
+    expect(here.LANG).toBe("en");
+
+    await there.setLang("zh");
+    onStorage({ key: "os-lang" });
+    await vi.waitFor(() => expect(here.t("theme.toggle")).toBe("切换主题"));
+    expect(here.langPreference()).toBe("zh");
+
+    // A pick storage took is shared: "System" chosen there clears it here.
+    await here.setLang("en");
+    await there.setLang("system");
+    onStorage({ key: "os-lang" });
+    expect(here.langPreference()).toBe("system");
+    browser(["zh-CN"]);
+    await here.syncSystemLanguage();
+    expect(here.LANG).toBe("zh");
+  });
+
+  it("ignores changes to other keys", async () => {
+    storage({ "os-lang": "en" });
+    browser(["zh-CN"]);
+    const listeners = sharedWindow();
+    const here = await freshRuntime();
+    await here.i18nReady();
+    const onStorage = listeners.find((l) => l.type === "storage")!.listener;
+    const revision = here.languageRevision.value;
+
+    onStorage({ key: "os-theme" });
+
+    expect(here.languageRevision.value).toBe(revision);
+    expect(here.LANG).toBe("en");
+  });
+});
+
 describe("theme-bootstrap.js sets the language the bundle will use", () => {
   function bootstrapLang(
     languages: string[],

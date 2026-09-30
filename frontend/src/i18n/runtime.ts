@@ -187,6 +187,10 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
   window.addEventListener("languagechange", () => {
     void syncSystemLanguage().catch(() => undefined);
   });
+  window.addEventListener("storage", (event: StorageEvent) => {
+    if (event.key !== null && event.key !== "os-lang") return;
+    void syncSavedLanguage().catch(() => undefined);
+  });
 }
 
 // t("key", ...args) — current-language string with {0},{1}… positional interpolation; falls back to zh, then the key.
@@ -291,11 +295,13 @@ export async function setLang(lang: string): Promise<void> {
     return;
   }
   LANG = lang === "en" ? "en" : "zh";
-  sessionPick = LANG;
+  sessionPick = null;
   try {
     localStorage.setItem("os-lang", LANG);
   } catch {
-    /* ignore quota / missing storage */
+    // Storage refused the pick: keep it for this page. A pick storage took
+    // is shared, so another tab choosing "System" must be able to clear it.
+    sessionPick = LANG;
   }
   await loadDictionaries(LANG);
   repaintLanguage();
@@ -315,6 +321,18 @@ export async function syncSystemLanguage(): Promise<void> {
   if (langPreference() !== "system") return;
   const next = systemLang();
   if (next !== LANG) await applyLang(next);
+}
+
+/**
+ * Follow a pick made in another tab (the window's `storage` event, which only
+ * fires when storage works). Without it a tab kept its language while its
+ * language control showed the other tab's pick, and ignored the browser.
+ */
+export async function syncSavedLanguage(): Promise<void> {
+  sessionPick = null;
+  const next = savedLang() ?? systemLang();
+  if (next !== LANG) await applyLang(next);
+  else repaintLanguage();
 }
 
 /** Everything that shows the active language: static labels, toggle, hooks, subscribers. */

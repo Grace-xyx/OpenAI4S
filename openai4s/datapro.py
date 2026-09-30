@@ -321,6 +321,22 @@ def adopt_active_agent_plan_key(store: DataProStore) -> str:
     return ADOPTED_UPDATED if row else ADOPTED_FIRST
 
 
+def release_foreign_adopted_copy(store: DataProStore) -> bool:
+    """Forget an adopted copy of the live Ark key when its endpoint is not Volcengine's.
+
+    Adoption judges the endpoint once.  A daemon started without the
+    ``OPENAI4S_ARK_BASE_URL`` override that normally sends a blank Base URL to
+    a proxy adopted the proxy's key; restarted with the override again, the
+    live key is correctly not reused -- but the copy would still be sent.
+    """
+
+    base_url = _active_ark_base_url(store)
+    if base_url is None or is_volcengine_endpoint(base_url) or not _adopted(store):
+        return False
+    live = _brokered(store, "llm_api_key")
+    return bool(live) and forget_adopted_agent_plan_key(store, live)
+
+
 def forget_adopted_agent_plan_key(store: DataProStore, value: str) -> bool:
     """Clear an adopted dedicated key, but only when it is exactly ``value``.
 
@@ -701,6 +717,7 @@ __all__ = [
     "connector_runtime_config",
     "credential_state",
     "forget_adopted_agent_plan_key",
+    "release_foreign_adopted_copy",
     "is_agent_plan_endpoint",
     "managed_connector_command",
     "is_volcengine_endpoint",
