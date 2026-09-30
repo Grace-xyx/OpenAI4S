@@ -6,6 +6,7 @@ import itertools
 import json
 import sqlite3
 import threading
+import uuid
 
 import pytest
 
@@ -331,3 +332,128 @@ def test_host_call_log_scrubs_skips_truncates_and_commits(tmp_path):
         5002,
     )
     assert calls == [5000, 5001, 5002]
+
+
+def test_judge_audit_preview_drops_state_and_params(tmp_path):
+    """host.judge previews keep a safe template id and fixed markers.
+
+    One sentinel sits inside the first 500 characters of the raw dump and
+    another past that cut, so a truncation of the original arguments would
+    still publish the first. Params and an unsafe template string are the
+    same kind of caller text.
+    """
+
+    store = _store(tmp_path)
+    now, _calls = _clock(8000)
+    repository = HostCallRepository(store._conn, store._lock, clock_ms=now)
+    near = f"SENTINEL-02-{uuid.uuid4()}"
+    far = f"SENTINEL-02-{uuid.uuid4()}"
+    param_secret = f"SENTINEL-02-{uuid.uuid4()}"
+    state = {"nest": {"secret": near, "pad": "x" * 600, "tail": far}}
+    raw = [{"template": "system.probe", "state": state}]
+    dumped = json.dumps(raw, ensure_ascii=False)
+    assert dumped.find(near) < 500
+    assert dumped.find(far) > 500
+    invalid = f"bad template {near}"
+    long_id = "b" * 101
+    safe_id = "a" * 100
+
+    repository.log(
+        method="judge",
+        args=raw,
+        ok=True,
+        result={"status": "ok", "template_id": "system.probe"},
+    )
+    repository.log(
+        method="judge",
+        args=[
+            {
+                "template": "features.custom",
+                "state": state,
+                "params": {"specs": param_secret},
+            }
+        ],
+        ok=True,
+    )
+    repository.log(
+        method="judge",
+        args=[{"template": invalid, "state": {"secret": near}}],
+        ok=False,
+    )
+    repository.log(
+        method="judge",
+        args=[{"template": long_id, "state": {"secret": far}}],
+        ok=False,
+    )
+    repository.log(
+        method="judge",
+        args=[{"template": safe_id, "state": {"secret": near}}],
+        ok=True,
+    )
+    repository.log(
+        method="judge",
+        args=[{"template": "system.probe", "state": {"secret": near}}, {"leak": far}],
+        ok=False,
+    )
+    repository.log(method="judge", args=f"not-a-list {near}", ok=False)
+    repository.log(
+        method="web_fetch",
+        args=[{"url": f"https://example.test/{near}"}],
+        ok=True,
+    )
+
+    with sqlite3.connect(store.db_path) as independent:
+        rows = independent.execute(
+            "SELECT method, args_preview, result_preview, result_digest, ok "
+            "FROM host_call_log ORDER BY created_at"
+        ).fetchall()
+
+    assert len(rows) == 8
+    judge_rows = rows[:7]
+    state_only = json.dumps([{"state": "<redacted judge state>"}], ensure_ascii=False)
+    for row in judge_rows:
+        assert row[0] == "judge"
+        preview = row[1]
+        assert near not in preview
+        assert far not in preview
+        assert param_secret not in preview
+        assert invalid not in preview
+        assert long_id not in preview
+        assert near not in (row[2] or "")
+        assert far not in (row[2] or "")
+        assert row[3] and len(row[3]) == 64
+        assert "<redacted secret" not in preview
+    assert judge_rows[0][1] == json.dumps(
+        [{"template": "system.probe", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    assert "system.probe" in judge_rows[0][1]
+    assert judge_rows[1][1] == json.dumps(
+        [
+            {
+                "template": "features.custom",
+                "state": "<redacted judge state>",
+                "params": "<redacted judge params>",
+            }
+        ],
+        ensure_ascii=False,
+    )
+    assert param_secret not in judge_rows[1][1]
+    assert judge_rows[2][1] == json.dumps(
+        [{"template": "<invalid template>", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    assert judge_rows[3][1] == judge_rows[2][1]
+    assert judge_rows[4][1] == json.dumps(
+        [{"template": safe_id, "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    assert judge_rows[5][1] == state_only
+    assert judge_rows[6][1] == state_only
+    control = rows[7]
+    assert control[0] == "web_fetch"
+    assert control[1] == json.dumps(
+        [{"url": f"https://example.test/{near}"}], ensure_ascii=False
+    )
+    assert near in control[1]
+    store.close()

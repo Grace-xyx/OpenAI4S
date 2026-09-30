@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
+import uuid
 from typing import Any, Mapping
 
 import pytest
@@ -59,7 +62,8 @@ def test_recorder_tapes_judge_and_replay_uses_tape(
     recorder = TapeRecorder(tmp_path / "openai4s_tape.json")
     dispatcher.recorder = recorder
 
-    spec = {"template": PROBE_TEMPLATE_ID, "state": {"text": "hi"}}
+    sentinel = f"SENTINEL-02-{uuid.uuid4()}"
+    spec = {"template": PROBE_TEMPLATE_ID, "state": {"text": "hi", "secret": sentinel}}
     live = dispatcher("judge", [spec])
     assert live["status"] == "ok"
     assert live["template_id"] == PROBE_TEMPLATE_ID
@@ -67,6 +71,7 @@ def test_recorder_tapes_judge_and_replay_uses_tape(
     assert recorder.records
     assert recorder.records[0]["method"] == "judge"
     assert recorder.records[0]["result"]["status"] == "ok"
+    assert recorder.records[0]["args"][0]["state"]["secret"] == sentinel
 
     tape_path = recorder.flush()
     replay = _OpenAI4SReplay(recorder.records)
@@ -76,3 +81,13 @@ def test_recorder_tapes_judge_and_replay_uses_tape(
     assert backend.calls == 1
     assert urlopen_calls == []
     assert tape_path.is_file()
+    assert sentinel in tape_path.read_text(encoding="utf-8")
+    with sqlite3.connect(dispatcher.store.db_path) as conn:
+        preview = conn.execute(
+            "SELECT args_preview FROM host_call_log WHERE method = 'judge'"
+        ).fetchone()[0]
+    assert sentinel not in preview
+    assert preview == json.dumps(
+        [{"template": PROBE_TEMPLATE_ID, "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )

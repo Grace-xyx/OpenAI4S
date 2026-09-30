@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from typing import Any, Callable, Mapping
@@ -31,6 +32,75 @@ SECRET_ARG_HOST_CALLS = frozenset(
         "record_bash_result",
     }
 )
+
+# ``host.judge`` keeps its replay-tape recording and its result digest.
+# The argument preview is replaced before the generic json.dumps, so every
+# writer of host_call_log is covered. Schema v33 calls the same projection.
+REDACTED_JUDGE_STATE = "<redacted judge state>"
+REDACTED_JUDGE_PARAMS = "<redacted judge params>"
+_INVALID_JUDGE_TEMPLATE = "<invalid template>"
+_JUDGE_TEMPLATE_BODY = r"[A-Za-z0-9_.:\-]{1,100}"
+_JUDGE_TEMPLATE_ID = re.compile("^" + _JUDGE_TEMPLATE_BODY + "$")
+# Historical previews are ``json.dumps`` (spaces after ":" and ",") cut at
+# 500 characters, so they are usually not valid JSON. The template id is
+# read from that prefix only.
+_STORED_JUDGE_TEMPLATE = re.compile(
+    r'^\[\{"template": "(' + _JUDGE_TEMPLATE_BODY + r')"'
+)
+
+
+def _bounded_audit_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)[:500]
+
+
+def judge_audit_args(args: Any) -> list:
+    """Project one ``host.judge`` call for ``host_call_log.args_preview``.
+
+    The result contains a safe template id when the call has one, the fixed
+    state marker, and the fixed params marker when the spec carried params.
+    Any other shape collapses to the state marker alone. This function never
+    serializes the original arguments.
+    """
+
+    if isinstance(args, list) and len(args) == 1 and isinstance(args[0], dict):
+        spec = args[0]
+        template = spec.get("template")
+        if isinstance(template, str) and _JUDGE_TEMPLATE_ID.fullmatch(template):
+            projected: dict[str, str] = {
+                "template": template,
+                "state": REDACTED_JUDGE_STATE,
+            }
+        else:
+            projected = {
+                "template": _INVALID_JUDGE_TEMPLATE,
+                "state": REDACTED_JUDGE_STATE,
+            }
+        if "params" in spec:
+            projected["params"] = REDACTED_JUDGE_PARAMS
+        return [projected]
+    return [{"state": REDACTED_JUDGE_STATE}]
+
+
+def redact_stored_judge_args_preview(preview: Any) -> str:
+    """Rewrite one stored ``args_preview`` with :func:`judge_audit_args`.
+
+    A safe template id is kept when the truncated preview still starts with
+    one. Every other preview becomes the state-only projection. Re-running
+    this on its own output is a no-op.
+    """
+
+    text = preview if isinstance(preview, str) else ""
+    match = _STORED_JUDGE_TEMPLATE.match(text)
+    if match:
+        projected = judge_audit_args([{"template": match.group(1)}])
+    else:
+        projected = judge_audit_args(None)
+    return _bounded_audit_json(projected)
+
+
+AUDIT_ARG_PROJECTIONS: dict[str, Callable[[Any], list]] = {
+    "judge": judge_audit_args,
+}
 
 
 class NotesRepository:
@@ -364,8 +434,12 @@ class HostCallRepository:
         if method in SECRET_ARG_HOST_CALLS:
             preview = "<redacted secret args>"
         else:
+            # Projections run before the generic dumps. A hit replaces the
+            # arguments in full; there is no fallback that serializes them.
+            project = AUDIT_ARG_PROJECTIONS.get(method)
+            payload = project(args) if project is not None else args
             try:
-                preview = json.dumps(args, ensure_ascii=False)[:500]
+                preview = _bounded_audit_json(payload)
             except (TypeError, ValueError):
                 preview = "<unserializable>"
         result_preview, result_digest = self._result_audit(method, result)
@@ -566,11 +640,16 @@ class HostCallRepository:
 
 
 __all__ = [
+    "AUDIT_ARG_PROJECTIONS",
     "CompactionRepository",
     "DERIVABLE_HOST_CALLS",
     "EndpointRepository",
     "FolderRepository",
     "HostCallRepository",
     "NotesRepository",
+    "REDACTED_JUDGE_PARAMS",
+    "REDACTED_JUDGE_STATE",
     "SECRET_ARG_HOST_CALLS",
+    "judge_audit_args",
+    "redact_stored_judge_args_preview",
 ]
