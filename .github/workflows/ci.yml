@@ -655,6 +655,9 @@ jobs:
       - name: Stage 0 harness self-check (no browser, no daemon)
         run: OPENAI4S_STAGE0_SELF_TEST=1 node tests/browser_stage0_acceptance.mjs
       - name: Install the browser driver
+        # Same unbounded apt-get as the browser-smoke install step. Chromium
+        # only: the step peaked at 41s over 15 green runs.
+        timeout-minutes: 10
         run: |
           npm ci --ignore-scripts
           ./node_modules/.bin/playwright install --with-deps chromium
@@ -736,6 +739,9 @@ jobs:
           npm run build --prefix frontend
           git diff --exit-code -- openai4s/server/webui/dist
       - name: Install the zero-dependency server and browser driver
+        # Same unbounded apt-get as the browser-smoke install step. Chromium
+        # only: the step peaked at 229s over 15 green runs.
+        timeout-minutes: 10
         run: |
           uv sync --locked
           npm ci --ignore-scripts
