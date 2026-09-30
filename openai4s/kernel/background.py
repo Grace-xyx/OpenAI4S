@@ -207,6 +207,27 @@ class BackgroundExecutor:
                     self._exit_lifetime(job)
                     raise RuntimeError("background executor is closed")
 
+        from openai4s.egress import (
+            EgressBoundaryUnavailable,
+            cell_admission_refusal,
+            egress_mode,
+        )
+
+        if egress_mode() == "allowlist":
+            try:
+                posture = getattr(job._kernel, "sandbox_status", None)
+            except Exception:  # noqa: BLE001 - missing posture fails closed
+                posture = None
+            decision = cell_admission_refusal(posture)
+            if decision is not None:
+                with self._lock:
+                    self._jobs.pop(exec_id, None)
+                try:
+                    job._kernel.shutdown()
+                finally:
+                    self._exit_lifetime(job)
+                raise EgressBoundaryUnavailable(decision)
+
         def _run() -> None:
             terminal_status = "failed"
             terminal_error: str | None = None
@@ -223,6 +244,9 @@ class BackgroundExecutor:
                     terminal_error = res.get("error")
                 else:
                     terminal_status = "done"
+            except EgressBoundaryUnavailable as exc:
+                terminal_status = "failed"
+                terminal_error = f"{exc.code}: {exc.decision.get('reason') or ''}"
             except BaseException:  # a dead thread must never remain "running"
                 # This record is returned directly by exec_peek. Kernel and
                 # transport exceptions can contain worker stderr, absolute

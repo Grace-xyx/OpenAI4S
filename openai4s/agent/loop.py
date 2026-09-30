@@ -300,6 +300,18 @@ def _preauthorized_test_commands_note(commands: Sequence[str]) -> str:
     )
 
 
+def _is_egress_boundary_error(exc: BaseException) -> bool:
+    """True when a Cell was refused because allowlist has no proven boundary."""
+
+    from openai4s.egress import EGRESS_BOUNDARY_UNAVAILABLE, EgressBoundaryUnavailable
+
+    if isinstance(exc, EgressBoundaryUnavailable):
+        return True
+    if getattr(exc, "code", None) == EGRESS_BOUNDARY_UNAVAILABLE:
+        return True
+    return str(exc).startswith(f"{EGRESS_BOUNDARY_UNAVAILABLE}:")
+
+
 @dataclass
 class Agent:
     cfg: Config = field(default_factory=get_config)
@@ -614,12 +626,21 @@ class Agent:
         structured finalization.
         """
 
+        from openai4s.egress import EGRESS_BOUNDARY_UNAVAILABLE, cell_admission_refusal
         from openai4s.server.skill_network_admission import admit_cell
 
         try:
             sandbox_status = getattr(kernel, "sandbox_status", None)
         except Exception:  # noqa: BLE001 - unavailable posture must fail closed
             sandbox_status = None
+        egress_decision = cell_admission_refusal(sandbox_status)
+        if egress_decision is not None:
+            code = str(egress_decision.get("code") or EGRESS_BOUNDARY_UNAVAILABLE)
+            reason = str(egress_decision.get("reason") or "")
+            refused = PermissionError(f"{code}: {reason}")
+            setattr(refused, "code", code)
+            setattr(refused, "decision", dict(egress_decision))
+            raise refused
         decision = admit_cell(
             frame_id=self.frame_id,
             sandbox_status=sandbox_status,
@@ -1387,7 +1408,9 @@ class Agent:
             # R has no sidecar bootstrap, but admission still precedes the first
             # user expression and uses this exact worker's measured posture.
             self._admit_spawned_cell_kernel(k)
-        except BaseException:
+        except BaseException as exc:
+            if _is_egress_boundary_error(exc):
+                raise
             self._shutdown_r_kernel()
             raise
         if self._generation_recorder is not None:
@@ -1414,6 +1437,8 @@ class Agent:
                     kwargs["cell_id"] = cell_id
             return execute(code, **kwargs)
         except Exception as e:  # noqa: BLE001 — dead worker: drop it, soft-fail
+            if _is_egress_boundary_error(e):
+                raise
             self._shutdown_r_kernel()
             return {"error": f"R kernel failed: {e}"}
 

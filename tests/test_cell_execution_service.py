@@ -1150,3 +1150,251 @@ def test_a_bootstrap_failure_after_reset_does_not_claim_cluster_work_continues()
     assert "variables from earlier cells were cleared" in published
     assert "replacement could not be initialized" in published
     assert "cluster" not in published and "allocation" not in published
+
+
+_UNPROVEN_SANDBOX = {
+    "mode": "auto",
+    "state": "degraded",
+    "backend": None,
+    "enforced": False,
+    "self_test_passed": False,
+    "network_policy": "not_enforced",
+    "workspace": "/tmp/openai4s-should-not-leak",
+    "temp_dir": "/tmp/openai4s-private-should-not-leak",
+    "detail": "injected",
+}
+
+
+def _egress_service(harness, finished):
+    return CellExecutionService(
+        replace(
+            harness.ports(),
+            allocate_attempt=lambda *args: "attempt-egress",
+            finish_attempt=lambda attempt_id, state, error: finished.append(
+                (attempt_id, state)
+            ),
+        ),
+        id_factory=lambda: "cell-egress",
+    )
+
+
+def test_allowlist_cell_refusal_is_a_stable_soft_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    harness = Harness()
+    finished: list[tuple] = []
+    session = _session(tmp_path)
+    session.kernels = SimpleNamespace(
+        kernel=lambda language: SimpleNamespace(sandbox_status=dict(_UNPROVEN_SANDBOX))
+    )
+    result = _egress_service(harness, finished).execute(
+        session,
+        CellRequest("print(1)", "agent", stream=False),
+        lambda event: None,
+    )
+
+    assert result.executed is False
+    assert result.result["error"].startswith("egress_boundary_unavailable:")
+    assert result.result["egress_boundary"]["code"] == "egress_boundary_unavailable"
+    assert result.result["egress_boundary"]["sandbox"]["network_policy"] == (
+        "not_enforced"
+    )
+    rendered = str(result.result["egress_boundary"])
+    assert "should-not-leak" not in rendered
+    assert "run" not in harness.order and "capture" not in harness.order
+    assert harness.order == [
+        "prepare",
+        "label",
+        "snapshot",
+        "protect",
+        "safety",
+        "record",
+    ]
+    assert ("attempt-egress", "egress_boundary_refused") in finished
+
+
+def test_execute_time_boundary_refusal_keeps_the_code_and_the_lease(
+    monkeypatch, tmp_path
+):
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    harness = Harness()
+    finished: list[tuple] = []
+    harness.fail_run = EgressBoundaryUnavailable(
+        {
+            "code": "egress_boundary_unavailable",
+            "reason": "mode flipped during execute",
+            "egress_mode": "allowlist",
+            "sandbox": {
+                "mode": None,
+                "state": None,
+                "backend": None,
+                "enforced": False,
+                "self_test_passed": None,
+                "network_policy": "not_enforced",
+            },
+            "remedy": ["Set OPENAI4S_EGRESS=off"],
+        }
+    )
+    lease = object()
+    shut: list[object] = []
+    session = _session(tmp_path)
+    session.kernels = SimpleNamespace(
+        kernel=lambda language: None,
+        lease=lambda language: lease,
+        shutdown_if_current=lambda current: shut.append(current),
+    )
+    result = _egress_service(harness, finished).execute(
+        session,
+        CellRequest("print(1)", "agent", language="r", stream=False),
+        lambda event: None,
+    )
+
+    assert result.executed is False
+    assert result.result["egress_boundary"]["reason"] == "mode flipped during execute"
+    assert result.result["error"].startswith("egress_boundary_unavailable:")
+    assert shut == []
+    assert "run" in harness.order
+    assert ("attempt-egress", "egress_boundary_refused") in finished
+
+
+def test_wrapped_bootstrap_failure_projects_the_boundary_code(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    harness = Harness()
+    finished: list[tuple] = []
+
+    def prepare(_session, _language):
+        raise RuntimeError(
+            "kernel bootstrap failed: egress_boundary_unavailable: wrapped"
+        )
+
+    service = CellExecutionService(
+        replace(
+            harness.ports(),
+            prepare_language=prepare,
+            allocate_attempt=lambda *args: "attempt-boot",
+            finish_attempt=lambda attempt_id, state, error: finished.append(
+                (attempt_id, state)
+            ),
+        ),
+        id_factory=lambda: "cell-boot",
+    )
+    result = service.execute(
+        _session(tmp_path),
+        CellRequest("print(1)", "agent", stream=False),
+        lambda event: None,
+    )
+
+    assert result.executed is False
+    assert result.result["egress_boundary"]["code"] == "egress_boundary_unavailable"
+    assert "Seatbelt" in result.result["error"]
+    assert finished == [("attempt-boot", "egress_boundary_refused")]
+
+
+def test_an_unrelated_prepare_failure_still_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    harness = Harness()
+    finished: list[tuple] = []
+
+    def prepare(_session, _language):
+        raise RuntimeError("disk full")
+
+    service = CellExecutionService(
+        replace(
+            harness.ports(),
+            prepare_language=prepare,
+            allocate_attempt=lambda *args: "attempt-disk",
+            finish_attempt=lambda attempt_id, state, error: finished.append(
+                (attempt_id, state)
+            ),
+        ),
+        id_factory=lambda: "cell-disk",
+    )
+    with pytest.raises(RuntimeError, match="disk full"):
+        service.execute(
+            _session(tmp_path),
+            CellRequest("print(1)", "agent", stream=False),
+            lambda event: None,
+        )
+    assert finished == [("attempt-disk", "prepare_failed")]
+
+
+@pytest.mark.stubbed_backend
+def test_repl_execute_route_returns_the_boundary_code(monkeypatch, tmp_path):
+    """Drive POST /frames/{id}/kernel/execute, not the service method alone."""
+
+    from openai4s.config import Config, LLMConfig
+    from openai4s.egress import EgressBoundaryUnavailable
+    from openai4s.server import gateway as gateway_mod
+    from openai4s.store import get_store
+
+    monkeypatch.setenv("OPENAI4S_NOTEBOOK_REPL", "1")
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+
+    class _Hub:
+        def emitter(self, root_frame_id):
+            return lambda event: None
+
+        def broadcast(self, root_frame_id, event):
+            return None
+
+    class RefusingKernel:
+        def __init__(self, dispatcher=None, **kwargs):
+            self.dispatcher = dispatcher
+            self.cwd = kwargs.get("cwd") or str(tmp_path)
+            self.python = kwargs.get("python")
+            self.env_name = kwargs.get("env_name")
+            self.env_root = kwargs.get("env_root")
+            self.closed = False
+
+        def is_alive(self):
+            return not self.closed
+
+        def execute(self, code, origin="agent", **kwargs):
+            raise EgressBoundaryUnavailable(
+                {
+                    "code": "egress_boundary_unavailable",
+                    "reason": "sandbox unproven",
+                    "egress_mode": "allowlist",
+                    "sandbox": {
+                        "mode": None,
+                        "state": None,
+                        "backend": "remote",
+                        "enforced": False,
+                        "self_test_passed": False,
+                        "network_policy": "unproven",
+                    },
+                    "remedy": ["Set OPENAI4S_EGRESS=off"],
+                }
+            )
+
+        def shutdown(self):
+            self.closed = True
+
+        def interrupt(self):
+            return None
+
+    monkeypatch.setattr(gateway_mod, "Kernel", RefusingKernel)
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    runner = gateway_mod.SessionRunner(cfg, _Hub(), start_idle_sweeper=False)
+    store = get_store(cfg.db_path)
+    fid = store.new_frame(kind="turn", project_id="default", status="ready")
+    handler = object.__new__(gateway_mod.make_handler(cfg, _Hub(), runner))
+    replies: list[tuple] = []
+    handler._query = lambda: {}
+    handler._body = lambda: {
+        "code": "print(1)",
+        "language": "python",
+        "wait": True,
+    }
+    handler._json = lambda obj, code=200: replies.append((code, obj))
+    handler._api("POST", f"/frames/{fid}/kernel/execute")
+
+    assert replies[-1][0] == 200
+    body = replies[-1][1]
+    assert body["status"] == "completed"
+    assert body["cell"]["status"] == "error"
+    assert str(body["cell"]["error"]).startswith("egress_boundary_unavailable:")

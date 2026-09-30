@@ -369,6 +369,19 @@ class CellExecutionService:
                 else None
             )
         except BaseException as exc:
+            egress_decision = _egress_decision_from_failure(exc)
+            if egress_decision is not None:
+                return self._refuse_egress_boundary(
+                    session,
+                    request,
+                    emit,
+                    index,
+                    cell_id,
+                    None,
+                    attempt_id,
+                    None,
+                    egress_decision,
+                )
             self._finish_attempt(attempt_id, "prepare_failed", exc)
             raise
         try:
@@ -429,9 +442,23 @@ class CellExecutionService:
                 generation_id,
             )
 
+        from openai4s.egress import cell_admission_refusal
         from openai4s.server.skill_network_admission import admit_cell, frame_scope
 
         sandbox_status = _session_sandbox_status(session, request.language)
+        egress_decision = cell_admission_refusal(sandbox_status)
+        if egress_decision is not None:
+            return self._refuse_egress_boundary(
+                session,
+                request,
+                emit,
+                index,
+                cell_id,
+                kernel_id,
+                attempt_id,
+                generation_id,
+                egress_decision,
+            )
         network_decision = admit_cell(
             frame_id=session.root_frame_id,
             sandbox_status=sandbox_status,
@@ -478,6 +505,21 @@ class CellExecutionService:
             with frame_scope(session.root_frame_id):
                 result = self.ports.run(session, request, cell_id, on_chunk, lease)
         except BaseException as exc:
+            egress_decision = _egress_decision_from_failure(exc)
+            if egress_decision is not None:
+                # The kernel is still usable: a boundary refusal sends no
+                # Cell, so the R lease stays published for a later Cell.
+                return self._refuse_egress_boundary(
+                    session,
+                    request,
+                    emit,
+                    index,
+                    cell_id,
+                    kernel_id,
+                    attempt_id,
+                    generation_id,
+                    egress_decision,
+                )
             # A live R process can still be protocol-desynchronized when its
             # reader exits through a callback/parse error. Close only this lease;
             # watchdog recovery may already have advanced the generation.
@@ -720,6 +762,36 @@ class CellExecutionService:
             )
 
         return on_chunk
+
+    def _refuse_egress_boundary(
+        self,
+        session: CellSession,
+        request: CellRequest,
+        emit: EventSink,
+        index: int,
+        cell_id: str,
+        kernel_id: str | None,
+        attempt_id: str | None,
+        generation_id: str | None,
+        decision: dict[str, Any],
+    ) -> CellExecutionResult:
+        code = str(decision.get("code") or "egress_boundary_unavailable")
+        reason = str(decision.get("reason") or "")
+        refused = self._soft_error(
+            session,
+            request,
+            emit,
+            index,
+            cell_id,
+            kernel_id,  # type: ignore[arg-type]
+            f"{code}: {reason}",
+            attempt_id,
+            "egress_boundary_refused",
+            generation_id,
+        )
+        if isinstance(refused.result, dict):
+            refused.result["egress_boundary"] = dict(decision)
+        return refused
 
     def _soft_error(
         self,
@@ -983,6 +1055,61 @@ def activity_title(code: str, index: int) -> str:
         elif stripped:
             break
     return f"Running analysis · cell {index}"
+
+
+def _egress_decision_from_failure(exc: BaseException) -> dict[str, Any] | None:
+    """Recover a stable allowlist refusal from a typed or wrapped failure.
+
+    Bootstrap stores ``str(error)`` and the spawner re-raises a
+    ``RuntimeError`` with no cause. The code token is enough to rebuild the
+    decision. When the mode has already flipped back to off, the canonical
+    reason is used instead of the exception text, which can carry paths.
+    """
+
+    from openai4s.egress import (
+        EGRESS_BOUNDARY_UNAVAILABLE,
+        EgressBoundaryUnavailable,
+        cell_admission_refusal,
+    )
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        decision = getattr(current, "decision", None)
+        if isinstance(current, EgressBoundaryUnavailable) and isinstance(
+            decision, dict
+        ):
+            return dict(decision)
+        cause = current.__cause__
+        if isinstance(cause, BaseException):
+            current = cause
+            continue
+        context = current.__context__
+        if isinstance(context, EgressBoundaryUnavailable):
+            current = context
+            continue
+        break
+    if EGRESS_BOUNDARY_UNAVAILABLE not in str(exc):
+        return None
+    fresh = cell_admission_refusal(None)
+    if fresh is not None:
+        return fresh
+    keys = (
+        "mode",
+        "state",
+        "backend",
+        "enforced",
+        "self_test_passed",
+        "network_policy",
+    )
+    return {
+        "code": EGRESS_BOUNDARY_UNAVAILABLE,
+        "reason": EgressBoundaryUnavailable.stable_reason,
+        "egress_mode": "allowlist",
+        "sandbox": {key: None for key in keys},
+        "remedy": list(EgressBoundaryUnavailable.stable_remedy),
+    }
 
 
 def _session_sandbox_status(

@@ -583,3 +583,150 @@ def test_a_kernel_that_makes_no_delivery_claim_is_not_reported_as_failed():
     finally:
         kernel.release.set()
         executor.shutdown(timeout_per_job=1.0)
+
+
+class _DegradedBackgroundKernel:
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+        self.executed = 0
+
+    @property
+    def sandbox_status(self) -> dict:
+        return {
+            "mode": "off",
+            "state": "disabled",
+            "backend": None,
+            "enforced": False,
+            "self_test_passed": None,
+            "network_policy": "not_enforced",
+        }
+
+    def execute(self, code, origin="agent", on_chunk=None):
+        del code, origin, on_chunk
+        self.executed += 1
+        return {"stdout": "ok", "error": None}
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+def test_allowlist_refuses_a_degraded_background_kernel_before_its_thread(
+    monkeypatch,
+):
+    """Allowlist refusal happens after spawn and before the worker thread."""
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    kernel = _DegradedBackgroundKernel()
+    exits: list[int] = []
+
+    class _Life:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            exits.append(1)
+            return False
+
+    executor = BackgroundExecutor(
+        lambda: kernel,
+        dispatcher=None,
+        lifetime_factory=lambda: _Life(),
+    )
+    with pytest.raises(EgressBoundaryUnavailable) as failure:
+        executor.launch("print(1)")
+    assert failure.value.code == "egress_boundary_unavailable"
+    assert executor._jobs == {}
+    assert kernel.shutdown_calls == 1
+    assert kernel.executed == 0
+    assert exits == [1]
+
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    second = executor.launch("print(2)")
+    assert list(executor._jobs) == [second["exec_id"]]
+    job = executor._get(second["exec_id"])
+    assert job._thread is not None
+    job._thread.join(2)
+    executor.shutdown(timeout_per_job=1.0)
+
+
+def test_allowlist_treats_a_missing_background_posture_as_unproven(monkeypatch):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+
+    class _Bare:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def shutdown(self) -> None:
+            self.closed = True
+
+        def execute(self, code, origin="agent", on_chunk=None):
+            del code, origin, on_chunk
+            raise AssertionError("an unproven kernel must not run")
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    kernel = _Bare()
+    executor = BackgroundExecutor(lambda: kernel, dispatcher=None)
+    with pytest.raises(EgressBoundaryUnavailable) as failure:
+        executor.launch("print(1)")
+    assert failure.value.code == "egress_boundary_unavailable"
+    assert executor._jobs == {}
+    assert kernel.closed is True
+
+
+def test_background_thread_records_a_boundary_refusal(monkeypatch):
+    """A mode flip after launch is still the stable code, not a generic failure."""
+
+    from openai4s.egress import EGRESS_BOUNDARY_UNAVAILABLE, EgressBoundaryUnavailable
+
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+
+    class _FlippingKernel:
+        def execute(self, code, origin="agent", on_chunk=None):
+            del code, origin, on_chunk
+            raise EgressBoundaryUnavailable(
+                {
+                    "code": EGRESS_BOUNDARY_UNAVAILABLE,
+                    "reason": "mode flipped while the job was queued",
+                }
+            )
+
+        def shutdown(self) -> None:
+            return None
+
+        def interrupt(self):
+            return None
+
+    kernel = _FlippingKernel()
+    executor = BackgroundExecutor(lambda: kernel, dispatcher=None)
+    launched = executor.launch("print(1)")
+    job = executor._get(launched["exec_id"])
+    assert job._thread is not None
+    job._thread.join(2)
+    peeked = executor.peek(launched["exec_id"])
+    assert peeked["done"] is True
+    assert peeked["error"].startswith("egress_boundary_unavailable:")
+    assert "mode flipped while the job was queued" in peeked["error"]
+    assert peeked["error"] != "background execution failed"
+    executor.shutdown(timeout_per_job=1.0)
+
+
+def test_host_exec_background_raises_the_boundary_code(tmp_path, monkeypatch):
+    from openai4s.config import Config
+    from openai4s.egress import EgressBoundaryUnavailable
+    from openai4s.host_dispatch import build_dispatcher
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    dispatcher = build_dispatcher(Config(data_dir=tmp_path / "data"))
+    try:
+        dispatcher.background_kernel_factory = _DegradedBackgroundKernel
+        with pytest.raises(EgressBoundaryUnavailable) as failure:
+            dispatcher._m_exec_background({"code": "print(1)"})
+        assert failure.value.code == "egress_boundary_unavailable"
+        assert str(failure.value).startswith("egress_boundary_unavailable:")
+        assert dispatcher._bg_executor is not None
+        assert dispatcher._bg_executor._jobs == {}
+    finally:
+        dispatcher.store.close()
