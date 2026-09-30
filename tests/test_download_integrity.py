@@ -204,3 +204,26 @@ def test_cancel_after_staging_preserves_previous_file(tmp_path, monkeypatch):
             cancelled=lambda: stopped,
         )
     assert destination.read_bytes() == b"previous"
+
+
+def test_generic_web_download_stops_on_the_bound_execution_cancel(
+    tmp_path, monkeypatch
+):
+    # The gateway binds the execution's Stop around every writing tool; the
+    # generic downloader must honour it like the dataset importer does.
+    from openai4s.config import Config
+    from openai4s.host_dispatch import build_dispatcher
+    from openai4s.tools.web_download import WebDownloadTool
+
+    monkeypatch.setattr(
+        webtools, "_open_http_response", lambda *_a, **_k: pytest.fail("must not fetch")
+    )
+    dispatcher = build_dispatcher(
+        Config(data_dir=tmp_path / "data"), workspace=tmp_path / "workspace"
+    )
+    arguments = {"url": "https://example.test/input.csv", "path": "inputs/a.csv"}
+    with dispatcher.bind_download_cancellation(lambda: True):
+        result = WebDownloadTool().execute(dispatcher._tool_context, arguments)
+    assert set(result) == {"error"}
+    assert "cancelled" in result["error"]
+    assert not (tmp_path / "workspace" / "inputs").exists()

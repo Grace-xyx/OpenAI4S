@@ -113,6 +113,9 @@ class WebDownloadTool(Tool):
         from openai4s import egress, webtools
         from openai4s.host.download import download_into_workspace
 
+        # The owning execution's Stop, when the context carries one; the
+        # WorkspaceFileService compatibility path does not.
+        cancellation = getattr(workspace, "download_cancellation", None)
         try:
             return download_into_workspace(
                 workspace,
@@ -121,6 +124,7 @@ class WebDownloadTool(Tool):
                 timeout=float(arguments.get("timeout") or 60),
                 max_bytes=int(arguments.get("max_bytes") or DEFAULT_MAX_BYTES),
                 user_agent=arguments.get("user_agent") or None,
+                cancelled=cancellation() if callable(cancellation) else None,
             )
         except (
             webtools.NetworkDisabled,
