@@ -13,8 +13,8 @@ F-19 Customize modal. Nine tab components, a nested editor overlay, and `vendors
 | [`ConnectorsTab.tsx`](ConnectorsTab.tsx) | Connector list; DataPro card is isolated in `vendors/`. |
 | [`Customize.tsx`](Customize.tsx) | `#cust` shell, tablist, Esc / backdrop close. |
 | [`Customize.test.tsx`](Customize.test.tsx) | A selection drag that ends on the Customize or nested-editor backdrop keeps the dialog open; a press on the backdrop still closes it. The modal does not re-render for a settling load or a nested editor, and the Skills and Memory tabs re-render for a change of project, not for every session-list update. |
-| [`GeneralTab.tsx`](GeneralTab.tsx) | Theme, layout, language, API-key shortcut. A theme or layout pick updates its segment in place. |
-| [`GeneralTab.test.tsx`](GeneralTab.test.tsx) | Picking a theme or layout moves its own segment without remounting or re-reading the tab. |
+| [`GeneralTab.tsx`](GeneralTab.tsx) | Theme, layout, language, API-key shortcut. A theme, layout or language pick updates its segment in place; the language control also offers following the system (the browser's language order), which is what it shows until a language is picked. |
+| [`GeneralTab.test.tsx`](GeneralTab.test.tsx) | Picking a theme or layout moves its own segment without remounting or re-reading the tab; the language control offers "System", shows it while nothing is saved, and passes each pick to `setLang`. |
 | [`DiagnosticsTab.tsx`](DiagnosticsTab.tsx) | Passive security posture, explicit checks, and redacted support-bundle download. Mounted from General. |
 | [`DiagnosticsTab.test.tsx`](DiagnosticsTab.test.tsx) | Page load is a single status GET; checks and bundle wait for a click; the request id copies over plain http, and a copy that did not happen is reported. |
 | [`MemoryTab.tsx`](MemoryTab.tsx) | Memory enable / add / edit / delete with explicit scope. |
