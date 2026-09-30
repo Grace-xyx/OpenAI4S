@@ -58,10 +58,9 @@ def resolve_selection(
 ) -> dict[str, Any]:
     """Read the fixed record endpoint and refuse stale or unavailable inputs."""
     service = service or ScienceConnectorService()
-    # A fresh service per import keeps response provenance scoped to this read.
-    service._responses = []
     retrieved_at = int(time.time() * 1000)
-    record = _record(service._json(selection.metadata_url, timeout))
+    document, responses = service.read_json(selection.metadata_url, timeout)
+    record = _record(document)
     if record["id"] != selection.record_id:
         raise DatasetSelectionError("dataset record identity changed during resolution")
     metadata = record["attributes"]
@@ -86,7 +85,6 @@ def resolve_selection(
         raise DatasetSelectionError(
             "dataset file checksum changed; refresh the selection"
         )
-    responses = list(service._responses)
     return {
         "kind": "dataset_input",
         "database": "zenodo",

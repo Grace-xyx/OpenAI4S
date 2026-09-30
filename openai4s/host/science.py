@@ -406,6 +406,20 @@ class ScienceConnectorService:
                 "scientific database returned invalid JSON"
             ) from exc
 
+    def read_json(self, url: str, timeout: float) -> tuple[Any, list[dict[str, Any]]]:
+        """Read one fixed JSON endpoint with only its own response receipts.
+
+        For callers outside `search` (a dataset import resolving its exact
+        record) that still need the same transport, byte hashing and
+        per-operation provenance scope.
+        """
+        self._responses = []
+        try:
+            value = self._json(url, timeout)
+            return value, list(self._responses)
+        finally:
+            self._responses = []
+
     def _text(self, url: str, timeout: float) -> str:
         raw, observed = self._retrieve(url, "text", timeout, _MAX_RESPONSE_CHARS)
         self._observe(url, raw, observed)
