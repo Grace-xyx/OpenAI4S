@@ -4,8 +4,10 @@ export {
   applyForkPresentation,
   forkFromCell,
   forkFromCheckpoint,
+  forkFromMessage,
   postRecoveryAction,
 } from "./branch";
+export type { ForkResult } from "./branch";
 export {
   FORK_NO_CHECKPOINT_MESSAGE,
   forkErrorDisplay,

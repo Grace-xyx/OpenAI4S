@@ -886,6 +886,79 @@ def test_exact_cell_and_message_cursor_forks_are_isolated_and_view_only(tmp_path
         runner.close()
 
 
+def test_fork_from_second_message_keeps_earlier_file_and_leaves_root_active(tmp_path):
+    """Message 2's checkpoint is taken at add_message, so file A from message 1
+    is in the fork and file B written by message 2's turn is not."""
+
+    runner, handler, frame_id = _setup(tmp_path)
+    workspace = runner.workspace_for(frame_id)
+    runner.store.update_frame(frame_id, name="two messages")
+    written = {"n": 0}
+
+    def loop(st, _emit, _visible):
+        written["n"] += 1
+        name = "A.txt" if written["n"] == 1 else "B.txt"
+        (st.workspace / name).write_text(name + "\n", encoding="utf-8")
+        st.dispatcher.last_output = {"output": "done"}
+        return "submitted"
+
+    runner._loop = loop
+    try:
+        first = runner.run_message(frame_id, "project-domain", "message one")
+        second = runner.run_message(frame_id, "project-domain", "message two")
+        assert first["status"] == "completed"
+        assert second["status"] == "completed"
+        assert (workspace / "A.txt").read_text(encoding="utf-8") == "A.txt\n"
+        assert (workspace / "B.txt").read_text(encoding="utf-8") == "B.txt\n"
+
+        code, messages = _call(handler, "GET", f"/frames/{frame_id}/messages")
+        assert code == 200
+        users = [item for item in messages["messages"] if item["role"] == "user"]
+        by_text = {item["content"]: item for item in users}
+        assert set(by_text) == {"message one", "message two"}
+        message_two = by_text["message two"]
+        assert message_two["message_id"]
+        assert message_two["fork_checkpoint_id"]
+
+        code, message_fork = _call(
+            handler,
+            "POST",
+            f"/frames/{frame_id}/branches/fork",
+            body={"from_message_id": message_two["message_id"]},
+        )
+        assert code == 200
+        assert message_fork["active"] is False
+        assert message_fork["view_only"] is True
+        assert message_fork["activatable"] is True
+        assert message_fork["source_kind"] == "message"
+        assert message_fork["source_id"] == message_two["message_id"]
+
+        fork_workspace = runner.workspace_for_branch(
+            frame_id, message_fork["branch_id"]
+        )
+        assert (fork_workspace / "A.txt").read_text(encoding="utf-8") == "A.txt\n"
+        assert not (fork_workspace / "B.txt").exists()
+        assert (workspace / "A.txt").read_text(encoding="utf-8") == "A.txt\n"
+        assert (workspace / "B.txt").read_text(encoding="utf-8") == "B.txt\n"
+        assert runner.store.active_session_branch(frame_id) == frame_id
+
+        code, branches = _call(handler, "GET", f"/frames/{frame_id}/branches")
+        assert code == 200
+        assert branches["current_branch_id"] == frame_id
+        original = next(
+            item for item in branches["branches"] if item["branch_id"] == frame_id
+        )
+        created = next(
+            item
+            for item in branches["branches"]
+            if item["branch_id"] == message_fork["branch_id"]
+        )
+        assert original["active"] is True and original["view_only"] is False
+        assert created["active"] is False and created["view_only"] is True
+    finally:
+        runner.close()
+
+
 def test_message_snapshot_failure_does_not_fail_message_or_advertise_fork(tmp_path):
     runner, handler, frame_id = _setup(tmp_path)
     runner.store.update_frame(frame_id, name="snapshot failure")

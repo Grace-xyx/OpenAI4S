@@ -5,8 +5,11 @@ import { copyFailedText } from "../chrome/clipboard";
 import * as transcript from "../sessions/transcript";
 import { renderStored as renderOlderPage } from "../sessions/transcript";
 import * as messageComponents from "./components";
-import { currentId, _openGen, historyLoad } from "../../stores/session";
+import { currentId, _openGen, historyContent, historyLoad, msgCursor, msgHasEarlier } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
+import { branchState } from "../../stores/timeline";
+import { loadEarlierMessages } from "../sessions/messages";
+import { historyT } from "./copy";
 
 vi.mock("preact/hooks", async (original) => ({
   ...await original<typeof import("preact/hooks")>(),
@@ -191,6 +194,8 @@ class RowEl {
   style: Record<string, string> = {};
   attrs: Record<string, string> = {};
   onclick: (() => unknown) | null = null;
+  hidden = false;
+  disabled = false;
   scrollHeight = 64;
   focused = 0;
   private text = "";
@@ -234,6 +239,9 @@ class RowEl {
   }
   getAttribute(name: string): string | null {
     return this.attrs[name] ?? null;
+  }
+  removeAttribute(name: string): void {
+    delete this.attrs[name];
   }
   appendChild<T extends RowEl>(child: T): T {
     child.parentNode?.removeChild(child);
@@ -279,6 +287,12 @@ class RowEl {
 function rowMatches(node: RowEl, sel: string): boolean {
   if (sel.startsWith("#")) return node.id === sel.slice(1);
   if (sel.startsWith(".")) return sel.slice(1).split(".").every((c) => node.classList.contains(c));
+  const attr = /^\[([^\]=~|^$*]+)(?:([~|^$*]?=)"([^"]*)")?\]$/.exec(sel);
+  if (attr) {
+    const have = node.getAttribute(attr[1]!);
+    if (have == null) return false;
+    return attr[3] === undefined || have === attr[3];
+  }
   return node.tagName === sel.toUpperCase();
 }
 
@@ -297,6 +311,9 @@ class RowDoc {
   }
   createElement(tag: string): RowEl {
     return new RowEl(tag);
+  }
+  createDocumentFragment(): RowEl {
+    return new RowEl("#fragment");
   }
   createTextNode(text: string): RowEl {
     const node = new RowEl("#text");
@@ -434,6 +451,155 @@ describe("stored rows, first page and older page alike", () => {
     expect(chips).toHaveLength(1);
     expect(chips[0]!.textContent).toContain("growth.csv");
     expect(chips[0]!.title).toBe("v-1 · sha256:abcdef012345");
+  });
+
+  function forkButton(row: RowEl | null): RowEl | null {
+    return row?.querySelector("[data-fork-message-id]") ?? null;
+  }
+
+  const forkable = {
+    role: "user",
+    content: "Why does the control stay dark?",
+    message_id: "msg-exact",
+    fork_checkpoint_id: "ckpt-exact",
+  };
+
+  it.each(ROW_RENDERERS)("%s: a checkpointed user message shows a fork control for that message", (_name, render) => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    const row = render(forkable) as unknown as RowEl;
+    const button = forkButton(row);
+    expect(button).not.toBeNull();
+    expect(button!.hidden).toBe(false);
+    expect(button!.getAttribute("data-fork-message-id")).toBe("msg-exact");
+    expect(button!.getAttribute("aria-label")).toBe(historyT("history.forkMessage.label"));
+    expect(row.querySelectorAll("[data-fork-message-id]")).toHaveLength(1);
+  });
+
+  it.each(ROW_RENDERERS)("%s: the fork control stays hidden while fork_from_message is false or missing", (_name, render) => {
+    branchState.value = null;
+    const missing = render(forkable) as unknown as RowEl;
+    expect(forkButton(missing)!.hidden).toBe(true);
+
+    branchState.value = {
+      capabilities: { fork_from_message: false },
+      capability_reasons: { fork_from_message: "workspace revert recovery must complete" },
+    };
+    const refused = render(forkable) as unknown as RowEl;
+    const button = forkButton(refused)!;
+    expect(button.hidden).toBe(true);
+    expect(button.disabled).toBeFalsy();
+  });
+
+  it.each(ROW_RENDERERS)("%s: a fork control painted before branch state appears when the capability turns on", (_name, render) => {
+    branchState.value = null;
+    const row = render(forkable) as unknown as RowEl;
+    const button = forkButton(row)!;
+    expect(button.hidden).toBe(true);
+    branchState.value = { capabilities: { fork_from_message: true } };
+    expect(button.hidden).toBe(false);
+    expect(button.getAttribute("data-fork-message-id")).toBe("msg-exact");
+  });
+
+  it.each(ROW_RENDERERS)("%s: no fork control without an exact checkpoint, or on rows that are not that question", (_name, render) => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    const cases: Record<string, unknown>[] = [
+      { role: "user", content: "No snapshot", message_id: "msg-1", fork_checkpoint_id: null },
+      { role: "user", content: "Empty snapshot", message_id: "msg-2", fork_checkpoint_id: "" },
+      { role: "user", content: "Live bubble", fork_checkpoint_id: "ckpt-live" },
+      { role: "assistant", content: "Answer", message_id: "msg-a", fork_checkpoint_id: "ckpt-a" },
+      {
+        role: "user",
+        content: 'Plan "Demo" is approved; start executing it automatically now.',
+        message_id: "msg-seed",
+        fork_checkpoint_id: "ckpt-seed",
+      },
+      {
+        role: "assistant",
+        content: "Stopped mid-way",
+        message_id: "msg-stop",
+        fork_checkpoint_id: "ckpt-stop",
+        cancelled: { reason: "user", request_id: "req-1", execution_id: "exec-1" },
+      },
+    ];
+    for (const message of cases) {
+      const row = render(message) as unknown as RowEl;
+      expect(forkButton(row)).toBeNull();
+    }
+  });
+
+  it("load earlier keeps the same fork rules, including a capability that arrives late", async () => {
+    currentId.value = "frame-1";
+    _openGen.value = 1;
+    msgHasEarlier.value = true;
+    msgCursor.value = 20;
+    historyContent.value = null;
+    branchState.value = null;
+    vi.stubGlobal("fetch", () => Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify({
+        messages: [
+          { ...forkable, seq: 4, created_at: "2026-09-01T00:00:00Z" },
+          {
+            role: "assistant",
+            content: "An earlier answer",
+            seq: 5,
+            message_id: "msg-asst",
+            fork_checkpoint_id: "ckpt-asst",
+          },
+          {
+            role: "user",
+            content: "No snapshot yet",
+            seq: 2,
+            message_id: "msg-open",
+            fork_checkpoint_id: null,
+          },
+        ],
+        has_earlier: false,
+        next_before_seq: null,
+      })),
+    }));
+    await loadEarlierMessages();
+    const user = doc.messages.querySelectorAll(".msg.user");
+    expect(user).toHaveLength(2);
+    const forked = user.find((row) => forkButton(row));
+    const plain = user.find((row) => !forkButton(row));
+    expect(forkButton(forked!)!.hidden).toBe(true);
+    expect(forkButton(forked!)!.getAttribute("data-fork-message-id")).toBe("msg-exact");
+    expect(forkButton(plain!)).toBeNull();
+    expect(doc.messages.querySelector(".msg.assistant")!.querySelector("[data-fork-message-id]")).toBeNull();
+    branchState.value = { capabilities: { fork_from_message: true } };
+    expect(forkButton(forked!)!.hidden).toBe(false);
+  });
+
+  it("a second click while a message fork is in flight does not post again", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    currentId.value = "frame-1";
+    const posts: Array<{ url: string; body: unknown }> = [];
+    let release: (response: Response) => void = () => undefined;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      posts.push({ url: String(url), body: JSON.parse(String(init?.body || "{}")) });
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    });
+    const row = renderFirstPage(forkable) as unknown as RowEl;
+    const button = forkButton(row)!;
+    const first = button.onclick!();
+    const second = button.onclick!();
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(button.getAttribute("aria-label")).toBe(historyT("history.forkMessage.busy"));
+    expect(posts).toEqual([{
+      url: "/api/v1/frames/frame-1/branches/fork",
+      body: { from_message_id: "msg-exact" },
+    }]);
+    release(new Response(JSON.stringify({ branch_id: "br-new", name: "alt" }), { status: 200 }));
+    await first;
+    await second;
+    expect(posts).toHaveLength(1);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-busy")).toBeNull();
   });
 
   it("a starter chip fills the composer and grows it to fit", () => {

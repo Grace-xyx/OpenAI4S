@@ -11,11 +11,14 @@
  * `addMsgActions` here too.
  */
 
+import { effect } from "@preact/signals";
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
 import { artifacts } from "../../stores/artifacts";
 import { currentId, feedback as feedbackSignal } from "../../stores/session";
+import { branchState } from "../../stores/timeline";
 import { copyFailedText, copyText } from "../chrome/clipboard";
+import { forkFromMessage } from "../execution/branch";
 import { paintIcon } from "../icons/paths";
 import { renderMd } from "../md/render";
 import { publicText } from "../scrub/scrub";
@@ -23,6 +26,7 @@ import { api } from "../sessions/api";
 import { hint } from "../sessions/chrome";
 import { grow } from "../sessions/dom";
 import { iconEl } from "../sessions/icon";
+import { historyT } from "./copy";
 import { el, messagesHost } from "./dom";
 import { failureMeta } from "./failure";
 import { rememberCandidateIdentity, setMessageReviewBadge } from "./identity";
@@ -43,6 +47,8 @@ export type StoredMessage = {
   role?: string;
   content?: unknown;
   created_at?: unknown;
+  message_id?: string;
+  fork_checkpoint_id?: string | null;
   artifact_refs?: unknown;
   failure?: { request_id?: unknown; code?: unknown; output_committed?: unknown } | null;
   cancelled?: { request_id?: unknown; execution_id?: unknown; reason?: unknown } | null;
@@ -50,6 +56,26 @@ export type StoredMessage = {
   metadata?: { review_status?: unknown };
   [key: string]: unknown;
 };
+
+/** Exact cursor plus a message id. Capability is a separate, later signal. */
+export function canForkFromMessage(m: {
+  message_id?: unknown;
+  fork_checkpoint_id?: unknown;
+}): boolean {
+  return (
+    typeof m.message_id === "string" &&
+    typeof m.fork_checkpoint_id === "string" &&
+    m.fork_checkpoint_id !== ""
+  );
+}
+
+/** `branchState.capabilities.fork_from_message` after sanitize. Strict true. */
+export function forkFromMessageCapability(): boolean {
+  const state = branchState.value as {
+    capabilities?: { fork_from_message?: unknown };
+  } | null;
+  return !!state && !!state.capabilities && state.capabilities.fork_from_message === true;
+}
 
 type StepRenderer = (step: unknown, target?: ParentNode | null) => Node | null | void;
 
@@ -193,6 +219,88 @@ function reviewStatusOf(m: StoredMessage): unknown {
   return review;
 }
 
+function forkMessageIdOf(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const elNode = node as {
+    getAttribute?: (name: string) => string | null;
+    dataset?: { forkMessageId?: string };
+  };
+  if (typeof elNode.getAttribute === "function") {
+    const attr = elNode.getAttribute("data-fork-message-id");
+    if (typeof attr === "string" && attr) return attr;
+  }
+  const fromDataset = elNode.dataset && elNode.dataset.forkMessageId;
+  return typeof fromDataset === "string" ? fromDataset : "";
+}
+
+function setForkControlHidden(node: HTMLElement, hidden: boolean): void {
+  node.hidden = hidden;
+  const row = node.parentElement;
+  if (row && row.classList.contains("msg-fork")) row.hidden = hidden;
+}
+
+/**
+ * One subscription for every stored row. History paints before
+ * `loadWorkbenchState`, so the first frame often has no branch projection.
+ */
+function syncForkMessageButtons(show: boolean): void {
+  const doc = globalThis.document as { querySelectorAll?: (sel: string) => ArrayLike<unknown> } | undefined;
+  if (!doc || typeof doc.querySelectorAll !== "function") return;
+  let nodes: ArrayLike<unknown>;
+  try {
+    nodes = doc.querySelectorAll("[data-fork-message-id]");
+  } catch {
+    return;
+  }
+  const list = nodes ? Array.from(nodes) : [];
+  for (const node of list) {
+    if (!forkMessageIdOf(node)) continue;
+    setForkControlHidden(node as HTMLElement, !show);
+  }
+}
+
+let forkMessageVisibilityInstalled = false;
+
+function installForkMessageVisibility(): void {
+  if (forkMessageVisibilityInstalled) return;
+  forkMessageVisibilityInstalled = true;
+  effect(() => {
+    syncForkMessageButtons(forkFromMessageCapability());
+  });
+}
+
+function forkMessageControl(messageId: string): HTMLElement {
+  const row = el("div", "msg-fork");
+  const button = el("button", "msg-fork-btn") as HTMLButtonElement;
+  button.type = "button";
+  const label = historyT("history.forkMessage.label");
+  button.textContent = label;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("data-fork-message-id", messageId);
+  button.dataset.forkMessageId = messageId;
+  button.onclick = () => {
+    if (button.disabled) return;
+    const frameId = currentId.value;
+    if (typeof frameId !== "string" || !frameId) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    const busy = historyT("history.forkMessage.busy");
+    button.title = busy;
+    button.setAttribute("aria-label", busy);
+    return forkFromMessage(frameId, messageId).finally(() => {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      const next = historyT("history.forkMessage.label");
+      button.title = next;
+      button.setAttribute("aria-label", next);
+    });
+  };
+  row.appendChild(button);
+  setForkControlHidden(button, !forkFromMessageCapability());
+  return row;
+}
+
 /** app.js:7234-7260. `target` is a fragment during framed paint. */
 export function renderStored(
   m: StoredMessage,
@@ -227,6 +335,9 @@ export function renderStored(
     b.textContent = planModeRequestText(text);
     w.appendChild(b);
     renderMessageRefChips(w, m.artifact_refs);
+    if (canForkFromMessage(m) && typeof m.message_id === "string") {
+      w.appendChild(forkMessageControl(m.message_id));
+    }
   } else {
     const md = el("div", "md");
     md.innerHTML = renderMd(text);
@@ -459,3 +570,5 @@ export function interleaveHistory(
   items.sort((a, b) => a.t - b.t || a.seq - b.seq);
   return items;
 }
+
+installForkMessageVisibility();

@@ -21,6 +21,8 @@ export type ChatMessage = {
   content?: unknown;
   created_at?: string;
   seq?: number;
+  message_id?: string;
+  fork_checkpoint_id?: string | null;
   failure?: { request_id?: string } | null;
   cancelled?: { request_id?: string; execution_id?: string; reason?: string } | null;
   review_status?: unknown;

@@ -16,7 +16,11 @@ const COPY: Record<"en" | "zh", Record<string, string>> = {
     "history.livePending": "Live messages are preserved; history will align after the turn stops.",
     "history.part.messages": "Messages",
     "history.part.steps": "Steps",
-    "history.part.runState": "Run state"
+    "history.part.runState": "Run state",
+    "history.forkMessage.label": "Branch from this question",
+    "history.forkMessage.busy": "Creating a branch…",
+    "history.forkMessage.created": "Created a branch from this question: {0}",
+    "history.forkMessage.failed": "Could not branch from this question."
   },
   "zh": {
     "history.renderFailed": "历史暂时无法显示。",
@@ -32,7 +36,11 @@ const COPY: Record<"en" | "zh", Record<string, string>> = {
     "history.livePending": "已保留实时消息；任务停止后将重新对齐历史。",
     "history.part.messages": "消息",
     "history.part.steps": "步骤",
-    "history.part.runState": "运行状态"
+    "history.part.runState": "运行状态",
+    "history.forkMessage.label": "从此问题另开分支",
+    "history.forkMessage.busy": "正在创建分支…",
+    "history.forkMessage.created": "已从此问题创建分支 {0}",
+    "history.forkMessage.failed": "无法从此问题创建分支。"
   }
 };
 

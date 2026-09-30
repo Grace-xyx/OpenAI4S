@@ -77,3 +77,41 @@
 .msg:has(~ .msg) .turn-continue {
   display: none;
 }
+
+/* A stored user question can fork. `.msg.user` is a row, so the control
+   takes the next line and stays out of the way until the capability is on. */
+.msg.user:has(.msg-fork) {
+  flex-wrap: wrap;
+}
+.msg-fork {
+  flex: 0 0 100%;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+/* Author `display` beats the user-agent `[hidden]` rule, so a capability
+   that is still off would otherwise leave an empty flex line. */
+.msg-fork[hidden],
+.msg-fork:has(.msg-fork-btn[hidden]) {
+  display: none;
+}
+.msg-fork-btn {
+  margin: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-400);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.msg-fork-btn:hover {
+  color: var(--text-000);
+  background: var(--bg-200);
+}
+.msg-fork-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}

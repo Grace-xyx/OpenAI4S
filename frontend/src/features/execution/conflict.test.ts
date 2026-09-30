@@ -1,7 +1,10 @@
 import { effect } from "@preact/signals";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { workbenchErrors } from "../../stores/timeline";
-import { applyForkPresentation } from "./branch";
+import { historyT } from "../messages/copy";
+import { scheduleWorkbenchRefresh } from "../notebook/kernel";
+import { setExecutionFetch } from "./api";
+import { applyForkPresentation, forkFromMessage } from "./branch";
 import {
   FORK_NO_CHECKPOINT_MESSAGE,
   forkErrorDisplay,
@@ -11,6 +14,10 @@ import {
   presentForkError,
   shouldRetryFork,
 } from "./conflict";
+
+vi.mock("../notebook/kernel", () => ({
+  scheduleWorkbenchRefresh: vi.fn(),
+}));
 
 function conflict409(message = FORK_NO_CHECKPOINT_MESSAGE): {
   status: number;
@@ -103,6 +110,93 @@ describe("fork 409 presentation (CursorCheckpointUnavailable)", () => {
   it("keeps a successful POST as ok without inventing a conflict", async () => {
     const attempt = await forkOnce(async () => ({ branch_id: "b1" }));
     expect(attempt).toEqual({ ok: true, result: { branch_id: "b1" }, attempts: 1 });
+  });
+});
+
+describe("forkFromMessage", () => {
+  const hints: string[] = [];
+
+  afterEach(() => {
+    hints.length = 0;
+    vi.unstubAllGlobals();
+    setExecutionFetch(null);
+    vi.mocked(scheduleWorkbenchRefresh).mockClear();
+  });
+
+  function jsonResponse(body: unknown, status: number): Response {
+    return new Response(JSON.stringify(body), { status });
+  }
+
+  it("posts exactly {from_message_id} once, then refreshes and names the branch", async () => {
+    const posts: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal("hint", (message: string) => {
+      hints.push(message);
+    });
+    setExecutionFetch(async (url, init) => {
+      posts.push({ url: String(url), body: JSON.parse(String(init?.body || "{}")) });
+      return jsonResponse({ branch_id: "br-1", name: "from question" }, 200);
+    });
+    const result = await forkFromMessage("frame/1", "msg-9");
+    expect(posts).toEqual([{
+      url: "/api/v1/frames/frame%2F1/branches/fork",
+      body: { from_message_id: "msg-9" },
+    }]);
+    expect(result).toEqual({ ok: true, branch_id: "br-1", name: "from question" });
+    expect(hints).toEqual([historyT("history.forkMessage.created", "from question")]);
+    expect(scheduleWorkbenchRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("presents a 409 once and does not fork again or fall back to another source", async () => {
+    const posts: unknown[] = [];
+    setExecutionFetch(async (_url, init) => {
+      posts.push(JSON.parse(String(init?.body || "{}")));
+      return jsonResponse({ error: FORK_NO_CHECKPOINT_MESSAGE, code: "conflict" }, 409);
+    });
+    const result = await forkFromMessage("frame-1", "msg-9");
+    expect(posts).toEqual([{ from_message_id: "msg-9" }]);
+    expect(result).toMatchObject({
+      ok: false,
+      presentation: {
+        kind: "conflict",
+        noCheckpoint: true,
+        httpStatus: 409,
+        retry: false,
+        message: FORK_NO_CHECKPOINT_MESSAGE,
+      },
+    });
+    expect(workbenchErrors.value.branchAction).toBe(FORK_NO_CHECKPOINT_MESSAGE);
+    expect(scheduleWorkbenchRefresh).not.toHaveBeenCalled();
+  });
+
+  it("uses the history fallback when the failure has no sentence", async () => {
+    setExecutionFetch(async () => {
+      throw new Error("");
+    });
+    const result = await forkFromMessage("frame-1", "msg-9");
+    expect(result).toMatchObject({
+      ok: false,
+      presentation: { message: historyT("history.forkMessage.failed"), retry: false },
+    });
+    expect(workbenchErrors.value.branchAction).toBe(historyT("history.forkMessage.failed"));
+  });
+
+  it("a second call while the first is in flight does not post", async () => {
+    const posts: unknown[] = [];
+    let release: (response: Response) => void = () => undefined;
+    setExecutionFetch((_url, init) => {
+      posts.push(JSON.parse(String(init?.body || "{}")));
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    });
+    const first = forkFromMessage("frame-1", "msg-9");
+    const second = forkFromMessage("frame-1", "msg-9");
+    expect(posts).toEqual([{ from_message_id: "msg-9" }]);
+    expect(await second).toBeNull();
+    release(jsonResponse({ branch_id: "br-2" }, 200));
+    expect(await first).toMatchObject({ ok: true, branch_id: "br-2", name: "br-2" });
+    expect(posts).toHaveLength(1);
+    expect(scheduleWorkbenchRefresh).toHaveBeenCalledTimes(1);
   });
 });
 
