@@ -468,6 +468,14 @@ def _step_begin(method: str, args: list) -> tuple[str, str, dict] | None:
     return None
 
 
+# Host methods whose results carry Host-owned Artifact receipts. The Web
+# gateway binds its native capture committer around exactly these actions, and
+# the dispatcher commits or queues their receipts; one set keeps the two sides
+# from drifting when another receipt-producing tool is added.
+NATIVE_ARTIFACT_RECEIPT_METHODS = frozenset(
+    {"science_search", "compute_result", "science_import_dataset"}
+)
+
 # Non-control host methods that pass through the permission gate. Concrete
 # control tools declare ``requires_approval`` on their class instead.
 GATEABLE_TOOLS = frozenset(
@@ -1040,6 +1048,9 @@ class HostDispatcher:
     """Backs control tools and worker host.* RPC. One instance per session."""
 
     LLM_FANOUT_CAP = 32  # parallel host.llm concurrency ceiling (openai4s)
+    # Read by the Web gateway to decide which native actions get the capture
+    # committer; the dispatcher consumes the same receipts below.
+    NATIVE_ARTIFACT_RECEIPT_METHODS = NATIVE_ARTIFACT_RECEIPT_METHODS
 
     def __init__(
         self,
@@ -1941,18 +1952,20 @@ class HostDispatcher:
                 # Resolve that hard refusal before native-capture admission so an
                 # existing policy is the first visible answer for every caller.
                 scope = self.store.resolve_frame_scope(self.frame_id)
+                download_target = _gate_target(method, args)
                 if (
                     self.store.resolve_permission(
                         root_frame_id=scope.get("root_frame_id"),
                         project_id=scope.get("project_id") or "default",
                         tool="web_download",
-                        pattern_input="zenodo.org",
+                        pattern_input=download_target,
                     )
                     == "deny"
                 ):
                     ok = False
                     result = {
-                        "error": "Permission denied: web_download to zenodo.org is denied"
+                        "error": "Permission denied: web_download to "
+                        f"{download_target} is denied"
                     }
                     return result
                 # A Cell/headless receipt list is not an immediate durable consumer.
@@ -2065,7 +2078,7 @@ class HostDispatcher:
                     ok = False
                     return result
             result = handler(*args)
-            if method in {"science_search", "compute_result", "science_import_dataset"}:
+            if method in NATIVE_ARTIFACT_RECEIPT_METHODS:
                 result = self._commit_or_queue_artifact_receipt(result)
             if (
                 method == "science_import_dataset"

@@ -75,7 +75,7 @@ from openai4s.execution import (
     execute_with_watchdog,
 )
 from openai4s.host.data import kernel_artifact_input_dir
-from openai4s.host_dispatch import build_dispatcher
+from openai4s.host_dispatch import HostDispatcher, build_dispatcher
 from openai4s.kernel import Kernel, KernelLease, KernelSupervisor
 from openai4s.llm import (
     PROVIDERS,
@@ -8923,8 +8923,7 @@ class SessionRunner:
             binder = getattr(st.dispatcher, "bind_native_artifact_committer", None)
             with (
                 binder(commit_artifacts)
-                if tool_name
-                in {"science_search", "compute_result", "science_import_dataset"}
+                if tool_name in HostDispatcher.NATIVE_ARTIFACT_RECEIPT_METHODS
                 and callable(binder)
                 else nullcontext()
             ):

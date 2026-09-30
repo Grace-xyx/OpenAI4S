@@ -783,21 +783,14 @@ def web_download(
                 final_url,
                 ctype,
             ):
-                if (
-                    expected_size is not None
-                    or expectation is not None
-                    or cancelled is not None
-                ):
-                    first_digest = _copy_capped(
-                        reader,
-                        target,
-                        limit,
-                        expected_size=expected_size,
-                        expected_checksum=expected_checksum,
-                        cancelled=cancelled,
-                    )
-                else:
-                    first_digest = _copy_capped(reader, target, limit)
+                first_digest = _copy_capped(
+                    reader,
+                    target,
+                    limit,
+                    expected_size=expected_size,
+                    expected_checksum=expected_checksum,
+                    cancelled=cancelled,
+                )
             target.flush()
             verified_identity = os.fstat(target.fileno())
             publication_source = publish_link
