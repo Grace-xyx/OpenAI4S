@@ -580,6 +580,7 @@ _GUARDIAN_FILE_PATH_KEYS = {
     "grep": "path",
     "list_dir": "path",
     "web_download": "path",
+    "science_import_dataset": "path",
     "save_artifact": "path",
     "materialise_artifact": "filename",
 }

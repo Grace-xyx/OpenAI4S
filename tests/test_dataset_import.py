@@ -381,6 +381,28 @@ def test_existing_download_deny_precedes_metadata_and_file_fetch(tmp_path, monke
     assert "Permission denied" in result["error"]
 
 
+def test_guardian_reviews_the_destination_as_well_as_the_domain(tmp_path, monkeypatch):
+    # The permission target is `zenodo.org`; only the forwarded destination can
+    # turn a standing allow into the unattended credential-path refusal.
+    monkeypatch.setenv("OPENAI4S_STAGE7_GUARDIAN_ENFORCEMENT", "1")
+    monkeypatch.setenv("OPENAI4S_UNATTENDED_APPROVAL", "auto_review")
+    disp = dispatcher(tmp_path)
+    forbid_network(monkeypatch)
+    disp.store.set_permission_rule(
+        scope="global",
+        scope_id="",
+        tool="science_import_dataset",
+        pattern="zenodo.org",
+        decision="allow",
+    )
+    with disp.bind_native_artifact_committer(
+        lambda _: pytest.fail("fenced import reached capture")
+    ):
+        result = disp("science_import_dataset", [{**spec(), "path": "config.json"}])
+    assert set(result) == {"error"}
+    assert "credential path" in result["error"]
+
+
 def test_exact_execution_cancel_survives_next_turn_and_scope_exit(tmp_path):
     disp = dispatcher(tmp_path)
     original = threading.Event()
