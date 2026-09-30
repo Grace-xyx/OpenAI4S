@@ -82,10 +82,10 @@ def test_adoption_saves_an_active_agent_plan_key_once(tmp_path):
     store = get_store(_cfg(tmp_path).db_path)
     _live(store, "ark", "", PLAN_KEY)
 
-    assert datapro.adopt_active_agent_plan_key(store) is True
+    assert datapro.adopt_active_agent_plan_key(store) == datapro.ADOPTED_FIRST
     assert datapro.explicit_agent_plan_key(store) == PLAN_KEY
     # Already adopted: nothing is written, and callers apply no defaults again.
-    assert datapro.adopt_active_agent_plan_key(store) is False
+    assert datapro.adopt_active_agent_plan_key(store) == ""
 
     # The point of adopting: the products keep their key after a model switch.
     _live(store, "claude", "", "sk-ant-other-provider-key")
@@ -113,7 +113,7 @@ def test_adoption_refuses_anything_but_a_valid_agent_plan_key(
     store = get_store(_cfg(tmp_path).db_path)
     _live(store, provider, base_url, key)
 
-    assert datapro.adopt_active_agent_plan_key(store) is False
+    assert datapro.adopt_active_agent_plan_key(store) == ""
     assert datapro.explicit_agent_plan_key(store) == ""
 
 
@@ -154,7 +154,7 @@ def test_a_key_the_user_saved_is_never_replaced_by_adoption(tmp_path):
     datapro.save_agent_plan_key(store, saved)
     _live(store, "ark", PLAN_URL, PLAN_KEY)
 
-    assert datapro.adopt_active_agent_plan_key(store) is False
+    assert datapro.adopt_active_agent_plan_key(store) == ""
     assert datapro.explicit_agent_plan_key(store) == saved
     # ...and a removal of the model's key cannot delete the user's own.
     assert datapro.forget_adopted_agent_plan_key(store, saved) is False
@@ -167,26 +167,26 @@ def test_a_key_from_before_this_release_counts_as_the_users_own(tmp_path):
     store.set_secret_setting(datapro.AGENT_PLAN_KEY_SETTING, legacy, scope="agent_plan")
     _live(store, "ark", "", PLAN_KEY)
 
-    assert datapro.adopt_active_agent_plan_key(store) is False
+    assert datapro.adopt_active_agent_plan_key(store) == ""
     assert datapro.explicit_agent_plan_key(store) == legacy
 
 
 def test_an_adopted_key_follows_the_plan_it_came_from(tmp_path):
     store = get_store(_cfg(tmp_path).db_path)
     _live(store, "ark", PLAN_URL, PLAN_KEY)
-    assert datapro.adopt_active_agent_plan_key(store) is True
+    assert datapro.adopt_active_agent_plan_key(store) == datapro.ADOPTED_FIRST
 
     rotated = "agent-plan-rotated-model-key"
     store.set_secret_setting("llm_api_key", rotated, scope="llm")
 
-    assert datapro.adopt_active_agent_plan_key(store) is True
+    assert datapro.adopt_active_agent_plan_key(store) == datapro.ADOPTED_UPDATED
     assert datapro.explicit_agent_plan_key(store) == rotated
 
 
 def test_forget_clears_only_the_exact_adopted_key(tmp_path):
     store = get_store(_cfg(tmp_path).db_path)
     _live(store, "ark", PLAN_URL, PLAN_KEY)
-    assert datapro.adopt_active_agent_plan_key(store) is True
+    assert datapro.adopt_active_agent_plan_key(store) == datapro.ADOPTED_FIRST
 
     assert datapro.forget_adopted_agent_plan_key(store, OTHER_KEY) is False
     assert datapro.forget_adopted_agent_plan_key(store, "") is False
@@ -194,6 +194,57 @@ def test_forget_clears_only_the_exact_adopted_key(tmp_path):
 
     assert datapro.forget_adopted_agent_plan_key(store, PLAN_KEY) is True
     assert datapro.explicit_agent_plan_key(store) == ""
+
+
+@pytest.mark.parametrize("variable", ["OPENAI4S_ARK_BASE_URL", "OPENAI4S_LLM_BASE_URL"])
+def test_a_blank_base_url_behind_an_env_proxy_is_not_volcengine(
+    tmp_path, monkeypatch, variable
+):
+    """An empty Base URL goes wherever the LLM client sends it, not to Ark."""
+
+    monkeypatch.setenv(variable, "https://llm-proxy.corp.example/v1")
+    store = get_store(_cfg(tmp_path).db_path)
+    proxy_key = "corp-proxy-issued-key-canary"
+    _live(store, "ark", "", proxy_key)
+
+    assert datapro.is_volcengine_endpoint("") is False
+    assert datapro.is_agent_plan_endpoint("") is False
+    assert datapro.adopt_active_agent_plan_key(store) == ""
+    assert datapro.resolve_agent_plan_key(store) == ""
+
+    # A card save is not mirrored into the proxy's credential either.
+    datapro.save_agent_plan_key(store, PLAN_KEY)
+    assert store.get_secret_setting("llm_api_key") == proxy_key
+    assert datapro.resolve_agent_plan_key(store) == PLAN_KEY
+
+
+def test_an_env_override_to_the_agent_plan_gateway_still_counts(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OPENAI4S_ARK_BASE_URL", "https://ark.cn-shanghai.volces.com/api/plan/v3"
+    )
+    store = get_store(_cfg(tmp_path).db_path)
+    _live(store, "ark", "", PLAN_KEY)
+
+    assert datapro.adopt_active_agent_plan_key(store) == datapro.ADOPTED_FIRST
+
+
+def test_an_unreadable_user_key_is_never_taken_for_an_absent_one(tmp_path, monkeypatch):
+    store = get_store(_cfg(tmp_path).db_path)
+    saved = "card-saved-agent-plan-key"
+    datapro.save_agent_plan_key(store, saved)
+    _live(store, "ark", PLAN_URL, PLAN_KEY)
+    real = store.get_secret_setting
+
+    def _flaky(key):
+        if key == datapro.AGENT_PLAN_KEY_SETTING:
+            raise RuntimeError("keychain timed out")
+        return real(key)
+
+    monkeypatch.setattr(store, "get_secret_setting", _flaky)
+
+    assert datapro.adopt_active_agent_plan_key(store) == ""
+    monkeypatch.setattr(store, "get_secret_setting", real)
+    assert datapro.explicit_agent_plan_key(store) == saved
 
 
 # --- gateway: every activation path applies the defaults ---------------------
@@ -233,14 +284,17 @@ class _AgentPlanConnector:
     def refresh(self):
         return self.connection(force=True)
 
+    api_key = PLAN_KEY
+    plan_key = "agent-plan"
+
     def provisioning_material(
         self, plan_key=None, key_choice=None, endpoint_choice=None
     ):
         return ProvisioningMaterial(
-            api_key=PLAN_KEY,
-            plan_key="agent-plan",
+            api_key=self.api_key,
+            plan_key=self.plan_key,
             plan_name="Agent Plan",
-            profile_name="agent-plan_cn-beijing",
+            profile_name=f"{self.plan_key}_cn-beijing",
             model="doubao-seed-2-0-pro-260215",
             region="cn-beijing",
             account_name="Alice",
@@ -251,16 +305,18 @@ class _AgentPlanConnector:
 def gateway(tmp_path, monkeypatch):
     from openai4s import mcp_client
 
-    monkeypatch.setattr(
-        gateway_mod, "VolcengineConnectorService", lambda: _AgentPlanConnector()
-    )
+    connector = _AgentPlanConnector()
+    monkeypatch.setattr(gateway_mod, "VolcengineConnectorService", lambda: connector)
     manager = _Manager()
     monkeypatch.setattr(mcp_client, "manager", lambda: manager)
     cfg = _cfg(tmp_path)
     gateway_mod._seed_datapro_connector(cfg)
     runner = gateway_mod.SessionRunner(cfg, _Hub())
+    route = _Route(cfg, runner)
+    route.connector = connector
+    route.manager = manager
     try:
-        yield cfg, get_store(cfg.db_path), _Route(cfg, runner)
+        yield cfg, get_store(cfg.db_path), route
     finally:
         runner.close()
 
@@ -556,3 +612,143 @@ def test_a_card_saved_key_survives_its_twin_profiles_deletion(gateway):
     assert call("DELETE", f"/model-profiles/{profile_id}")[0] == 200
 
     assert datapro.explicit_agent_plan_key(store) == PLAN_KEY
+
+
+@pytest.mark.stubbed_backend
+def test_rotating_or_switching_plans_keeps_a_switch_the_user_turned_off(gateway):
+    _cfg_, store, call = gateway
+    first = _agent_plan_profile(call, name="Ark A")
+    second_key = "agent-plan-second-account-key"
+    second = _agent_plan_profile(call, key=second_key, name="Ark B")
+    assert call("POST", f"/model-profiles/{first}/activate")[0] == 200
+    _switch_off_datapro(call)
+
+    # Another Agent Plan: the saved key follows it, the switches stay off.
+    assert call("POST", f"/model-profiles/{second}/activate")[0] == 200
+    assert datapro.explicit_agent_plan_key(store) == second_key
+    # A rotated key on the active plan: the same.
+    rotated = "agent-plan-rotated-model-key"
+    assert call("PATCH", f"/model-profiles/{second}", {"api_key": rotated})[0] == 200
+    assert datapro.explicit_agent_plan_key(store) == rotated
+
+    state = _datapro_state(call)
+    assert state["connector_enabled"] is False
+    assert state["skill_enabled"] is False
+
+
+@pytest.mark.stubbed_backend
+def test_reprovisioning_volcengine_to_a_coding_plan_drops_the_old_copy(gateway):
+    _cfg_, store, call = gateway
+    assert call("POST", "/volcengine/configure", {"plan_key": "agent-plan"})[0] == 201
+    assert datapro.explicit_agent_plan_key(store) == PLAN_KEY
+
+    call.connector.api_key = OTHER_KEY
+    call.connector.plan_key = "coding-plan"
+    assert call("POST", "/volcengine/configure", {"plan_key": "coding-plan"})[0] == 201
+
+    assert store.get_setting("llm_base_url") == CODING_URL
+    assert datapro.explicit_agent_plan_key(store) == ""
+    assert call("POST", "/volcengine/disconnect", {"confirm": True})[0] == 200
+    assert datapro.resolve_agent_plan_key(store) == ""
+
+
+@pytest.mark.stubbed_backend
+def test_the_live_settings_route_adopts_and_its_clear_releases(gateway):
+    _cfg_, store, call = gateway
+    _switch_off_datapro(call)
+    body = {"provider": "ark", "base_url": PLAN_URL, "api_key": PLAN_KEY}
+
+    assert call("POST", "/config/llm", body)[0] == 200
+
+    assert datapro.explicit_agent_plan_key(store) == PLAN_KEY
+    assert _datapro_state(call)["connector_enabled"] is True
+
+    # Clearing the live key removes the credential, and its copy with it.
+    assert call("POST", "/config/llm", {"clear_api_key": True})[0] == 200
+    assert datapro.explicit_agent_plan_key(store) == ""
+    assert datapro.resolve_agent_plan_key(store) == ""
+
+
+@pytest.mark.stubbed_backend
+def test_a_provider_switch_on_the_live_settings_route_keeps_the_copy(gateway):
+    _cfg_, store, call = gateway
+    body = {"provider": "ark", "base_url": PLAN_URL, "api_key": PLAN_KEY}
+    assert call("POST", "/config/llm", body)[0] == 200
+
+    assert call("POST", "/config/llm", {"provider": "claude", "base_url": ""})[0] == 200
+
+    assert store.get_secret_setting("llm_api_key") == ""
+    assert datapro.resolve_agent_plan_key(store) == PLAN_KEY
+
+
+@pytest.mark.stubbed_backend
+def test_onboarding_clear_releases_the_adopted_copy(gateway):
+    _cfg_, store, call = gateway
+    store.set_setting("llm_provider", "chatgpt")
+    body = {"provider": "ark", "model": "doubao-seed-2.0-pro", "api_key": PLAN_KEY}
+    assert call("POST", "/onboarding/complete", body)[0] == 200
+    assert datapro.explicit_agent_plan_key(store) == PLAN_KEY
+
+    body = {"provider": "ark", "model": "doubao-seed-2.0-pro", "clear_api_key": True}
+    assert call("POST", "/onboarding/complete", body)[0] == 200
+
+    assert datapro.explicit_agent_plan_key(store) == ""
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize("removal", ["delete", "rekey"])
+def test_releasing_the_copy_drops_a_datapro_session_opened_with_it(gateway, removal):
+    _cfg_, store, call = gateway
+    profile_id = _agent_plan_profile(call)
+    assert call("POST", f"/model-profiles/{profile_id}/activate")[0] == 200
+    status, coding = call(
+        "POST",
+        "/model-profiles",
+        {
+            "name": "Ark Coding",
+            "provider": "ark",
+            "base_url": CODING_URL,
+            "model": "doubao-seed-2.0-pro",
+            "api_key": OTHER_KEY,
+        },
+    )
+    assert status in (200, 201)
+    assert call("POST", f"/model-profiles/{coding['id']}/activate")[0] == 200
+    # The saved Agent Plan key, not the Coding Plan's, is what DataPro sends.
+    assert datapro.resolve_agent_plan_key(store) == PLAN_KEY
+    call.manager.disconnects.clear()
+
+    if removal == "delete":
+        assert call("DELETE", f"/model-profiles/{profile_id}")[0] == 200
+    else:
+        body = {"api_key": "agent-plan-rotated-model-key"}
+        assert call("PATCH", f"/model-profiles/{profile_id}", body)[0] == 200
+
+    assert datapro.resolve_agent_plan_key(store) == OTHER_KEY
+    assert call.manager.disconnects == [
+        (datapro.CONNECTOR_ID, datapro.runtime_cache_scope(store))
+    ]
+
+
+@pytest.mark.stubbed_backend
+def test_an_env_owned_secret_store_adopts_nothing_and_stays_quiet(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s import mcp_client
+
+    monkeypatch.setenv("OPENAI4S_SECRET_STORE", "env")
+    monkeypatch.setenv("OPENAI4S_SECRET_ENV", "1")
+    monkeypatch.setenv("OPENAI4S_SECRET_LLM_LLM_API_KEY", PLAN_KEY)
+    monkeypatch.setattr(mcp_client, "manager", lambda: _Manager())
+    cfg = _cfg(tmp_path)
+    store = get_store(cfg.db_path)
+    store.set_setting("llm_provider", "ark")
+    store.set_setting("llm_base_url", PLAN_URL)
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    try:
+        _Route(cfg, runner)
+        assert datapro.resolve_agent_plan_key(store) == PLAN_KEY
+    finally:
+        runner.close()
+
+    assert "Traceback" not in capsys.readouterr().err

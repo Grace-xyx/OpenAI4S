@@ -206,10 +206,11 @@ route, search response, DOM, or diagnostic text. Saving it from Customize →
 Network therefore authorizes both managed products once. An active Ark model
 key is reused only when the selected provider is Ark on a Volcengine endpoint.
 When that model is an Agent Plan (`https://ark.<region>.volces.com/api/plan/v3`,
-the provider default), activating it also saves its key as this dedicated
+or a blank Base URL that no `OPENAI4S_ARK_BASE_URL` / `OPENAI4S_LLM_BASE_URL`
+override points elsewhere), activating it also saves its key as this dedicated
 credential, so both products stay authorized after the user selects another
-model; a Coding Plan or platform key is never saved this way and no longer
-shadows a dedicated key.
+model; a Coding Plan, platform or proxy key is never saved this way, and a
+Coding Plan or platform key no longer shadows a dedicated key.
 
 The dedicated `POST /doubao-search/search` product check has no fallback. It
 does not call Tavily, DuckDuckGo, Bing, Mojeek, or an identifier resolver after
@@ -227,12 +228,13 @@ above. It is one fixed, managed MCP Streamable HTTP connector named
 `volcengine-datapro`, and exposes only `dataPro_search(query:string)` to its
 bundled Skill. The endpoint is not user-selectable. The Agent Plan Key is stored
 through SecretBroker and resolved only as each outbound POST is assembled; an
-active Ark model key is reused only when the active provider is Ark. Activating
-an Agent Plan model whose key is not yet the saved one also switches the
-connector and Skill on — a new plan is a fresh authorization — while
-re-activating a plan already adopted leaves both as the user last set them.
-Disconnecting Volcengine removes the adopted copy of its key, not a different
-key saved separately.
+active Ark model key is reused only when the active provider is Ark. The first
+time an Agent Plan model's key is saved this way (no dedicated key yet), the
+connector and Skill are also switched on; a later rotation or another Agent
+Plan only updates the key and leaves both as the user last set them. A key the
+user saved on a card is never replaced. Removing the source key — deleting or
+re-keying its profile, clearing the live key, or disconnecting Volcengine —
+removes the adopted copy too, unless another profile still holds it.
 
 The Customize → Connectors card performs the actual search call and persists
 its result as a JSON Artifact. Every successful response is indexed without a

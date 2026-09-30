@@ -10,6 +10,7 @@ contains the credential or the injected headers.
 from __future__ import annotations
 
 import json
+import os
 import urllib.parse
 import uuid
 from collections.abc import Mapping
@@ -173,6 +174,25 @@ def explicit_agent_plan_key(store: DataProStore) -> str:
     return _brokered(store, AGENT_PLAN_KEY_SETTING)
 
 
+def _dispatched_ark_base_url(base_url: str) -> str:
+    """The endpoint an Ark request is really sent to, or '' for the default.
+
+    An empty Base URL is not the provider default by itself: like
+    ``LLMConfig``, it falls back to ``OPENAI4S_ARK_BASE_URL`` and then
+    ``OPENAI4S_LLM_BASE_URL``, which can point at a corporate proxy.  Only when
+    both are unset is it the built-in Agent Plan gateway.
+    """
+
+    url = str(base_url or "").strip()
+    if url:
+        return url
+    return (
+        os.environ.get("OPENAI4S_ARK_BASE_URL")
+        or os.environ.get("OPENAI4S_LLM_BASE_URL")
+        or ""
+    ).strip()
+
+
 def is_volcengine_endpoint(base_url: str) -> bool:
     """True when an LLM endpoint really is Volcengine's.
 
@@ -181,9 +201,9 @@ def is_volcengine_endpoint(base_url: str) -> bool:
     account a key belongs to.
     """
 
-    url = base_url.strip()
+    url = _dispatched_ark_base_url(base_url)
     if not url:
-        # No override: the provider default endpoint, which is Volcengine's.
+        # No override anywhere: the provider default endpoint, Volcengine's.
         return True
     host = (urllib.parse.urlsplit(url).hostname or "").strip().lower().rstrip(".")
     if not host:
@@ -199,11 +219,12 @@ def is_agent_plan_endpoint(base_url: str) -> bool:
     One Volcengine host serves three credential families: the Agent Plan
     (``/api/plan/v3``), the Coding Plan (``/api/coding/v3``) and platform keys
     (``/api/v3``).  Only an Agent Plan key is the credential DataPro and Doubao
-    Search Custom are keyed on.  An empty URL is the provider default, which is
-    the Agent Plan gateway.
+    Search Custom are keyed on.  An empty URL resolves as the LLM client does;
+    with no environment override it is the provider default, the Agent Plan
+    gateway.
     """
 
-    url = base_url.strip()
+    url = _dispatched_ark_base_url(base_url)
     if not url:
         return True
     if not is_volcengine_endpoint(url):
@@ -258,7 +279,11 @@ def _adopted(store: DataProStore) -> bool:
     return str(store.get_setting(AGENT_PLAN_KEY_ORIGIN_SETTING) or "") == _ADOPTED
 
 
-def adopt_active_agent_plan_key(store: DataProStore) -> bool:
+ADOPTED_FIRST = "first"
+ADOPTED_UPDATED = "updated"
+
+
+def adopt_active_agent_plan_key(store: DataProStore) -> str:
     """Save an active Agent Plan model key as the managed products' own key.
 
     Reusing the live key at read time lasts only while that model stays
@@ -266,24 +291,30 @@ def adopt_active_agent_plan_key(store: DataProStore) -> bool:
     were unauthorized again until the same key was pasted into their cards.
     Persisting it as the dedicated Agent Plan Key keeps both working.
 
-    A key the user saved on a card is never replaced; an adopted one follows
-    the plan (a rotated or different Agent Plan key replaces it).  Returns True
-    only when the stored key changed -- a new Agent Plan was set up -- so a
-    caller can apply one-time defaults then, and never again over a later
-    choice of the user's while that same plan stays in use.
+    A key the user saved on a card -- or one from before the origin was
+    recorded -- is never replaced; an adopted one follows the plan (a rotated
+    or different Agent Plan key replaces it).  Ownership is decided from the
+    settings row, not from a brokered read that answers '' on failure, so a
+    keychain hiccup cannot make a user's key look absent.
+
+    Returns ``ADOPTED_FIRST`` when there was no dedicated key before -- the
+    moment to apply one-time defaults -- ``ADOPTED_UPDATED`` when an adopted
+    key was replaced, and '' when nothing was written.
     """
 
     key = active_agent_plan_key(store)
     if not key:
-        return False
-    current = explicit_agent_plan_key(store)
-    if current == key:
-        return False
-    if _has_valid_agent_plan_key(current) and not _adopted(store):
-        return False
+        return ""
+    row = str(store.get_setting(AGENT_PLAN_KEY_SETTING) or "").strip()
+    if row and not _adopted(store):
+        return ""
+    if row:
+        current = str(store.get_secret_setting(AGENT_PLAN_KEY_SETTING) or "").strip()
+        if current == key:
+            return ""
     store.set_secret_setting(AGENT_PLAN_KEY_SETTING, key, scope=_AGENT_PLAN_SCOPE)
     store.set_setting(AGENT_PLAN_KEY_ORIGIN_SETTING, _ADOPTED)
-    return True
+    return ADOPTED_UPDATED if row else ADOPTED_FIRST
 
 
 def forget_adopted_agent_plan_key(store: DataProStore, value: str) -> bool:
@@ -658,6 +689,8 @@ __all__ = [
     "ENDPOINT",
     "SKILL_NAME",
     "TOOL_NAME",
+    "ADOPTED_FIRST",
+    "ADOPTED_UPDATED",
     "active_agent_plan_key",
     "adopt_active_agent_plan_key",
     "connector_runtime_config",

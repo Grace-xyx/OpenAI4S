@@ -54,7 +54,7 @@ OpenAI4S 的离线正确性门禁。`uv run pytest` 用确定性 fake 跑完这�
 | [`test_actions.py`](test_actions.py) | 两个外层循环共用的这一份回复解析。优先级规则钉在这里：原生调用压过代码 fence，没有闭合的 fence 永远不可执行，文档顺序里只有第一个 Cell 会跑。 |
 | [`test_admet_genetic.py`](test_admet_genetic.py) | 内置的 ADMET genetic Skill：能被发现、helper 的聚合是确定性的，以及它生成的 dashboard 会转义脚本和 HTML 定界符。 |
 | [`test_agent.py`](test_agent.py) | 全套里覆盖面最宽的一个模块——离线外层循环的完整链路。Code-as-Action 循环、没有 R 时 R Cell 软失败成一条 observation、token 估算、把一个 Cell 和它的 observation 压在同一个原子段里的 compaction，以及委派的上限。改坏了循环，通常先在这里露馅。 |
-| [`test_agent_plan_defaults.py`](test_agent_plan_defaults.py) | 当前模型是火山方舟 Agent Plan 时，它成为 DataPro 与豆包搜索保存下来的默认凭证。每条模型激活路径（火山一键配置、profile 启用、顶栏模型选择、首次运行向导）以及 daemon 启动都会把它的 Key 保存一次，之后切换到别的模型也无需再配置；新套餐还会打开 DataPro，而重新启用已接管过的套餐会保留用户后来的选择。Coding Plan、平台 Key 与外部网关的 Key 永远不会被接管，也不再遮蔽已保存的 Agent Plan Key；断开火山只移除它接管的那一份副本。 |
+| [`test_agent_plan_defaults.py`](test_agent_plan_defaults.py) | 当前模型是火山方舟 Agent Plan 时，它成为 DataPro 与豆包搜索保存下来的默认凭证。每条模型激活路径（火山一键配置、profile 启用、顶栏模型选择、首次运行向导）以及 daemon 启动都会保存它的 Key，之后切换到别的模型也无需再配置；只有第一次接管会打开 DataPro，轮换 Key 或换用另一个套餐都会保留用户后来的选择。Coding Plan、平台 Key、外部网关以及经环境变量代理的 Key 永远不会被接管；用户在卡片上保存的 Key 永远不会被替换（钥匙串读取失败时也一样）；移除来源 Key（删除或换 Key、重新配置火山、清空当前 Key、断开火山）会一并移除副本，并断开用它建立的 DataPro 会话。 |
 | [`test_agent_control.py`](test_agent_control.py) | 压力之下的原生 Tool 批次。哪怕其中一次调用失败，或者整轮在批次中途被取消，批次里的每个调用最终都要落到一个结果。互不相干的只读调用可以并行，但一个会写的调用是它之后所有调用的 barrier。 |
 | [`test_agent_engine.py`](test_agent_engine.py) | 单独用 fake port 驱动 `AgentEngine`。那个 import 测试才是这个模块的要点：引擎不许 import 任何运行时基础设施。其余的钉住路由优先级、可重放的历史分组、取消究竟在哪几个时刻取胜，以及模型反复发送被拒的 `finalize_response` 时以 `no_progress` 停下，而不是耗尽整个回合预算。 |
 | [`test_agent_hybrid.py`](test_agent_hybrid.py) | 关于 hybrid `Agent` 门面的两个测试：原生调用压过代码、且它的规范历史能活到下一轮；被复用的 agent 在接新任务前会清掉上一次的提交。 |
