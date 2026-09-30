@@ -61,6 +61,7 @@ _DELEGATION_EVENT_CHILD_KEYS = (
     "started_at",
     "finished_at",
     "stop_reason",
+    "artifact_evidence",
 )
 
 

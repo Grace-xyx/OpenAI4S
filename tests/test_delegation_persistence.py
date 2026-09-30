@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -15,6 +16,7 @@ from openai4s.agent.delegation import (
 )
 from openai4s.agent.models import RunState
 from openai4s.config import get_config
+from openai4s.storage.delegation import _encode_result
 from openai4s.store import get_store
 
 
@@ -341,3 +343,53 @@ def test_a_child_persisted_without_task_status_projects_null():
     child = store.delegation_tree(root)["children"][0]
     assert child["status"] == "done"
     assert child["task_status"] is None
+    assert "artifact_evidence" not in child
+
+
+def test_encode_result_keeps_artifact_evidence_past_the_public_cap():
+    """Under 16_000 characters the result is unchanged. Over it, evidence stays."""
+    evidence = {
+        "scope": "version_and_producer",
+        "items": [
+            {
+                "version_id": "v-kept",
+                "verdict": "verified_version_and_producer",
+                "reasons": ["no_cell_receipt"],
+            }
+        ],
+        "total": 1,
+        "truncated": False,
+    }
+    small = {"task_status": "completed", "output": {"ok": True}}
+    decoded_small = json.loads(_encode_result(small))
+    assert decoded_small == small
+    assert "artifact_evidence" not in decoded_small
+    assert "truncated" not in decoded_small
+
+    kept = {
+        "task_status": "partial",
+        "output": {"ok": True},
+        "artifact_evidence": evidence,
+    }
+    decoded_kept = json.loads(_encode_result(kept))
+    assert decoded_kept["artifact_evidence"] == evidence
+    assert "truncated" not in decoded_kept
+
+    huge = {
+        "task_status": "completed",
+        "artifact_evidence": evidence,
+        "output": {f"k{index:02d}": "y" * 500 for index in range(60)},
+    }
+    packed = _encode_result(huge)
+    assert len(packed) <= 16_000
+    decoded = json.loads(packed)
+    assert decoded["truncated"] is True
+    assert decoded["task_status"] == "completed"
+    assert decoded["artifact_evidence"] == evidence
+
+    bare = _encode_result(["y" * 2000] * 60)
+    assert len(bare) <= 16_000
+    decoded_bare = json.loads(bare)
+    assert decoded_bare["truncated"] is True
+    assert decoded_bare["artifact_evidence"] is None
+    assert decoded_bare["task_status"] is None

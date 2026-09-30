@@ -649,7 +649,7 @@ class DelegationProjectionRepository:
             if "no such table" not in str(error).lower():
                 raise
             identity = {}
-        return {
+        normalized = {
             "child_id": row["child_id"],
             "name": row["name"],
             "status": row["status"],
@@ -685,6 +685,11 @@ class DelegationProjectionRepository:
                 "messages": messages,
             },
         }
+        if isinstance(result, dict):
+            evidence = result.get("artifact_evidence")
+            if evidence is not None:
+                normalized["artifact_evidence"] = evidence
+        return normalized
 
     def _persist_message_locked(
         self,
@@ -826,7 +831,53 @@ def _encode(value: Any, limit: int) -> str:
 
 
 def _encode_result(value: Any) -> str:
-    return _encode(value, 16_000)
+    """Encode a child result, keeping evidence when the public JSON is too long.
+
+    Under the cap this is ``_encode(value, 16_000)``. Over the cap the stored
+    object is ``{truncated, preview, artifact_evidence, task_status}``.
+    ``artifact_evidence`` and ``task_status`` are the caller's values, not a
+    second pass through ``_public``. The preview shrinks so a normal evidence
+    object still fits in 16_000 characters; evidence is kept even when it
+    alone exceeds that cap.
+    """
+    limit = 16_000
+    public = _public(value)
+    encoded = json.dumps(
+        public, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(encoded) <= limit:
+        return encoded
+    evidence = value.get("artifact_evidence") if isinstance(value, Mapping) else None
+    task_status = value.get("task_status") if isinstance(value, Mapping) else None
+
+    def pack(preview: str) -> str:
+        return json.dumps(
+            {
+                "artifact_evidence": evidence,
+                "preview": preview,
+                "task_status": task_status,
+                "truncated": True,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    if len(pack("")) > limit:
+        return pack("")
+    lo = 0
+    hi = len(encoded)
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        preview = "" if mid == 0 else (_text(encoded, mid) or "")
+        if len(pack(preview)) <= limit:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    preview = "" if best == 0 else (_text(encoded, best) or "")
+    return pack(preview)
 
 
 def _decode(value: str | None) -> Any:

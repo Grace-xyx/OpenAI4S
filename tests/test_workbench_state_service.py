@@ -341,6 +341,54 @@ def test_delegation_event_projection_owns_the_output_exclusion():
     assert child["frame_id"] == "f-child"
     assert child["depth"] == 2
     assert child["progress"]["max_turns"] == 6
+    assert "artifact_evidence" not in child
+
+
+def test_delegation_event_projection_forwards_bounded_artifact_evidence():
+    """A child snapshot's artifact_evidence is copied, and output stays off the wire."""
+
+    from openai4s.server.workbench_state import delegation_event_projection
+
+    evidence = {
+        "scope": "version_and_producer",
+        "items": [
+            {
+                "filename": f"f{index:02d}.txt",
+                "artifact_id": f"a-{index}",
+                "version_id": f"v-{index}",
+                "checksum": "ab" * 32,
+                "size_bytes": index,
+                "capture_kind": None,
+                "producing_cell_id": None,
+                "cell_status": None,
+                "verdict": "verified_version_and_producer",
+                "reasons": ["no_cell_receipt"],
+            }
+            for index in range(12)
+        ],
+        "total": 13,
+        "truncated": True,
+    }
+    projected = delegation_event_projection(
+        {
+            "type": "delegation_child_event",
+            "event": "done",
+            "at": 9.0,
+            "child": {
+                "child_id": "c-9",
+                "status": "done",
+                "output": {"secret": "not for the socket"},
+                "artifact_evidence": evidence,
+            },
+        }
+    )
+
+    child = projected["child"]
+    assert "output" not in child
+    assert child["artifact_evidence"] == evidence
+    assert len(child["artifact_evidence"]["items"]) == 12
+    assert child["artifact_evidence"]["truncated"] is True
+    assert child["artifact_evidence"]["total"] == 13
 
 
 def test_delegation_event_projection_tolerates_a_missing_child():
