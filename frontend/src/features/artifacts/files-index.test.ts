@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { artifacts as artifactsSignal, artifactsFrameId, filesScope, projectArtifacts } from "../../stores/artifacts";
 import { _openGen, currentId, project } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
-import { setArtifactsFetch } from "./api";
+import { fetchArtifactIndexPage, setArtifactsFetch } from "./api";
 import {
   browseFiles,
   filterArtifactsClient,
@@ -32,7 +32,7 @@ import {
   resetFilesIndexState,
 } from "./state";
 import type { ArtifactRow } from "./types";
-import { FILES_PAGE_SIZE } from "./types";
+import { FILES_MAX_PAGE_SIZE, FILES_PAGE_SIZE } from "./types";
 
 function row(partial: Partial<ArtifactRow> & { id: string }): ArtifactRow {
   return {
@@ -86,6 +86,22 @@ describe("M-03 Files index (artifact-index, no array fallback)", () => {
     expect(uploaded.map((a) => a.id)).toEqual(["1"]);
     const generated = filterArtifactsClient(rows, { q: "", contentType: "", origin: "generated" });
     expect(generated.map((a) => a.id)).toEqual(["2", "3"]);
+  });
+
+  it("fetchArtifactIndexPage encodes the project id, omits an empty filename query, and clamps limit", async () => {
+    const seen: string[] = [];
+    setArtifactsFetch(async (url) => {
+      seen.push(url);
+      return jsonResponse({ artifacts: [], next_cursor: null, has_more: false });
+    });
+    await fetchArtifactIndexPage("a/b c", { q: "", limit: 20 });
+    await fetchArtifactIndexPage("a/b c", { q: "plot", limit: 500 });
+    expect(seen[0]).toContain("/projects/a%2Fb%20c/artifact-index?");
+    expect(seen[0]).toContain("limit=20");
+    expect(seen[0]).not.toContain("q=");
+    expect(seen[1]).toContain("q=plot");
+    expect(seen[1]).toContain(`limit=${FILES_MAX_PAGE_SIZE}`);
+    expect(seen.every((url) => !/\/artifacts(?:\?|$)/.test(url))).toBe(true);
   });
 
   it("first index page is ≤ 50 of a 500-artifact fixture", async () => {

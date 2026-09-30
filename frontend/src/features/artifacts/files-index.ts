@@ -1,6 +1,6 @@
 import { artifacts as artifactsSignal, artifactsFrameId, artifactsFrameGeneration, filesScope, projectArtifacts } from "../../stores/artifacts";
 import { _openGen, currentId, project } from "../../stores/session";
-import { api, asArtifactList, isApiStatus } from "./api";
+import { fetchArtifactIndexPage, isApiStatus } from "./api";
 import { filesT } from "./copy";
 import {
   artifactsReadError,
@@ -127,29 +127,19 @@ function clampLimit(limit: number): number {
   return Math.min(Math.max(1, Math.floor(limit)), FILES_MAX_PAGE_SIZE);
 }
 
-async function fetchArtifactIndex(
+function fetchArtifactIndex(
   pid: string,
   filter: FilesFilter,
   cursor: string | null,
   limit: number,
 ): Promise<ArtifactIndexPage> {
-  const params = new URLSearchParams();
-  if (filter.q) params.set("q", filter.q);
-  if (filter.contentType) params.set("content_type", filter.contentType);
-  if (filter.origin) params.set("origin", filter.origin);
-  if (cursor) params.set("cursor", cursor);
-  params.set("limit", String(clampLimit(limit)));
-  const qs = params.toString();
-  const body = await api(`/projects/${encodeURIComponent(pid)}/artifact-index?${qs}`);
-  if (!body || typeof body !== "object") {
-    return { artifacts: [], next_cursor: null, has_more: false };
-  }
-  const rec = body as Record<string, unknown>;
-  return {
-    artifacts: asArtifactList(rec.artifacts),
-    next_cursor: rec.next_cursor == null ? null : String(rec.next_cursor),
-    has_more: !!rec.has_more,
-  };
+  return fetchArtifactIndexPage(pid, {
+    q: filter.q,
+    contentType: filter.contentType,
+    origin: filter.origin,
+    cursor,
+    limit,
+  });
 }
 
 
