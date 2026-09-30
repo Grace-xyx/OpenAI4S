@@ -1,9 +1,12 @@
 """Pytest fixtures + path setup for the openai4s test suite."""
 
+import atexit
 import copy
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -171,6 +174,19 @@ for _name in (
     "OPENAI4S_BUNDLE_ID",
 ):
     os.environ.pop(_name, None)
+
+# The per-test redirect in `isolated_openai4s_home` is function-scoped, but
+# collection imports every test module first and pytest sets up module- and
+# session-scoped fixtures before any function-scoped one. In that window the
+# data dir was whatever the shell had, usually nothing, so it resolved to
+# ~/.openai4s. A module-scoped `get_config()` then created and chmod-hardened
+# directories in the real home. A module-scoped `Config()` cached by the Skill
+# eval opened the real database, and a newer build's schema turned the suite
+# red on one machine only. With this floor, the redirect's undo restores a
+# scratch directory rather than the developer's.
+_SUITE_DATA_DIR = tempfile.mkdtemp(prefix="openai4s-suite-data-")
+os.environ["OPENAI4S_DATA_DIR"] = _SUITE_DATA_DIR
+atexit.register(shutil.rmtree, _SUITE_DATA_DIR, ignore_errors=True)
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
