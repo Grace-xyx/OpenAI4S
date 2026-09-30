@@ -1,9 +1,10 @@
-"""The suite-wide guard that keeps every Store off the developer's real data dir.
+"""The suite-wide guard that keeps the suite out of the developer's real data dir.
 
 ``conftest.py`` redirects ``OPENAI4S_DATA_DIR`` per test, but anything resolved
 before that redirect -- a module-scoped fixture, a cache it filled -- keeps the
-real ``~/.openai4s``. The guard refuses such a Store outright and records it so
-the test fails even when the code under test swallows the refusal. These tests
+real ``~/.openai4s``. The guard refuses a Store or a data-dir creation there
+outright and records it, so the test fails even when the code under test
+swallows the refusal. These tests
 point the guard at a stand-in under ``tmp_path``; a broken guard must never be
 able to prove itself against the real directory.
 """
@@ -46,6 +47,30 @@ def test_a_store_there_is_refused_before_it_touches_disk(
     touched = real_data_dir_guard.drain()
     assert len(touched) == 3
     assert all(str(stand_in_real_dir) in entry for entry in touched)
+
+
+def test_creating_the_data_dir_there_is_refused(
+    real_data_dir_guard, stand_in_real_dir: Path, monkeypatch
+) -> None:
+    """``get_config()`` creates and hardens its data dir; that is a write too.
+
+    Five Skill fixtures called it at module scope for ``skills_dir`` alone,
+    before the per-test redirect, and so ran ``mkdir``/``chmod`` on the real
+    ``~/.openai4s`` and its subdirectories.
+    """
+
+    from openai4s.config import Config, get_config
+
+    with pytest.raises(RuntimeError, match="real data dir"):
+        Config(data_dir=stand_in_real_dir).ensure_dirs()
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(stand_in_real_dir))
+    with pytest.raises(RuntimeError, match="real data dir"):
+        get_config()
+    # What those fixtures needed, without touching the directory at all.
+    assert get_config(initialize_dirs=False).data_dir == stand_in_real_dir
+
+    assert not stand_in_real_dir.exists()
+    assert len(real_data_dir_guard.drain()) == 2
 
 
 def test_a_swallowed_refusal_is_still_recorded(

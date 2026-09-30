@@ -180,7 +180,7 @@ if str(_REPO) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
-# the developer's real data dir is off limits to every Store
+# the developer's real data dir is off limits
 # ---------------------------------------------------------------------------
 #
 # `isolated_openai4s_home` redirects OPENAI4S_DATA_DIR per test, which only
@@ -191,8 +191,11 @@ if str(_REPO) not in sys.path:
 # module-scoped fixture, and every later search in the process opened the real
 # openai4s.db -- a FutureSchemaError against a newer one, a silent create or
 # migration against an older one, and green on CI only because runners have no
-# ~/.openai4s at all. The redirect cannot reach state built before it, so the
-# Store itself refuses the real data dir, on every machine, whether or not that
+# ~/.openai4s at all. The response-contract drives did the same through a
+# turn's global-config lookup, and five Skill fixtures created and chmod-ed the
+# real data dir through `get_config()`. The redirect cannot reach state built
+# before it, so the two ways in -- opening a Store and `Config.ensure_dirs` --
+# refuse the real data dir themselves, on every machine, whether or not that
 # directory exists.
 
 
@@ -212,40 +215,42 @@ def _real_data_dirs() -> tuple[Path, ...]:
     return tuple(dict.fromkeys(root.resolve() for root in roots))
 
 
-class RealDataDirStoreError(RuntimeError):
-    """A test tried to open a Store under the developer's real data dir."""
+class RealDataDirError(RuntimeError):
+    """A test tried to write under the developer's real data dir."""
 
 
 class _RealDataDirGuard:
-    """Refuse, and remember, every Store opened under a real data dir.
+    """Refuse, and remember, every Store or data dir under a real data dir.
 
-    Refusing protects the database; remembering is what fails the test. Code
+    Refusing protects the data; remembering is what fails the test. Code
     under test routinely catches ``Exception`` -- the eval's ``run_system``
-    turns every error into a row -- so a raise alone can be swallowed into a
-    pass. ``isolated_openai4s_home`` drains the record at teardown instead.
+    turns every error into a row, the task-mode shadow reads "off" -- so a
+    raise alone can be swallowed into a pass. ``isolated_openai4s_home``
+    drains the record at teardown instead.
     """
 
     def __init__(self, roots: tuple[Path, ...]) -> None:
         self.roots = roots
         self.violations: list[str] = []
 
-    def covers(self, db_path) -> bool:
+    def covers(self, path) -> bool:
         # Relative paths resolve against the cwd, exactly as sqlite opens them.
-        target = Path(db_path).resolve()
+        target = Path(path).resolve()
         return any(target == root or root in target.parents for root in self.roots)
 
-    def check(self, db_path) -> None:
-        if not self.covers(db_path):
+    def check(self, path, action: str) -> None:
+        if not self.covers(path):
             return
         message = (
-            f"refused to open a Store at {db_path} under the developer's real "
-            f"data dir ({', '.join(map(str, self.roots))}); something resolved "
-            "its data dir before isolated_openai4s_home redirected it -- a "
-            "module/session-scoped fixture, or a cache built by one."
+            f"refused to {action} {path} under the developer's real data dir "
+            f"({', '.join(map(str, self.roots))}); something resolved its data "
+            "dir before isolated_openai4s_home redirected it -- a module/"
+            "session-scoped fixture, a cache built by one, or a thread that "
+            "outlived its test."
         )
         stack = "".join(traceback.format_stack(limit=12)[:-2])
         self.violations.append(f"{message}\n{stack}")
-        raise RealDataDirStoreError(message)
+        raise RealDataDirError(message)
 
     def drain(self) -> list[str]:
         drained, self.violations = self.violations, []
@@ -257,29 +262,38 @@ _REAL_DATA_DIR_GUARD = _RealDataDirGuard(_real_data_dirs())
 
 @pytest.fixture(scope="session", autouse=True)
 def real_data_dir_guard():
-    """Install the guard on ``Store`` for the whole session.
+    """Install the guard on ``Store`` and ``Config.ensure_dirs`` for the session.
 
     Session-scoped so it is in place before any module-scoped fixture runs,
-    and a fixture rather than import-time code so the import of
-    ``openai4s.store`` happens after collection: a test module that sets an
-    environment variable before its own ``openai4s.config`` import still gets
+    and a fixture rather than import-time code so the imports of
+    ``openai4s.store`` and ``openai4s.config`` happen after collection: a test
+    module that sets an environment variable before its own import still gets
     the definition-time default it asked for.
     """
 
+    from openai4s import config as config_mod
     from openai4s import store as store_mod
 
-    original = store_mod.Store.__init__
+    original_init = store_mod.Store.__init__
+    original_ensure_dirs = config_mod.Config.ensure_dirs
 
-    @functools.wraps(original)
+    @functools.wraps(original_init)
     def guarded_init(self, db_path, *args, **kwargs):
-        _REAL_DATA_DIR_GUARD.check(db_path)
-        original(self, db_path, *args, **kwargs)
+        _REAL_DATA_DIR_GUARD.check(db_path, "open a Store at")
+        original_init(self, db_path, *args, **kwargs)
+
+    @functools.wraps(original_ensure_dirs)
+    def guarded_ensure_dirs(self, *args, **kwargs):
+        _REAL_DATA_DIR_GUARD.check(self.data_dir, "create the data dir")
+        return original_ensure_dirs(self, *args, **kwargs)
 
     store_mod.Store.__init__ = guarded_init
+    config_mod.Config.ensure_dirs = guarded_ensure_dirs
     try:
         yield _REAL_DATA_DIR_GUARD
     finally:
-        store_mod.Store.__init__ = original
+        store_mod.Store.__init__ = original_init
+        config_mod.Config.ensure_dirs = original_ensure_dirs
 
 
 @pytest.fixture(autouse=True)
@@ -378,7 +392,7 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
     touched = _REAL_DATA_DIR_GUARD.drain()
     if touched:
         pytest.fail(
-            "a Store was opened under the developer's real data dir since the "
+            "something wrote under the developer's real data dir since the "
             "previous test finished:\n\n" + "\n".join(touched),
             pytrace=False,
         )
