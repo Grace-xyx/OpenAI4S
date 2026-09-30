@@ -844,3 +844,80 @@ def test_chat_sends_exactly_the_configured_attempts(monkeypatch, retries):
 
     assert len(sends) == retries + 1
     assert raised.value.status == 429
+
+
+def test_zero_retries_still_lets_a_refused_stream_fall_back_once(monkeypatch):
+    """``OPENAI4S_LLM_MAX_RETRIES=0`` means "do not retry", not "fail every
+    turn behind a proxy that refuses ``stream``": the compatibility POST is a
+    fallback, and a send ceiling of one used to leave it no room."""
+    import dataclasses
+
+    sends = []
+
+    def urlopen(req, **kwargs):
+        stream = bool(json.loads(req.data).get("stream"))
+        sends.append(stream)
+        if stream:
+            raise _http_error(
+                400,
+                body=b'{"error":{"code":"streaming_not_supported","param":"stream"}}',
+            )
+        return _Resp(
+            b'{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}'
+        )
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    cfg = dataclasses.replace(_cfg(), max_retries=0)
+
+    reply = chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)
+
+    assert reply["content"] == "ok"
+    assert sends == [True, False]
+
+
+def test_zero_retries_does_not_spend_the_spare_send_on_a_retry(monkeypatch):
+    import dataclasses
+
+    sends = []
+
+    def urlopen(req, **kwargs):
+        sends.append(True)
+        raise _http_error(429)
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    cfg = dataclasses.replace(_cfg(), max_retries=0)
+
+    with pytest.raises(TransportError) as raised:
+        chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)
+
+    assert len(sends) == 1
+    assert raised.value.retries_attempted == 0
+
+
+def test_a_streaming_chat_honours_the_configured_per_wait_cap(monkeypatch):
+    """``chat(on_delta=...)`` goes through ``post_sse``; a cap left at the old
+    8 s literal there would clip a configured 60 s cap on the path the
+    workbench actually uses."""
+    import dataclasses
+
+    ranges = []
+
+    def urlopen(req, **kwargs):
+        raise _http_error(429)
+
+    def jitter(low, high):
+        ranges.append((low, high))
+        return low
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport.random.uniform", jitter)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    cfg = dataclasses.replace(
+        _cfg(), max_retries=3, retry_budget_s=600, retry_max_delay_s=60
+    )
+
+    with pytest.raises(TransportError):
+        chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)
+
+    assert ranges == [(2.0, 4.0), (4.0, 8.0), (8.0, 16.0)]

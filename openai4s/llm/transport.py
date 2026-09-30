@@ -101,24 +101,46 @@ REQUEST_BURST_BASE_BACKOFF = 4.0
 DEFAULT_RETRY_BUDGET = 30.0
 
 
+def _retry_count(max_retries: Any) -> int | None:
+    """``max_retries`` if it is a valid configured count, else ``None``.
+
+    Anything else (an injected adapter without the field, a bool, a count
+    past ``LLMConfig``'s own ceiling) keeps the transport default rather than
+    inventing a policy.
+    """
+    from openai4s.config import MAX_LLM_RETRIES
+
+    if type(max_retries) is not int or not 0 <= max_retries <= MAX_LLM_RETRIES:
+        return None
+    return max_retries
+
+
 def max_attempts_for_retries(max_retries: Any) -> int:
     """The send ceiling a configured retry count stands for.
 
     The one place that turns ``max_retries`` into sends: the transport's
     ``CallState`` and the quota bound in ``server/auto_budget.py`` both read
     it, so the reservation is priced for exactly the sends that can happen.
-    Anything that is not a non-negative ``int`` (an injected adapter without
-    the field, a bool) keeps the default rather than inventing a policy.
+
+    ``retries + 1``, but never below two. The one blocking compatibility
+    request a stream refused outright may make shares this ceiling, and it is
+    a fallback, not a retry: with a ceiling of one, ``max_retries=0`` would
+    also have removed it and failed every turn behind a proxy that refuses
+    ``stream``. Retrying itself is limited separately (``CallState.max_retries``).
     """
-    if type(max_retries) is not int or max_retries < 0:
+    retries = _retry_count(max_retries)
+    if retries is None:
         return DEFAULT_MAX_ATTEMPTS
-    return max_retries + 1
+    return max(retries + 1, 2)
 
 
 def _positive_seconds(value: Any, default: float, *, allow_zero: bool) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
-    seconds = float(value)
+    try:
+        seconds = float(value)
+    except OverflowError:  # an int too large for a float
+        return default
     if seconds != seconds or seconds in (float("inf"), float("-inf")):
         return default
     if seconds < 0 or (seconds == 0 and not allow_zero):
@@ -151,6 +173,12 @@ class CallState:
     total_timeout_s: float = 600.0
     #: Ceiling on one computed backoff wait (never on a ``Retry-After``).
     max_delay: float = DEFAULT_MAX_BACKOFF
+    #: Retries allowed after a failed send, separately from ``max_attempts``
+    #: (which also admits the stream-compatibility request). ``None``: every
+    #: send the ceiling allows may be a retry.
+    max_retries: int | None = None
+    #: Backoff waits taken so far, i.e. retries actually attempted.
+    retries: int = 0
     deadline: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -164,15 +192,19 @@ class CallState:
         over duck-typed configs, so a missing or malformed field keeps the
         transport default instead of failing the call.
         """
+        retries = getattr(cfg, "max_retries", None)
         return cls(
-            max_attempts=max_attempts_for_retries(getattr(cfg, "max_retries", None)),
+            max_attempts=max_attempts_for_retries(retries),
+            max_retries=_retry_count(retries),
             retry_budget=_positive_seconds(
                 getattr(cfg, "retry_budget_s", None),
                 DEFAULT_RETRY_BUDGET,
                 allow_zero=True,
             ),
             should_cancel=should_cancel,
-            total_timeout_s=getattr(cfg, "total_timeout_s", 600.0),
+            total_timeout_s=_positive_seconds(
+                getattr(cfg, "total_timeout_s", None), 600.0, allow_zero=False
+            ),
             max_delay=_positive_seconds(
                 getattr(cfg, "retry_max_delay_s", None),
                 DEFAULT_MAX_BACKOFF,
@@ -486,7 +518,12 @@ def _sleep_for(err: TransportError, attempt: int, base: float, cap: float) -> fl
 
 
 def _give_up(
-    err: TransportError, reason: str, *, provider: str | None, operation: str
+    err: TransportError,
+    reason: str,
+    *,
+    stop: str,
+    provider: str | None,
+    operation: str,
 ) -> TransportError:
     """``err`` restated with why no further retry was attempted.
 
@@ -495,7 +532,7 @@ def _give_up(
     ``type(err)``: a stream read failure keeps its class, and a rate limit its
     status, so the stable failure code the recovery path keys on survives.
     """
-    return type(err)(
+    restated = type(err)(
         f"{err} ({reason})",
         provider=provider,
         operation=operation,
@@ -508,6 +545,9 @@ def _give_up(
         output_committed=err.output_committed,
         body=err.body,
     )
+    restated.retries_attempted = err.retries_attempted
+    restated.retry_stop = stop
+    return restated
 
 
 def _retry_loop(
@@ -551,6 +591,9 @@ def _retry_loop(
         else min(retry_budget, state.retry_budget)
     )
     cap = state.max_delay if max_backoff is None else max_backoff
+    retry_limit = (
+        state.max_attempts - 1 if state.max_retries is None else state.max_retries
+    )
     for attempt in range(1, local_attempts + 1):
         state.check_send(provider, operation)
         state.attempts += 1
@@ -558,9 +601,16 @@ def _retry_loop(
             return attempt_fn()
         except TransportError as err:
             state.last_error = err
+            # Recorded on every error this loop lets out, so a message can say
+            # whether a retry happened without parsing this module's prose.
+            err.retries_attempted = state.retries
             if not err.retryable or err.output_committed:
                 raise
-            if attempt >= local_attempts or state.attempts >= state.max_attempts:
+            if (
+                attempt >= local_attempts
+                or state.attempts >= state.max_attempts
+                or state.retries >= retry_limit
+            ):
                 raise
             delay = _sleep_for(err, state.attempts, base_backoff, cap)
             if state.spent + delay > budget:
@@ -568,6 +618,7 @@ def _retry_loop(
                     err,
                     f"retry budget of {budget}s exhausted; the provider asked "
                     f"for {delay:.1f}s more",
+                    stop="budget",
                     provider=provider,
                     operation=operation,
                 ) from err
@@ -580,6 +631,7 @@ def _retry_loop(
                     err,
                     f"the next retry wait of {delay:.1f}s does not fit in the "
                     f"{remaining:.1f}s left of the call's total timeout",
+                    stop="deadline",
                     provider=provider,
                     operation=operation,
                 ) from err
@@ -588,6 +640,7 @@ def _retry_loop(
                     "cancelled before retry", provider, operation
                 ) from err
             state.spent += delay
+            state.retries += 1
             state.remaining(provider, operation)
     raise AssertionError("unreachable")  # pragma: no cover
 

@@ -937,6 +937,19 @@ def test_the_retry_policy_is_recorded_and_named_on_the_diagnosis_page():
     model_line = next(line for line in page.splitlines() if "- Model:" in line)
     assert "retr" not in model_line
 
+    # The provider this process cannot resolve is the diagnosis that most
+    # needs the policy; and one retry is singular.
+    unresolved = package_runtime.llm_facts(
+        LLMConfig(provider="not-registered", model="m", api_key="k" * 20, max_retries=1)
+    )
+    assert unresolved["resolution"]["status"] == "unavailable"
+    page = package_diagnosis.render_markdown(
+        package_diagnosis.diagnose({"runtime/environment.json": {"llm": unresolved}})
+    )
+    model_line = next(line for line in page.splitlines() if "- Model:" in line)
+    assert "could not resolve" in model_line
+    assert "up to 1 retry (retry budget 30.0 s, per-wait cap 8.0 s)" in model_line
+
 
 def test_an_unresolvable_model_is_recorded_instead_of_failing():
     def pinned_to_a_deleted_profile():

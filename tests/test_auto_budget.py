@@ -1660,12 +1660,13 @@ def test_a_deeply_nested_request_still_gets_a_bound():
     assert (completion, attempts) == (64, 3)
 
 
-@pytest.mark.parametrize("retries", [0, 2, 6])
-def test_the_token_bound_prices_every_send_the_retry_policy_allows(retries):
+@pytest.mark.parametrize(("retries", "sends"), [(0, 2), (2, 3), (6, 7)])
+def test_the_token_bound_prices_every_send_the_retry_policy_allows(retries, sends):
     """The reservation multiplies by the attempt ceiling. It read the
-    transport's constant 3 while the transport now sends ``max_retries + 1``:
-    raising OPENAI4S_LLM_MAX_RETRIES to 6 would have reserved for 3 of 7
-    possible sends, and setting it to 0 would have reserved for 3 of 1."""
+    transport's constant 3 while the transport now allows ``max_retries + 1``
+    sends (never below two, for the stream-compatibility request): raising
+    OPENAI4S_LLM_MAX_RETRIES to 6 would have reserved for 3 of 7 possible
+    sends."""
     from openai4s.config import LLMConfig
     from openai4s.llm.transport import CallState
     from openai4s.server.auto_budget import token_upper_bound_parts
@@ -1676,7 +1677,7 @@ def test_the_token_bound_prices_every_send_the_retry_policy_allows(retries):
     )
     assert parts is not None
     _prompt, _completion, attempts = parts
-    assert attempts == retries + 1 == CallState.from_config(cfg).max_attempts
+    assert attempts == sends == CallState.from_config(cfg).max_attempts
 
 
 def test_an_adapter_without_a_retry_policy_keeps_the_default_attempt_bound():

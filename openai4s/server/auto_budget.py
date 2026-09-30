@@ -267,10 +267,10 @@ def token_upper_bound(
     Otherwise, for the exact JSON request, UTF-8 bytes upper-bound ordinary
     tokenizer tokens; the per-node allowance covers provider wire wrappers and
     chat control tokens. The per-attempt value is multiplied by the transport's
-    attempt ceiling for this config (``max_retries + 1``). Non-JSON request
-    content fails closed before provider spend. Model-catalog context sizes
-    are deliberately not used: a provider default is not proof about the exact
-    configured endpoint.
+    attempt ceiling for this config (``max_retries + 1``, never below two).
+    Non-JSON request content fails closed before provider spend. Model-catalog
+    context sizes are deliberately not used: a provider default is not proof
+    about the exact configured endpoint.
 
     The arithmetic lives in :func:`token_upper_bound_parts`; this is its sum,
     plus the one case that has no parts -- an adapter publishing an audited

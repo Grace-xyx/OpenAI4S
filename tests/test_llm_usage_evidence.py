@@ -305,6 +305,52 @@ def test_a_rate_limit_names_the_retry_knobs_and_never_claims_a_vetoed_retry(
     assert ("已按重试策略" if language == "zh" else "were attempted") not in friendly
 
 
+@pytest.mark.parametrize("language", ["zh", "en"])
+@pytest.mark.parametrize(
+    ("retries", "stop", "names", "claims_retry"),
+    [
+        (2, None, "OPENAI4S_LLM_MAX_RETRIES", True),
+        (0, None, "OPENAI4S_LLM_MAX_RETRIES", False),
+        (0, "budget", "OPENAI4S_LLM_RETRY_BUDGET", False),
+        (1, "deadline", "OPENAI4S_LLM_TOTAL_TIMEOUT", False),
+    ],
+)
+def test_a_rate_limit_message_matches_what_the_retry_policy_did(
+    language, retries, stop, names, claims_retry
+):
+    """Only a recorded retry may be reported as one, and the advice names the
+    setting that actually stopped the call: a Retry-After longer than the
+    budget is fixed by the budget, a wait past the deadline by the timeout."""
+    from openai4s.llm.models import TransportError
+    from openai4s.server.gateway import SessionRunner
+
+    error = TransportError("private upstream body", status=429, retryable=True)
+    error.retries_attempted = retries
+    error.retry_stop = stop
+    friendly = SessionRunner._friendly_error(error, language=language)
+    assert names in friendly
+    assert "private" not in friendly
+    claim = "已按重试策略自动退避重试" if language == "zh" else "were attempted"
+    assert (claim in friendly) is claims_retry
+
+
+@pytest.mark.parametrize("language", ["zh", "en"])
+@pytest.mark.parametrize("code", ["RequestBurstTooFast", "ServerOverloaded"])
+def test_capacity_messages_do_not_claim_a_retry_that_never_ran(language, code):
+    from openai4s.llm.models import TransportError
+    from openai4s.server.gateway import SessionRunner
+
+    error = TransportError(
+        "private upstream body", status=429, error_code=code, retryable=True
+    )
+    error.retries_attempted = 0
+    friendly = SessionRunner._friendly_error(error, language=language)
+    for claim in ("退避重试", "retried automatically", "retried with backoff"):
+        assert claim not in friendly
+    if code == "RequestBurstTooFast":
+        assert ("突发流量保护" if language == "zh" else "burst-traffic") in friendly
+
+
 @pytest.mark.parametrize("wire", ["review", "scientific"])
 @pytest.mark.parametrize(
     "attested,total",

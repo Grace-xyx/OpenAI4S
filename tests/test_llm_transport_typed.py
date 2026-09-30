@@ -951,8 +951,10 @@ def test_call_state_from_config_reads_the_policy_and_tolerates_duck_types():
     assert (state.max_attempts, state.retry_budget, state.max_delay) == (7, 180, 60)
     assert state.total_timeout_s == 900
 
+    # Retrying is off, but the ceiling keeps room for the one compatibility
+    # request a stream refused outright may make.
     zero = CallState.from_config(LLMConfig(provider="deepseek", max_retries=0))
-    assert zero.max_attempts == 1
+    assert (zero.max_attempts, zero.max_retries) == (2, 0)
 
     # The Agent runtime and tests hand over configs without these fields.
     bare = CallState.from_config(object())
@@ -961,3 +963,138 @@ def test_call_state_from_config_reads_the_policy_and_tolerates_duck_types():
         DEFAULT_RETRY_BUDGET,
         DEFAULT_MAX_BACKOFF,
     )
+
+
+@pytest.mark.parametrize(
+    ("state_kwargs", "headers", "outcome", "sends"),
+    [
+        # Retrying disabled: one send, and the error must say so.
+        ({"max_attempts": 2, "max_retries": 0}, {}, "not_retried", 1),
+        # A relay asking for 45 s against the default 30 s budget.
+        ({}, {"Retry-After": "45"}, "budget", 1),
+        # A wait that cannot fit what is left of the total timeout.
+        (
+            {"retry_budget": 600, "total_timeout_s": 20},
+            {"Retry-After": "30"},
+            "deadline",
+            1,
+        ),
+        # The ceiling ran out after real retries.
+        ({}, {"Retry-After": "1"}, "retried", 3),
+    ],
+)
+def test_the_error_records_how_the_retry_policy_ended_the_call(
+    monkeypatch, state_kwargs, headers, outcome, sends
+):
+    """The gateway told users "retries were attempted" after a single send;
+    it can only stop doing that if the transport records what happened."""
+    from openai4s.llm.models import llm_retry_outcome
+    from openai4s.llm.transport import CallState
+
+    calls = []
+
+    def urlopen(*a, **k):
+        calls.append(1)
+        raise _http_error(429, b"{}", dict(headers))
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport.random.uniform", lambda a, b: b)
+
+    with pytest.raises(TransportError) as raised:
+        post_json(
+            "https://x.invalid",
+            {},
+            {},
+            5,
+            sleep=_Recorder(),
+            call_state=CallState(**state_kwargs),
+        )
+
+    assert len(calls) == sends
+    assert llm_retry_outcome(raised.value) == outcome
+    assert llm_failure_code(raised.value) == "llm_rate_limited"
+    assert raised.value.retries_attempted == sends - 1
+
+
+def test_a_zero_budget_means_do_not_wait(monkeypatch):
+    """0 is a documented value ("fail fast"), not "unset": it must reach the
+    call as 0 rather than fall back to the 30 s default."""
+    from openai4s.config import LLMConfig
+    from openai4s.llm.models import llm_retry_outcome
+    from openai4s.llm.transport import CallState
+
+    calls = []
+
+    def urlopen(*a, **k):
+        calls.append(1)
+        raise _http_error(429, b"{}", {"Retry-After": "1"})
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    sleeper = _Recorder()
+    state = CallState.from_config(LLMConfig(provider="deepseek", retry_budget_s=0))
+    assert state.retry_budget == 0
+
+    with pytest.raises(TransportError) as raised:
+        post_json("https://x.invalid", {}, {}, 5, sleep=sleeper, call_state=state)
+
+    assert len(calls) == 1 and sleeper.slept == []
+    assert llm_retry_outcome(raised.value) == "budget"
+
+
+def test_an_explicit_zero_budget_is_not_replaced_by_the_calls_budget(monkeypatch):
+    """``is None``, never ``or``: an explicit 0.0 must not read as "unset"."""
+    from openai4s.llm.transport import CallState
+
+    calls = []
+
+    def urlopen(*a, **k):
+        calls.append(1)
+        raise _http_error(429, b"{}", {"Retry-After": "1"})
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    sleeper = _Recorder()
+
+    with pytest.raises(TransportError) as raised:
+        post_json(
+            "https://x.invalid",
+            {},
+            {},
+            5,
+            retry_budget=0.0,
+            sleep=sleeper,
+            call_state=CallState(retry_budget=60),
+        )
+
+    assert len(calls) == 1 and sleeper.slept == []
+    assert "retry budget" in str(raised.value)
+
+
+def test_a_5xx_retry_after_zero_is_still_an_immediate_retry(monkeypatch):
+    """Only a rate limit treats ``Retry-After: 0`` as absent."""
+    attempts = []
+
+    def urlopen(*a, **k):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise _http_error(503, b"{}", {"Retry-After": "0"})
+        return _Resp(b"{}")
+
+    def no_jitter(*_args):
+        raise AssertionError("a 5xx Retry-After: 0 must not be replaced by jitter")
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport.random.uniform", no_jitter)
+    sleeper = _Recorder()
+
+    post_json("https://x.invalid", {}, {}, 5, sleep=sleeper)
+
+    assert sleeper.slept == [0.0, 0.0]
+
+
+@pytest.mark.parametrize("value", [True, False, -1, 21, 2.0, "2", None])
+def test_a_malformed_retry_count_keeps_the_default_ceiling(value):
+    """Injected adapters reach the quota bound and the transport through the
+    same conversion; neither may invent a policy from a bool or a string."""
+    from openai4s.llm.transport import DEFAULT_MAX_ATTEMPTS, max_attempts_for_retries
+
+    assert max_attempts_for_retries(value) == DEFAULT_MAX_ATTEMPTS

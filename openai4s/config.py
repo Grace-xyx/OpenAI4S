@@ -204,7 +204,8 @@ class LLMConfig:
     # Transport retry policy for one logical call; see ``llm/transport.py``.
     # Parsed in ``__post_init__`` for the same reason as ``total_timeout_s``.
     # All three stay inside ``total_timeout_s``: the deadline always wins.
-    #: Extra sends after the first for a retryable, uncommitted failure.
+    #: Retries after a failed send that is retryable and committed nothing.
+    #: The send ceiling is this + 1, never below two (see transport).
     max_retries: int = field(
         default_factory=lambda: os.environ.get("OPENAI4S_LLM_MAX_RETRIES", "2")
     )
