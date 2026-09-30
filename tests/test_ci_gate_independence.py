@@ -167,3 +167,35 @@ def test_every_job_has_a_timeout():
     jobs = (_workflow().get("jobs") or {}).items()
     missing = sorted(job_id for job_id, job in jobs if not job.get("timeout-minutes"))
     assert not missing, missing
+
+
+def test_every_browser_driver_install_is_bounded_below_its_job():
+    """`playwright install --with-deps` runs apt-get with no timeout of its own.
+    A stalled mirror held one such step until the 45-minute job limit, so each
+    carries its own bound. A missing bound is that hang again, and a bound at or
+    over the job's never fires: the job is cancelled first, with no verdict on
+    the step that hung."""
+    import re
+
+    checked = []
+    for job_id, job in (_workflow().get("jobs") or {}).items():
+        for step in job.get("steps") or []:
+            if "playwright install --with-deps" not in str(step.get("run") or ""):
+                continue
+            checked.append(job_id)
+            bound = step.get("timeout-minutes")
+            assert (
+                bound is not None
+            ), f"{job_id}: {step.get('name')!r} has no timeout-minutes"
+            # A literal, or a per-engine `${{ ... && N || M }}` expression:
+            # every value it can take must fire before the job's own limit.
+            minutes = [int(value) for value in re.findall(r"\d+", str(bound))]
+            assert minutes, f"{job_id}: unreadable step timeout {bound!r}"
+            for value in minutes:
+                assert 0 < value < job["timeout-minutes"], (
+                    f"{job_id}: step bound {value} does not fire before the "
+                    f"job's {job['timeout-minutes']}-minute limit"
+                )
+    assert (
+        len(checked) >= 3
+    ), f"expected the three browser jobs' installs, found {checked}"

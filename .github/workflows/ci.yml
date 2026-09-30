@@ -529,10 +529,11 @@ jobs:
       - name: Install the server, scientific browser fixtures, and browser driver
         # `playwright install --with-deps` runs apt-get with no timeout of its
         # own. A stalled runner mirror once held this step until the 45-minute
-        # job limit, before any test ran. Over 15 green runs the step peaked at
-        # 42s (chromium), 270s (firefox) and 683s (webkit), so 20 minutes fails
-        # a hung mirror early without cutting off a slow but healthy install.
-        timeout-minutes: 20
+        # job limit, before any test ran. The step's time is apt throughput,
+        # which healthy runs have seen anywhere from 70.9 kB/s to 10.9 MB/s, so
+        # each bound is the engine's apt payload at the slow end: webkit pulls
+        # ~130 MB (~31 minutes at 70.9 kB/s), firefox and chromium under 50 MB.
+        timeout-minutes: ${{ matrix.engine == 'webkit' && 35 || 20 }}
         run: |
           if [ "${{ matrix.engine }}" = "chromium" ]; then
             uv sync --locked --extra science
@@ -656,8 +657,9 @@ jobs:
         run: OPENAI4S_STAGE0_SELF_TEST=1 node tests/browser_stage0_acceptance.mjs
       - name: Install the browser driver
         # Same unbounded apt-get as the browser-smoke install step. Chromium
-        # only: the step peaked at 41s over 15 green runs.
-        timeout-minutes: 10
+        # only, ~35 MB of apt archives: a healthy run fetched them at 70.9 kB/s
+        # and the step took 512s, which a 10-minute bound would nearly have cut.
+        timeout-minutes: 15
         run: |
           npm ci --ignore-scripts
           ./node_modules/.bin/playwright install --with-deps chromium
@@ -739,9 +741,10 @@ jobs:
           npm run build --prefix frontend
           git diff --exit-code -- openai4s/server/webui/dist
       - name: Install the zero-dependency server and browser driver
-        # Same unbounded apt-get as the browser-smoke install step. Chromium
-        # only: the step peaked at 229s over 15 green runs.
-        timeout-minutes: 10
+        # Same unbounded apt-get as the browser-smoke install step, and the same
+        # ~35 MB Chromium payload as `browser-stage0`, so the same bound; the
+        # rest of this job has never taken two minutes of its twenty.
+        timeout-minutes: 15
         run: |
           uv sync --locked
           npm ci --ignore-scripts
