@@ -205,10 +205,11 @@ only as the upstream Authorization value and is never returned by the config
 route, search response, DOM, or diagnostic text. Saving it from Customize →
 Network therefore authorizes both managed products once. An active Ark model
 key is reused only when the selected provider is Ark on a Volcengine endpoint.
-When that model is an Agent Plan (`/api/plan/v3`, the provider default),
-activating it also saves its key as this dedicated credential, so both products
-stay authorized after the user selects another model; a Coding Plan or platform
-key is never saved this way and no longer shadows a dedicated key.
+When that model is an Agent Plan (`https://ark.<region>.volces.com/api/plan/v3`,
+the provider default), activating it also saves its key as this dedicated
+credential, so both products stay authorized after the user selects another
+model; a Coding Plan or platform key is never saved this way and no longer
+shadows a dedicated key.
 
 The dedicated `POST /doubao-search/search` product check has no fallback. It
 does not call Tavily, DuckDuckGo, Bing, Mojeek, or an identifier resolver after
