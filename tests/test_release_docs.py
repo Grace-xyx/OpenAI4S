@@ -227,6 +227,42 @@ def test_the_upgrade_guide_says_what_old_records_and_a_failed_upgrade_look_like(
     assert "包列表未知" in chinese
 
 
+# -- upgrading to the next release (schema 32 → 34) ---------------------------
+
+NEXT_RELEASE_EN = "## Upgrading to the next release (schema 32 → 34)"
+NEXT_RELEASE_ZH = "## 升级到下一版本（schema 32 → 34）"
+
+
+def test_the_next_release_upgrade_section_names_the_migration_the_backup_and_no_downgrade():
+    """The section a 0.3.0 operator reads names the schema this tree actually
+    opens, says the migration's own schema-32 copy is removed after success,
+    says downgrade is unsupported, points single-user sign-in at
+    `openai4s url`, and records that delegation children omit `result` and
+    `output`. Each sentence is scoped to the new section, so a phrase that
+    also lives in the 0.2.x section cannot keep this green."""
+    current = int(
+        re.search(r"^SCHEMA_VERSION = (\d+)$", MIGRATIONS.read_text("utf-8"), re.M)[1]
+    )
+    assert (
+        current >= 34
+    ), "the next-release section names a schema this tree does not reach"
+    english = " ".join(_section(UPGRADING, NEXT_RELEASE_EN).split())
+    chinese = " ".join(_section(UPGRADING_ZH, NEXT_RELEASE_ZH).split())
+    for text in (english, chinese):
+        assert f"schema **{current}**" in text
+    deletes = _migration_deletes_its_backup_on_success()
+    backup_en = "A successful migration deletes `openai4s.db.v32.bak`."
+    backup_zh = "迁移成功后会删除 `openai4s.db.v32.bak`。"
+    assert deletes == (backup_en in english)
+    assert deletes == (backup_zh in chinese)
+    assert "Downgrade to the previous release is not supported." in english
+    assert "不支持降级到上一版本。" in chinese
+    assert "In single-user mode, `openai4s url` prints the sign-in URL." in english
+    assert "单人模式下，`openai4s url` 会打印登录地址。" in chinese
+    assert "The child objects omit the `result` and `output` keys." in english
+    assert "子代理对象不再包含 `result` 和 `output` 这两个键。" in chinese
+
+
 # -- what each platform can actually download ----------------------------------
 
 WORKFLOWS = ROOT / ".github" / "workflows"
