@@ -865,7 +865,7 @@ print the sign-in URL — `http://<host>:<port>/?token=…` in single-user mode,
 `/login` in team mode — and open that single-user URL once to set the cookie.
 Scripts send the token as `Authorization: Bearer <token>` or `X-OpenAI4S-Token`.
 
-The `?token=` form in that startup URL works for one thing only: opening the
+The `?token=` form in that sign-in URL works for one thing only: opening the
 app at `/`. Every other path refuses it — including `/preview/<id>`, which
 answers with artifact bytes and used to be bootstrappable because the rule was
 written as "not `/api/v1/*` and not `/static/*`" rather than as an allowlist. A
