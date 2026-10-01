@@ -53,8 +53,10 @@ EMPTY_ACK: dict[str, str] = {
     "/frames/([^/]+)": "a metadata patch with nothing to change acknowledges "
     "with an empty object",
     "/frames/([^/]+)(?:/.*)?": "the catch-all inherits the same acknowledgement",
-    "/projects/([^/]+)": "a project patch with nothing to change acknowledges "
-    "with an empty object",
+    # No `/projects/([^/]+)` entry. Its `{}` was never an empty patch: it was
+    # the contract probe editing the nonexistent `probe-id`, which is now a 404
+    # (tests/test_project_patch_unknown_id.py). GET of that id still answers the
+    # documented `{}`, but merges with real projects into a shape with fields.
 }
 
 
