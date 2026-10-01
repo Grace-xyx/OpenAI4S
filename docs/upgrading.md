@@ -205,14 +205,16 @@ Stdout kept for one job is a head of at most 256 KiB. While the job prints,
 that head is written at least once a second.
 
 A cleanup pass runs when a session first starts a background job in a daemon
-process: it clears the output of the oldest terminal rows until the table's
-stored output is within 128 MiB, and deletes terminal rows that ended more
-than seven days ago. Between passes the table can run over either limit.
-Unfinished rows are kept.
+process, and again after a terminal receipt is written, at most once every
+ten minutes in that process. Each pass clears the output of the oldest
+terminal rows until the table's stored output is within 128 MiB, and deletes
+terminal rows that ended more than seven days ago. Between passes the table
+can run over either limit. Unfinished rows are kept.
 
-After a daemon restart, a row that had not finished reads as
-`outcome_unknown`. The daemon does not replay it and does not reattach a
-worker that is still running.
+A row that had not finished reads as `outcome_unknown` when another daemon
+recorded it, which is the case after a restart, and also when this process
+no longer holds the job. The daemon does not replay it and does not reattach
+a worker that is still running.
 
 A CLI job and a sub-agent job are not stored. Their result has
 `persistent: false`. Web `exec_*` results include `persistent`. A result
@@ -221,8 +223,10 @@ read from the receipt also has `source: "receipt"`, `output_truncated`,
 includes `receipt_degraded: true`. That key is present only in that case.
 
 When `exec_interrupt` has no live process handle, `interrupt_undelivered`
-and `reason` are both set to `no live process handle for this exec in this
-daemon; delivery cannot be confirmed`. When a live worker did not receive
+and `reason` are set to the same sentence: `the daemon has restarted;
+delivery cannot be confirmed` for a row another daemon recorded, or `this
+process no longer has a handle for this job; delivery cannot be confirmed`
+for a row this daemon recorded. When a live worker did not receive
 the stop, `interrupt_undelivered` is that delivery's reason, or
 `the stop request did not reach the worker`.
 
@@ -242,6 +246,12 @@ the result has none.
 `POST /frames/{fid}/delegations/{child}/continue` return that same
 projection. Continue returns the stored child, not this run's result
 envelope.
+
+Delegate step cards keep their keys, on the `step_update` WebSocket event
+and on `GET /frames/{fid}/steps`. Their `raw` string now drops host paths
+before it is truncated: absolute paths inside `environment` (the
+interpreter, `env_root`), every `durable_path`, and an absolute `path` or
+`filename`. The child's output text, completion bullets, and conclusion stay.
 
 `docs/response-schemas.json` was captured again from real responses.
 
@@ -267,7 +277,9 @@ only this session's files." This session's files stay in the list.
 
 The delegation evidence panel is a record-consistency check made when the
 sub-agent finishes. It compares the version record, the checksum, the
-snapshot file's presence and size, and the producing Cell. It does not
+snapshot file's presence and size, and the producing Cell. The host stamps
+the producing Cell from the Cell it is running when the version is written,
+instead of taking the id the worker sends. It does not
 authorize the child, and a later read shows the stored record (`checked_at`)
 instead of running the check again while the panel is open. At most 12 items
 are kept. When there are more, the panel says it is showing the first 12.

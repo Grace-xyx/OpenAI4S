@@ -100,13 +100,13 @@ Web 会话的后台 Cell 在 worker 启动之前把一行写进 `background_exec
 
 每个 job 的 stdout 头部最多 256 KiB。任务持续输出时，这段头部至少每秒落盘一次。
 
-清理在某个会话于 daemon 进程里第一次启动后台 job 时跑一次：它清掉最老的终态行的输出，直到表里存下的输出不超过 128 MiB，并删除结束时间早于七天的终态行。两次清理之间，表可以暂时超过这两个上限。未结束的行会保留。
+清理在某个会话于 daemon 进程里第一次启动后台 job 时跑一次；之后每写成一条终态收据还会再跑一次，同一进程里最多每十分钟一次。每次清理都清掉最老的终态行的输出，直到表里存下的输出不超过 128 MiB，并删除结束时间早于七天的终态行。两次清理之间，表可以暂时超过这两个上限。未结束的行会保留。
 
-daemon 重启之后，尚未终态的行读作 `outcome_unknown`。daemon 不会重放它，也不会接回仍在运行的 worker。
+尚未终态的行在两种情况下读作 `outcome_unknown`：这一行是另一个 daemon 记下的（重启之后就是这样），或者本进程已经不再持有这个 job。daemon 不会重放它，也不会接回仍在运行的 worker。
 
 CLI 和子代理的后台 job 不入库，结果里是 `persistent: false`。Web 的 `exec_*` 结果带有 `persistent`。只从收据读出的结果还有 `source: "receipt"`、`output_truncated`、`code_sha256` 和 `created_at`。收据写入失败时，`exec_peek` 带 `receipt_degraded: true`。这个键只在那种情况下出现。
 
-没有存活进程句柄时，`exec_interrupt` 把 `interrupt_undelivered` 和 `reason` 都设为 `no live process handle for this exec in this daemon; delivery cannot be confirmed`。活着的 worker 没有收到停止请求时，`interrupt_undelivered` 是这次投递的 reason，或者是 `the stop request did not reach the worker`。
+没有存活进程句柄时，`exec_interrupt` 把 `interrupt_undelivered` 和 `reason` 设为同一句话：另一个 daemon 记下的行是 `the daemon has restarted; delivery cannot be confirmed`，本 daemon 记下的行是 `this process no longer has a handle for this job; delivery cannot be confirmed`。活着的 worker 没有收到停止请求时，`interrupt_undelivered` 是这次投递的 reason，或者是 `the stop request did not reach the worker`。
 
 这张表在 `QUERY_DENYLIST` 上。删除会话时会一并删掉这些行。数据目录的模式是 `0700`，数据库文件的模式是 `0600`。
 
@@ -116,6 +116,8 @@ CLI 和子代理的后台 job 不入库，结果里是 `persistent: false`。Web
 
 `POST /frames/{fid}/delegations/{child}/stop` 和 `POST /frames/{fid}/delegations/{child}/continue` 返回同一个投影。continue 返回的是存储里的子代理，而不是这次运行的结果信封。
 
+子代理的步骤卡（WebSocket 事件 `step_update` 和 `GET /frames/{fid}/steps`）键不变。其中的 `raw` 字符串现在先去掉主机路径再截断：`environment` 里的绝对路径（解释器、`env_root`）、所有 `durable_path`，以及绝对的 `path` 或 `filename`。子代理的输出正文、完成要点和结论保留。
+
 `docs/response-schemas.json` 已按真实响应重新采集。
 
 ### 工作台
@@ -124,7 +126,7 @@ CLI 和子代理的后台 job 不入库，结果里是 `persistent: false`。Web
 
 `@` 补全按文件名向项目的 artifact-index 要一页（20 行），再并上本会话的文件。`priority` 低于 0 的隐藏产物不会出现。弹出列表最多 8 条。搜索在途时，Enter、Tab 和发送按钮都会等这一页，再补全按下时所在的那个 token。请求超过 8 秒时显示「项目文件搜索失败，仅显示本会话文件」。本会话自己的文件仍在列表里。
 
-子代理证据面板是子代理结束时做的记录一致性核对。它对照版本记录、校验和、快照文件是否存在及其大小，以及产出它的 Cell。它不授权这个子代理，之后再打开面板看到的是当时存下的记录（`checked_at`），不会在面板开着的时候重算。条目最多 12 条。超出时，面板会标明只显示前 12 条。
+子代理证据面板是子代理结束时做的记录一致性核对。它对照版本记录、校验和、快照文件是否存在及其大小，以及产出它的 Cell。产出它的 Cell 由宿主在写入版本时按正在执行的 Cell 盖章，不采信 worker 发来的 id。它不授权这个子代理，之后再打开面板看到的是当时存下的记录（`checked_at`），不会在面板开着的时候重算。条目最多 12 条。超出时，面板会标明只显示前 12 条。
 
 ### Auto Mode
 
