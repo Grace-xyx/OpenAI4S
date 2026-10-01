@@ -530,9 +530,6 @@ def test_the_delegations_route_omits_bodies_and_host_paths(client):
     assert persisted is not None
     assert persisted["result"]["output"]["body"] == "SHOULD-NOT-LEAK-BODY"
     assert persisted["steering"]["messages"][0]["text_preview"] == "steer secret text"
-    full = client.store.delegation_child_record(client.frame_id, child_id)
-    assert full is not None
-    assert full["output"]["body"] == "SHOULD-NOT-LEAK-BODY"
 
     status, body = client.get(f"/frames/{client.frame_id}/delegations")
     rendered = json.dumps(body)
@@ -548,6 +545,22 @@ def test_the_delegations_route_omits_bodies_and_host_paths(client):
     assert child["artifact_refs"][0]["version_id"] == "v-kept"
     assert child["artifact_refs"][0]["filename"] == "plot.png"
     assert "path" not in child["artifact_refs"][0]
+
+    # include_text stays on the in-process reads. restore is the runner's
+    # lease read; delegation_child_record is the single-child read.
+    restored = client.store.restore_delegation_tree(
+        root_frame_id=client.frame_id,
+        owner_instance_id="owner-1",
+        runner_instance_id="runner-1",
+        budget_limit=48,
+    )
+    restored_child = next(
+        item for item in restored["children"] if item["child_id"] == child_id
+    )
+    assert restored_child["output"]["body"] == "SHOULD-NOT-LEAK-BODY"
+    record = client.store.delegation_child_record(client.frame_id, child_id)
+    assert record is not None
+    assert record["result"]["output"]["body"] == "SHOULD-NOT-LEAK-BODY"
 
 
 @pytest.mark.stubbed_backend
