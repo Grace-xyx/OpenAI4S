@@ -243,15 +243,17 @@ that fails before the worker is published raises
 environment probe is caught, shut down, and returned to the Cell service as
 the string `R kernel unavailable: R kernel bootstrap failed:
 egress_boundary_unavailable: …`, before the ordinary posture precheck runs.
-Both exact prefixes are recognized only while allowlist is on, and both
-project `egress_boundary_refused` with the same fields a typed
-`EgressBoundaryUnavailable` carries: code, reason, egress mode, sandbox, and
-remedy. Agent and Notebook Cells share that projection. When the session
-still has the kernel, the decision's `sandbox` fields are that kernel's
-measured posture. A new Python worker that failed before publication, and an
-R worker already shut down by the failed bootstrap, have no posture left to
-read, so those sandbox fields are null. The code, reason, and remedy stay
-the stable ones.
+Both exact prefixes are recognized only while allowlist is on, and both end
+the Cell as `egress_boundary_refused` with the stable code, reason, and
+remedy. The worker they name was never published (Python) or was already
+shut down by its failed bootstrap (R), so the decision's `sandbox` fields
+are null. They are not borrowed from whatever worker the session's slot
+still holds, which may be an earlier worker that passed. A refusal raised
+by the execute gate itself carries the posture of the worker that refused.
+An Agent Cell returns the decision as `egress_boundary` on its result. The
+Notebook REPL route returns only the Cell's `error`, which starts with
+`egress_boundary_unavailable:`. A user Stop or a timeout that happens to
+wrap a refusal stays a cancellation or a timeout.
 
 In an unprivileged container, bubblewrap cannot create its namespaces, so
 `auto` degrades and the self-test does not report a raw-network block.
@@ -262,9 +264,14 @@ establish the boundary. See [docker.md](docker.md) for the namespace limits.
 
 These limits are known and left for a later version:
 
-- Lifecycle entry points `start_kernel`, `restart_kernel`, `set_env`, and
-  `_apply_pending_env` answer a boundary refusal with a generic HTTP 500.
-  They do not project `egress_boundary_refused`.
+- Lifecycle entry points do not project `egress_boundary_refused`.
+  `start_kernel` and `set_env` answer a boundary refusal with a generic
+  HTTP 500. `restart_kernel` on a live worker reports success, and the next
+  Cell is refused. A pending environment change applied at the start of an
+  Agent turn fails that turn.
+- Recovery replay, the Jupyter bridge, and benchmark steps let the typed
+  `EgressBoundaryUnavailable` propagate as an ordinary error rather than
+  projecting it.
 - A cluster allocation is released the first time a Cell is refused for this
   boundary.
 - A delegated sub-agent inside the Web daemon may write the refusal line to

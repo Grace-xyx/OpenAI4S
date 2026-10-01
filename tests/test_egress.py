@@ -699,3 +699,62 @@ def test_allowlist_still_permits_a_catalog_domain(monkeypatch):
     _allowlist(monkeypatch)
     assert egress.check_url("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/") is None
     assert egress.domain_allowed("eutils.ncbi.nlm.nih.gov") is True
+
+
+def test_interrupts_and_suppressed_context_are_not_boundary_refusals(monkeypatch):
+    """A refusal that is only context does not turn an exit into a refusal.
+
+    An interrupt or exit is that interrupt even with a refusal on its
+    context; a context ``raise ... from None`` suppressed is not followed;
+    and a posture that passes admission is never projected onto a prefix
+    refusal, because it cannot be the refused worker's.
+    """
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    typed = EgressBoundaryUnavailable(
+        {
+            "code": "egress_boundary_unavailable",
+            "reason": "measured",
+            "egress_mode": "allowlist",
+            "sandbox": {"network_policy": "not_enforced"},
+            "remedy": [],
+        }
+    )
+    for interrupt in (KeyboardInterrupt, SystemExit):
+        try:
+            raise typed
+        except EgressBoundaryUnavailable:
+            try:
+                raise interrupt()
+            except BaseException as exc:  # noqa: BLE001 - the case under test
+                stopped = exc
+        assert stopped.__context__ is typed
+        assert egress.is_boundary_refusal(stopped) is False
+        assert egress.boundary_refusal_decision(stopped) is None
+
+    try:
+        raise typed
+    except EgressBoundaryUnavailable:
+        try:
+            raise RuntimeError("unrelated cleanup") from None
+        except RuntimeError as exc:
+            suppressed = exc
+    assert suppressed.__suppress_context__ is True
+    assert egress.is_boundary_refusal(suppressed) is False
+
+    bootstrap = RuntimeError(
+        "kernel bootstrap failed: egress_boundary_unavailable: wrapped"
+    )
+    passing = {
+        "mode": "enforce",
+        "state": "enabled",
+        "backend": "seatbelt",
+        "enforced": True,
+        "self_test_passed": True,
+        "network_policy": "blocked",
+    }
+    decision = egress.boundary_refusal_decision(bootstrap, passing)
+    assert decision["code"] == "egress_boundary_unavailable"
+    assert set(decision["sandbox"].values()) == {None}

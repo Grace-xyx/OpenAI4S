@@ -480,7 +480,11 @@ _R_BOOTSTRAP_REFUSAL_PREFIX = (
 
 
 def _exception_chain(exc: BaseException):
-    """Yield ``exc`` and each ``__cause__`` / ``__context__``, cause first."""
+    """Yield ``exc`` and each ``__cause__`` / ``__context__``, cause first.
+
+    A context that ``raise ... from`` suppressed is not followed, the same
+    rule the interpreter uses when it prints the chain.
+    """
 
     seen: set[int] = set()
     stack: list[BaseException] = [exc]
@@ -491,7 +495,7 @@ def _exception_chain(exc: BaseException):
             continue
         seen.add(marker)
         yield current
-        context = current.__context__
+        context = None if current.__suppress_context__ else current.__context__
         cause = current.__cause__
         if isinstance(context, BaseException):
             stack.append(context)
@@ -530,10 +534,14 @@ def is_boundary_refusal(exc: BaseException) -> bool:
     context chain, because the watchdog re-raises that object and a relay
     may wrap it. The two bootstrap prefixes count only as the start of the
     outermost message, and only while ``egress_mode()`` is ``allowlist``.
-    A substring of the code token does not count.
+    A substring of the code token does not count. An interrupt or exit
+    (a ``BaseException`` that is not an ``Exception``) is that interrupt,
+    even when a refusal sits on its context.
     """
 
     if not isinstance(exc, BaseException):
+        return False
+    if not isinstance(exc, Exception) and not _is_typed_boundary(exc):
         return False
     if any(_is_typed_boundary(item) for item in _exception_chain(exc)):
         return True
@@ -557,9 +565,10 @@ def boundary_refusal_decision(
     """Stable decision for a recognized refusal, otherwise None.
 
     A typed refusal keeps the decision it was raised with. A prefix refusal
-    is rebuilt from ``sandbox_status`` when the caller still has that
-    kernel. ``None`` projects null sandbox fields: the worker was not
-    published, or the failed bootstrap already shut it down.
+    names a bootstrap candidate that was never published, so a caller passes
+    ``sandbox_status`` only when it holds that exact candidate; ``None``
+    projects null sandbox fields. A posture that would pass admission cannot
+    be the refused worker's, so it is not projected onto the refusal.
     """
 
     if not is_boundary_refusal(exc):
@@ -570,4 +579,4 @@ def boundary_refusal_decision(
     fresh = cell_admission_refusal(sandbox_status)
     if fresh is not None:
         return fresh
-    return _boundary_decision(sandbox_status)
+    return _boundary_decision(None)

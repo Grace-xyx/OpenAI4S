@@ -1530,6 +1530,51 @@ def test_run_keeps_a_boundary_refusal_behind_two_context_wrappers(
     assert session.kernels.current("r") is not None
 
 
+def test_a_cancellation_that_wraps_a_refusal_stays_a_cancellation(
+    monkeypatch, tmp_path
+):
+    """Stop wins over a refusal the watchdog's cancellation happens to wrap.
+
+    ``watchdog`` raises ``KernelCancellation(...) from box["error"]``. When
+    that error is a typed boundary refusal, the Cell is still cancelled: it
+    is re-raised, the attempt finishes as cancelled, and the R lease the
+    watchdog already interrupted is closed.
+    """
+
+    from openai4s.egress import EgressBoundaryUnavailable
+    from openai4s.execution.watchdog import KernelCancellation
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    typed = EgressBoundaryUnavailable(
+        {
+            "code": "egress_boundary_unavailable",
+            "reason": "mode flipped during execute",
+            "egress_mode": "allowlist",
+            "sandbox": dict(_PROVEN_SANDBOX),
+            "remedy": ["Set OPENAI4S_EGRESS=off"],
+        }
+    )
+    try:
+        raise KernelCancellation("cancelled by the user") from typed
+    except KernelCancellation as exc:
+        cancelled = exc
+
+    harness = Harness()
+    harness.fail_run = cancelled
+    finished: list[tuple] = []
+    kernel = _LeaseKernel(_PROVEN_SANDBOX)
+    session = _session(tmp_path)
+    session.kernels.ensure("r", None, lambda: kernel)
+    with pytest.raises(KernelCancellation):
+        _service_with_attempt(harness, finished, "attempt-stop").execute(
+            session,
+            CellRequest("Sys.sleep(60)", "agent", language="r", stream=False),
+            lambda event: None,
+        )
+    assert finished == [("attempt-stop", "cancelled")]
+    assert kernel.shutdown_calls == 1
+
+
 def test_bootstrap_prefix_is_a_prepare_failure_when_egress_is_off(
     monkeypatch, tmp_path
 ):
@@ -1562,10 +1607,22 @@ def test_bootstrap_prefix_is_a_prepare_failure_when_egress_is_off(
     assert finished == [("attempt-off", "prepare_failed")]
 
 
-def test_bootstrap_refusal_projects_the_kernel_posture(monkeypatch, tmp_path):
+@pytest.mark.parametrize("slot_posture", ["unproven", "proven"])
+def test_bootstrap_refusal_does_not_borrow_the_session_posture(
+    monkeypatch, tmp_path, slot_posture
+):
+    """The refused bootstrap candidate was never published.
+
+    The session's slot still holds the previous worker -- possibly one that
+    passed its self-test. That posture belongs to another kernel, so it is
+    not projected onto this refusal: the sandbox fields are null and the
+    code, reason, and remedy are the stable ones.
+    """
+
     monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
     harness = Harness()
     finished: list[tuple] = []
+    posture = _UNPROVEN_SANDBOX if slot_posture == "unproven" else _PROVEN_SANDBOX
 
     def prepare(_session, _language):
         raise RuntimeError(
@@ -1585,18 +1642,18 @@ def test_bootstrap_refusal_projects_the_kernel_posture(monkeypatch, tmp_path):
     )
     session = _session(tmp_path)
     session.kernels = SimpleNamespace(
-        kernel=lambda language: SimpleNamespace(sandbox_status=dict(_UNPROVEN_SANDBOX))
+        kernel=lambda language: SimpleNamespace(sandbox_status=dict(posture))
     )
     result = service.execute(
         session,
         CellRequest("print(1)", "agent", stream=False),
         lambda event: None,
     )
-    sandbox = result.result["egress_boundary"]["sandbox"]
-    assert sandbox["network_policy"] == "not_enforced"
-    assert sandbox["state"] == "degraded"
-    assert sandbox["mode"] == "auto"
-    assert "should-not-leak" not in str(result.result["egress_boundary"])
+    decision = result.result["egress_boundary"]
+    assert decision["code"] == "egress_boundary_unavailable"
+    assert decision["sandbox"]
+    assert set(decision["sandbox"].values()) == {None}
+    assert "should-not-leak" not in str(decision)
     assert finished == [("attempt-posture", "egress_boundary_refused")]
 
 
@@ -1620,9 +1677,9 @@ def test_r_bootstrap_string_is_an_egress_refusal(monkeypatch, tmp_path, origin):
     )
     assert result.executed is False
     assert result.result["error"].startswith("egress_boundary_unavailable:")
-    assert result.result["egress_boundary"]["sandbox"]["network_policy"] == (
-        "not_enforced"
-    )
+    # The refused R worker was shut down by its own bootstrap; whatever the
+    # slot still answers is not that worker's posture.
+    assert set(result.result["egress_boundary"]["sandbox"].values()) == {None}
     assert finished == [("attempt-r", "egress_boundary_refused")]
     assert "run" not in harness.order
 

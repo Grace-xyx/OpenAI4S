@@ -1604,15 +1604,17 @@ class LocalActionExecutor:
         return self._user_observation(observation)
 
     def _egress_boundary_outcome(self, exc: BaseException) -> ExecutionOutcome:
-        from openai4s.egress import EGRESS_BOUNDARY_UNAVAILABLE
+        from openai4s.egress import (
+            EGRESS_BOUNDARY_UNAVAILABLE,
+            boundary_refusal_decision,
+        )
 
         message = str(exc)
         prefix = f"{EGRESS_BOUNDARY_UNAVAILABLE}:"
         if not message.startswith(prefix):
-            decision = getattr(exc, "decision", None)
-            reason = ""
-            if isinstance(decision, dict):
-                reason = str(decision.get("reason") or "")
+            # The refusal can sit below a wrapper; its decision travels with it.
+            decision = boundary_refusal_decision(exc) or {}
+            reason = str(decision.get("reason") or "")
             message = f"{EGRESS_BOUNDARY_UNAVAILABLE}: {reason}"
         print(f"error: {message}", file=sys.stderr)
         return ExecutionOutcome(

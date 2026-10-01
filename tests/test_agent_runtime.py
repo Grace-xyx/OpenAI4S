@@ -1310,3 +1310,26 @@ def test_cli_run_r_cell_attempt_names_the_durable_r_generation(monkeypatch, tmp_
     ), "the R cell's execution attempt names no kernel generation"
     assert attempts[1]["generation_id"] == py_generation["generation_id"]
     assert r_generation["generation_id"] != py_generation["generation_id"]
+
+
+def test_egress_outcome_reads_the_decision_below_a_wrapper():
+    """A relay wrapping a typed refusal still reports that refusal's reason."""
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    typed = EgressBoundaryUnavailable(
+        {
+            "code": "egress_boundary_unavailable",
+            "reason": "sandbox not proven",
+            "egress_mode": "allowlist",
+            "sandbox": {},
+            "remedy": [],
+        }
+    )
+    try:
+        raise RuntimeError("relay") from typed
+    except RuntimeError as exc:
+        wrapped = exc
+    outcome = _executor()._egress_boundary_outcome(wrapped)
+    assert outcome.observation == "egress_boundary_unavailable: sandbox not proven"
+    assert outcome.stop_reason == "egress_boundary_unavailable"
