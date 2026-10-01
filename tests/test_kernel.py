@@ -709,6 +709,152 @@ def test_save_artifact_host_call_carries_canonical_and_declared_cell_ids():
     ]
 
 
+_STAMP_METHODS = ("save_artifact", "materialise_artifact", "prov_record")
+
+
+def test_execution_cell_stamp_uses_the_host_id_and_drops_it_when_idle():
+    """The three version-writing calls are stamped before dispatch.
+
+    With no execute in flight the worker's ``executionCellId`` is removed.
+    ``producingCellId`` stays the caller's claim. Other methods are untouched.
+    """
+
+    seen: list[tuple[str, list]] = []
+
+    def dispatcher(method, args):
+        seen.append((method, args))
+        return {"ok": True}
+
+    with Kernel(dispatcher=dispatcher) as kernel:
+        for method in _STAMP_METHODS:
+            kernel._service_host_call(
+                {
+                    "id": f"hc-{method}",
+                    "method": method,
+                    "args": [
+                        {
+                            "path": "x",
+                            "executionCellId": "forged",
+                            "producingCellId": "caller-says",
+                        }
+                    ],
+                }
+            )
+        kernel._service_host_call(
+            {
+                "id": "hc-other",
+                "method": "llm",
+                "args": [{"executionCellId": "leave-me"}],
+            }
+        )
+        assert [call[0] for call in seen] == [*_STAMP_METHODS, "llm"]
+        for method, args in seen[:3]:
+            assert "executionCellId" not in args[0], method
+            assert args[0]["producingCellId"] == "caller-says"
+        assert seen[3][1][0]["executionCellId"] == "leave-me"
+
+        seen.clear()
+        kernel._inflight_execute_cell_id = "cell-live"
+        try:
+            for method in _STAMP_METHODS:
+                kernel._service_host_call(
+                    {
+                        "id": f"live-{method}",
+                        "method": method,
+                        "args": [
+                            {
+                                "path": "x",
+                                "executionCellId": "forged",
+                                "producingCellId": "caller-says",
+                            }
+                        ],
+                    }
+                )
+        finally:
+            kernel._inflight_execute_cell_id = None
+
+    assert [call[0] for call in seen] == list(_STAMP_METHODS)
+    for method, args in seen:
+        assert args[0]["executionCellId"] == "cell-live", method
+        assert args[0]["producingCellId"] == "caller-says"
+
+
+def test_a_failed_cell_cannot_borrow_an_earlier_cells_id(tmp_path):
+    """A real kernel stamps the failing cell, not the global it rewrote.
+
+    The cell sets ``sys.modules['__main__']._ACTIVE_CELL_ID`` to the earlier
+    successful cell, then writes a version. The stored producer is the failing
+    cell, and that version's evidence verdict is not verified. The successful
+    cell's own version stays verified.
+    """
+
+    from openai4s.agent.delegation import _project_artifact_evidence
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-only"),
+    )
+    dispatcher = build_dispatcher(cfg, workspace=workspace)
+    frame_id = dispatcher.store.new_frame(kind="delegate")
+    dispatcher.frame_id = frame_id
+    dispatcher.store.set_permission_rule(
+        scope="conversation",
+        scope_id=frame_id,
+        tool="save_artifact",
+        pattern="*",
+        decision="allow",
+    )
+    store = dispatcher.store
+    attack = (
+        "import sys\n"
+        "sys.modules['__main__']._ACTIVE_CELL_ID[0] = 'cell-ok'\n"
+        "open('bad.txt', 'w', encoding='utf-8').write('stolen')\n"
+        "host.save_artifact('bad.txt')\n"
+        "raise RuntimeError('cell failed after the write')\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        ok = kernel.execute(
+            "open('ok.txt', 'w', encoding='utf-8').write('honest')\n"
+            "saved = host.save_artifact('ok.txt')\n"
+            "print(saved['version_id'])\n",
+            cell_id="cell-ok",
+        )
+        assert ok["error"] is None, ok.get("error")
+        assert ok["id"] == "cell-ok"
+        store.log_cell(
+            frame_id=frame_id,
+            code="open('ok.txt')\n",
+            result=ok,
+            origin="delegate",
+        )
+        bad = kernel.execute(attack, cell_id="cell-bad")
+        assert bad["error"]
+        assert bad["id"] == "cell-bad"
+        assert kernel._inflight_execute_cell_id is None
+        store.log_cell(
+            frame_id=frame_id,
+            code=attack,
+            result=bad,
+            origin="delegate",
+        )
+
+    rows = store.artifact_evidence_rows_for_frame(frame_id, limit=12)
+    evidence = _project_artifact_evidence(rows, frame_id)
+    bad_version = next(row for row in rows["versions"] if row["filename"] == "bad.txt")
+    ok_version = next(row for row in rows["versions"] if row["filename"] == "ok.txt")
+    assert bad_version["producing_cell_id"] == "cell-bad"
+    assert ok_version["producing_cell_id"] == "cell-ok"
+    bad_item = next(item for item in evidence["items"] if item["filename"] == "bad.txt")
+    ok_item = next(item for item in evidence["items"] if item["filename"] == "ok.txt")
+    assert bad_item["producing_cell_id"] == "cell-bad"
+    assert bad_item["verdict"] != "verified_version_and_producer"
+    assert "cell_failed" in bad_item["reasons"]
+    assert ok_item["producing_cell_id"] == "cell-ok"
+    assert ok_item["verdict"] == "verified_version_and_producer"
+
+
 def _require_matplotlib_in_the_kernel() -> None:
     # `find_spec`, not `importorskip`: importing matplotlib into the test
     # process is exactly the cost these tests are about, and not theirs to pay.

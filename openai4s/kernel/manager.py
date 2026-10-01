@@ -563,6 +563,9 @@ class Kernel:
                     if decision is not None:
                         raise EgressBoundaryUnavailable(decision)
                 cell_id = str(cell_id or uuid.uuid4())
+                # Host copy of the id on the execute frame. Artifact host
+                # calls are stamped from it; the worker global is not.
+                self._inflight_execute_cell_id = cell_id
                 request: dict[str, Any] = {
                     "type": "execute",
                     "id": cell_id,
@@ -690,6 +693,9 @@ class Kernel:
                         if isinstance(message, str) and message:
                             self.worker_log_tail.append(message[:2000])
             finally:
+                # No execute is in flight on the way out, including a refusal
+                # that never chose an id. A later host call must not reuse it.
+                self._inflight_execute_cell_id = None
                 if capture is not None:
                     # Unconditional: an interrupt, a dead worker or a raising
                     # host call all leave a fifo and two reader threads behind,
@@ -940,6 +946,33 @@ class Kernel:
         if transport is not None:
             transport.kill()
 
+    _EXECUTION_CELL_STAMP_METHODS = frozenset(
+        {"save_artifact", "materialise_artifact", "prov_record"}
+    )
+
+    def _stamp_inflight_execution_cell(self, method: str, args: Any) -> None:
+        """Overwrite ``executionCellId`` with this execute's own id.
+
+        The worker copies a process-global cell id into the three calls that
+        write a version. Cell code can replace that global with an earlier
+        successful cell's id, and the evidence panel then treats the write as
+        checked. The id on the execute frame, recorded for this read loop, is
+        the one that counts. With no execute in flight the worker's value is
+        dropped. ``producingCellId`` is the caller's claim and is left alone;
+        the host prefers the execution id.
+        """
+
+        if method not in self._EXECUTION_CELL_STAMP_METHODS:
+            return
+        if not isinstance(args, list) or not args or not isinstance(args[0], dict):
+            return
+        spec = args[0]
+        cell_id = getattr(self, "_inflight_execute_cell_id", None)
+        if isinstance(cell_id, str) and cell_id:
+            spec["executionCellId"] = cell_id
+        else:
+            spec.pop("executionCellId", None)
+
     def _service_host_call(self, frame: dict) -> None:
         call_id = frame.get("id")
         method = frame.get("method", "")
@@ -953,6 +986,7 @@ class Kernel:
                 }
             )
             return
+        self._stamp_inflight_execution_cell(method, args)
         try:
             bind_generation = getattr(self.dispatcher, "bind_bash_generation", None)
             bind_action = getattr(self.dispatcher, "bind_action_context", None)
