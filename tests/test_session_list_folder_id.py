@@ -103,22 +103,30 @@ def test_the_session_list_places_a_moved_session_in_its_folder(tmp_path):
         return {row["id"]: row for row in page["frames"]}
 
     try:
-        project_id = call("POST", "/projects", {"name": "Folder grouping"})[
-            "project_id"
-        ]
-        filed = call("POST", "/frames", {"project_id": project_id})["id"]
-        loose = call("POST", "/frames", {"project_id": project_id})["id"]
-        # A session with no name, message or cell is hidden from the list as
-        # abandoned; naming both keeps them visible without running a turn.
-        call("PATCH", f"/frames/{filed}", {"name": "Filed session"})
-        call("PATCH", f"/frames/{loose}", {"name": "Loose session"})
-        folder_id = call("POST", f"/projects/{project_id}/folders", {"name": "Assays"})[
-            "folder_id"
-        ]
+        project = call("POST", "/projects", {"name": "Folder grouping"})
+        project_id = project["project_id"]
+        sessions = {}
+        for label in ("Filed", "Loose"):
+            created = call(
+                "POST", "/frames", {"project_id": project_id, "model": "deepseek-chat"}
+            )
+            frame_id = created["id"]
+            # A session with no name, message or cell is hidden from the list
+            # as abandoned; naming it keeps it visible without running a turn.
+            call(
+                "PATCH",
+                f"/frames/{frame_id}",
+                {"name": f"{label} session", "task_summary": f"{label} summary"},
+            )
+            # What a finished turn would have metered.
+            runner.store.add_frame_tokens(frame_id, input_tokens=12, output_tokens=3)
+            sessions[label] = frame_id
+        filed, loose = sessions["Filed"], sessions["Loose"]
+        folder = call("POST", f"/projects/{project_id}/folders", {"name": "Assays"})
+        folder_id = folder["folder_id"]
 
-        assert call("POST", f"/frames/{filed}/folder", {"folder_id": folder_id}) == {
-            "ok": True
-        }
+        moved = call("POST", f"/frames/{filed}/folder", {"folder_id": folder_id})
+        assert moved == {"ok": True}
 
         rows = listed(project_id)
         assert rows[filed]["folder_id"] == folder_id
@@ -127,9 +135,15 @@ def test_the_session_list_places_a_moved_session_in_its_folder(tmp_path):
         # The general form of the defect: one serializer, two queries. Every
         # field the detail route reports for a session, its list row must
         # report identically -- a column the list query leaves out is
-        # otherwise a silent null, not an error.
-        for frame_id in (filed, loose):
+        # otherwise a silent null, not an error. The comparison only proves
+        # anything for a field that is set, so first insist that every field
+        # a root session can carry is.
+        for frame_id, unset in (
+            (filed, {"parent_frame_id"}),
+            (loose, {"parent_frame_id", "folder_id"}),
+        ):
             detail = call("GET", f"/frames/{frame_id}")
+            assert {key for key, value in detail.items() if value is None} == unset
             assert {key: rows[frame_id].get(key) for key in detail} == detail
 
         # Moving it back out is the same field, cleared.
