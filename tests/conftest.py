@@ -405,6 +405,8 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
     yield
     _reset_confinement_self_test()
     _reset_preinstall_status()
+    # Before reset_singletons and before monkeypatch undoes the redirect.
+    _quiesce_judgment_shadows()
     reset_singletons()
     # Not drained at setup: higher-scoped fixtures this test instantiated ran
     # before this fixture did, and their refusals belong to this test.
@@ -415,6 +417,35 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
             "previous test finished:\n\n" + "\n".join(touched),
             pytrace=False,
         )
+
+
+def _quiesce_judgment_shadows() -> None:
+    """Let shadow workers finish while this test's data dir is still in effect.
+
+    Both judgment shadows run on process-wide daemon workers that resolve the
+    process-global config when a job *starts* (`_live_config()` /
+    `get_config()`). A job a test left queued -- or one a busy runner
+    descheduled between dequeue and start -- could start after monkeypatch
+    restored the environment and resolve the real ~/.openai4s: the guard
+    caught exactly that on CI, from `judgment/shadow.py`'s worker. Under the
+    suite-wide floor such a job would land in scratch space instead, unseen,
+    but it would still run under the next test's data dir; waiting the workers
+    out here keeps every job inside the test that submitted it. No reset:
+    `task_mode_shadow.reset_for_tests` zeroes its in-flight count, which would
+    turn the wait into a no-op; the shadow test modules reset themselves.
+    """
+
+    for name, timeout in (
+        ("openai4s.judgment.shadow", {"timeout_s": 10.0}),
+        ("openai4s.judgment.task_mode_shadow", {"timeout": 10.0}),
+    ):
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        try:
+            module.wait_idle(**timeout)
+        except Exception:  # noqa: BLE001 - a stuck job is the guard's to report
+            pass
 
 
 def _reset_confinement_self_test() -> None:
