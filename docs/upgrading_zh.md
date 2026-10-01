@@ -2,7 +2,7 @@
 
 [English](upgrading.md)
 
-已经装了 0.3.0、要升到下一版本的，先读下一节。数据库仍在 0.2.x 的，读后面那一节。
+已经装了 0.3.0、要升到下一版本的，先读下一节。数据库仍在 0.2.x 的，下一版本会在一次打开里把它一直迁到 schema 34：到 schema 32 为止的步骤读后面那一节，33 和 34 读下一节。
 
 ## 升级到下一版本（schema 32 → 34）
 
@@ -10,7 +10,7 @@ schema 33 会改写已经落盘的 judge 审计行，迁移成功之后还会删
 
 ### 先停守护进程，并自己复制数据目录
 
-安装或首次启动下一版本之前，先停掉守护进程。运行 `openai4s stop`，或退出应用，再用 `openai4s status` 确认没有守护进程仍在运行。旧进程若还在写，可能在这次升级提交之后才写入一条带着原始参数的 `judge` 行，而第 33 步不会再跑。提交后的 `user_version` 是 34。
+安装或首次启动下一版本之前，先停掉守护进程。运行 `openai4s stop`，或退出应用，再用 `openai4s status` 确认没有守护进程仍在运行。如果还有进程在跑带 `host.judge`、但没有本版审计投影的构建（例如 0.3.0 之后 `main` 的源码构建，版本号仍显示 0.3.0），它可能在这次升级提交之后才写入一条带着原始参数的 `judge` 行，而第 33 步不会再跑。已发布的 0.3.0 安装包没有 `host.judge`，不写 `judge` 行。提交后的 `user_version` 是 34。
 
 然后在没有任何进程运行时复制整个数据目录。里面有 Artifact、日志和访问令牌，不只有数据库。请把 `openai4s.db` 旁边的 `openai4s.db-wal` 或 `openai4s.db-journal`（如果存在）一起复制：
 
@@ -35,9 +35,9 @@ cp -a ~/.openai4s ~/.openai4s-before-next
 | 33 | `redact_judge_host_call_args`：改写 `host_call_log` 里已经落盘的 `judge` 行 |
 | 34 | `background_exec_receipts`：新增表；已有行保持原样 |
 
-改写期间连接会执行 `PRAGMA secure_delete = ON`，并在事务提交前按名字恢复原先的模式（`OFF`、`ON` 或 `FAST`）。`secure_delete` 会把这次 `UPDATE` 碰到的页清零。
+改写期间连接会执行 `PRAGMA secure_delete = ON`，并在事务提交前按名字恢复原先的模式（`OFF`、`ON` 或 `FAST`）。开着 `secure_delete` 时，SQLite 会用零覆盖这次 `UPDATE` 换下来的旧字节。
 
-与新写入逐字节相同的预览保持不变，包括 `<invalid template>`、`<unknown template>` 和 params 标记。对这些行，迁移不会再去注册表查一次模板。原文预览若以注册表能解析的模板 id 开头，保留该 id，state 换成 `<redacted judge state>`，并丢掉 params。原文预览若以匹配 `^[A-Za-z0-9_.:-]{1,100}$`、但注册表解析不了的 id 开头，记为 `<unknown template>`。其余原文变成只含 state 标记的 `{"state":"<redacted judge state>"}`。
+与新写入逐字节相同的预览保持不变，包括 `<invalid template>`、`<unknown template>` 和 params 标记。写着模板 id 的预览，只有注册表仍能解析这个 id 时才算投影；否则按原文处理，记为 `<unknown template>`，并丢掉 params 标记。原文预览若以注册表能解析的模板 id 开头，保留该 id，state 换成 `<redacted judge state>`，并丢掉 params。原文预览若以匹配 `^[A-Za-z0-9_.:-]{1,100}$`、但注册表解析不了的 id 开头，记为 `<unknown template>`。其余原文变成只含 state 标记的 `[{"state": "<redacted judge state>"}]`。
 
 升级前已删除的行，旧字节可能还在空闲页里。这次迁移不读那些页。若必须清掉这些残留字节，先停守护进程，再对数据库执行 `VACUUM`：
 
@@ -45,11 +45,13 @@ cp -a ~/.openai4s ~/.openai4s-before-next
 sqlite3 ~/.openai4s/openai4s.db 'VACUUM'
 ```
 
+容器镜像里没有 `sqlite3` 命令。请在服务停止时，从一个挂载同一个卷的临时容器里，用 Python 的 `sqlite3` 模块对 `/data/openai4s.db` 执行 `VACUUM`。
+
 ### 降级
 
 不支持降级到上一版本。
 
-把 0.3.0 的守护进程指到已升级的数据库上时，它会在写入之前停下，并报告 `future_schema` 和两个版本号。这次停下不会恢复以前的行。0.2.0 不检查 schema 版本，所以指到这个数据库时它会打开并写入。要回到升级前的数据，只能用你自己在升级前复制的那份数据目录：
+把 0.3.0 的守护进程指到已升级的数据库上时，它会在写入之前停下，并报告 `future_schema` 和两个版本号。这次停下不会恢复以前的行。0.2.0 不检查 schema 版本，所以指到这个数据库时它会打开并写入。先停掉下一版本。要回到升级前的数据，只能用你自己在升级前复制的那份数据目录：
 
 ```bash
 mv ~/.openai4s ~/.openai4s-next
@@ -66,7 +68,7 @@ cp -a ~/.openai4s-before-next ~/.openai4s
 
 在非特权容器里，bubblewrap 拿不到命名空间，于是 `auto` 会降级，allowlist 会拒绝每一个新的 Python 和 R Cell。那里若要放行 Cell，把 `OPENAI4S_EGRESS` 设为 `off`，或者给容器足够的权限，让 `enforce` 能建立这道边界。见 [docker.md](docker.md)。
 
-Web Agent Cell 的结果里带 `egress_boundary`。Notebook REPL 路由只返回以 `egress_boundary_unavailable:` 开头的 `error`。Python 在发布 worker 之前失败时，前缀是 `kernel bootstrap failed: egress_boundary_unavailable:`。R 的前缀是 `R kernel unavailable: R kernel bootstrap failed: egress_boundary_unavailable:`。
+Web Agent Cell 的结果里带 `egress_boundary`。Notebook REPL 路由只返回以 `egress_boundary_unavailable:` 开头的 `error`。在 daemon 内部，Python 在发布 worker 之前失败时抛出的错误以 `kernel bootstrap failed: egress_boundary_unavailable:` 开头；新 R worker 的拒绝以 `R kernel unavailable: R kernel bootstrap failed: egress_boundary_unavailable:` 交给 Cell 服务。allowlist 开着时，两者都让这个 Cell 以 `egress_boundary_refused` 结束。
 
 下面这些限制与 [security.md](security.md) 一致，留到以后的版本：
 
@@ -82,13 +84,13 @@ Web Agent Cell 的结果里带 `egress_boundary`。Notebook REPL 路由只返回
 
 单人模式下，`openai4s url` 会打印登录地址。这个地址带有 `?token=`。团队模式打印 `/login`。在容器里运行 `docker exec <container> openai4s url`。以前从日志里解析令牌的脚本，要改成调用 `openai4s url`。
 
-未设置 `OPENAI4S_NO_OPEN` 时，`openai4s serve` 仍会打开本地浏览器。单人模式打开带令牌的地址。团队模式打开 `/login`。
+除非设置了 `OPENAI4S_NO_OPEN` 或传了 `--no-open`，`openai4s serve` 仍会打开本地浏览器。单人模式打开带令牌的地址。团队模式打开 `/login`。
 
-桌面应用再次打开、且端口上已经有进程在听时，只有 `openai4s status` 验证通过的、属于这个数据目录的 daemon（pidfile、进程启动令牌，以及 `/health`）才会用带令牌的地址打开。否则打开的是裸地址。
+桌面应用再次打开、且端口上已经有进程在听时，只有 `openai4s status` 验证通过这个数据目录的 daemon（pidfile、进程启动令牌，以及 `/health`），才会打开 `openai4s url` 给出的登录地址（单人模式带令牌，团队模式是 `/login`）。否则打开的是裸地址。
 
 ### judge 审计行
 
-新写入的 `method="judge"` 的 `host_call_log` 行，在落盘前由 `HostCallRepository.log` 投影。模板 id 只在判断注册表能解析时保留。匹配 `^[A-Za-z0-9_.:-]{1,100}$` 但未注册的字符串记为 `<unknown template>`。其他模板字符串记为 `<invalid template>`。state 总是 `<redacted judge state>`。调用带了 params 时，记为 `<redacted judge params>`。参数不是「只含一个对象的列表」时，只存 state 标记。
+新写入的 `method="judge"` 的 `host_call_log` 行，在落盘前由 `HostCallRepository.log` 投影。模板 id 只在判断注册表能解析时保留。匹配 `^[A-Za-z0-9_.:-]{1,100}$` 但未注册的字符串记为 `<unknown template>`。其他模板值（包括没有模板）记为 `<invalid template>`。state 总是 `<redacted judge state>`。调用带了 params 时，记为 `<redacted judge params>`。参数不是「只含一个对象的列表」时，只存 state 标记。
 
 `result_preview` 不变。judge 的 soft-fail 错误结果不再记 `result_digest`：错误文本可能复述调用方的模板 id 或 params，短 id 能从 SHA-256 枚举出来。其他结果仍记摘要。
 
@@ -100,23 +102,23 @@ Web 会话的后台 Cell 在 worker 启动之前把一行写进 `background_exec
 
 每个 job 的 stdout 头部最多 256 KiB。任务持续输出时，这段头部至少每秒落盘一次。
 
-清理在某个会话于 daemon 进程里第一次启动后台 job 时跑一次；之后每写成一条终态收据还会再跑一次，同一进程里最多每十分钟一次。每次清理都清掉最老的终态行的输出，直到表里存下的输出不超过 128 MiB，并删除结束时间早于七天的终态行。两次清理之间，表可以暂时超过这两个上限。未结束的行会保留。
+某个会话 runtime 在 daemon 进程里第一次用到后台执行（`exec_background`、`exec_peek`、`exec_list` 或 `exec_interrupt`）时跑一次清理；之后每写成一条终态收据还会再跑一次，同一进程里最多每十分钟一次。每次清理先把其他 daemon 进程留下的未结束行落盘为 `outcome_unknown`，`ended_at` 记为这次清理的时间，此后它们和其他终态行一样处理；然后清掉最老的终态行的输出，直到表里存下的输出不超过 128 MiB，并删除结束时间早于七天的终态行。清理不会删除未结束的行。两次清理之间，表可以暂时超过这两个上限。
 
 尚未终态的行在两种情况下读作 `outcome_unknown`：这一行是另一个 daemon 记下的（重启之后就是这样），或者本进程已经不再持有这个 job。daemon 不会重放它，也不会接回仍在运行的 worker。
 
 CLI 和子代理的后台 job 不入库，结果里是 `persistent: false`。Web 的 `exec_*` 结果带有 `persistent`。只从收据读出的结果还有 `source: "receipt"`、`output_truncated`、`code_sha256` 和 `created_at`。收据写入失败时，`exec_peek` 带 `receipt_degraded: true`。这个键只在那种情况下出现。
 
-没有存活进程句柄时，`exec_interrupt` 把 `interrupt_undelivered` 和 `reason` 设为同一句话：另一个 daemon 记下的行是 `the daemon has restarted; delivery cannot be confirmed`，本 daemon 记下的行是 `this process no longer has a handle for this job; delivery cannot be confirmed`。活着的 worker 没有收到停止请求时，`interrupt_undelivered` 是这次投递的 reason，或者是 `the stop request did not reach the worker`。
+`exec_interrupt` 只找到收据时，`interrupt_undelivered` 和 `reason` 是同一句话：收据由另一个 daemon 进程记下时是 `the daemon has restarted; delivery cannot be confirmed`；job 仍在本进程的另一个会话 runtime 里运行时是 `another session runtime in this process holds this job; this session cannot deliver the stop`；其他情况是 `this process no longer has a handle for this job; delivery cannot be confirmed`。活着的 worker 没有收到停止请求时，`interrupt_undelivered` 是这次投递的 reason，或者是 `the stop request did not reach the worker`。
 
 这张表在 `QUERY_DENYLIST` 上。删除会话时会一并删掉这些行。数据目录的模式是 `0700`，数据库文件的模式是 `0600`。
 
 ### REST 客户端
 
-`GET /frames/{fid}/delegations` 的形状变了。子代理对象不再包含 `result` 和 `output` 这两个键。只检查 null 的客户端会发现这两个键不在。`artifact_refs` 去掉 `durable_path`，也去掉绝对的 `path` 或 `filename`。存储的结果里有证据时，子代理带上 `artifact_evidence`，其中包含 `checked_at`。结果里没有证据时，这个键不出现。
+`GET /frames/{fid}/delegations` 的形状变了。子代理对象不再包含 `result` 和 `output` 这两个键。这两个键是缺省，不是 `null`：按 `child["result"]` 取值或用 `=== null` 判断的客户端，要改成判断键是否存在。`artifact_refs` 去掉 `durable_path`，也去掉绝对的 `path` 或 `filename`。存储的结果里有证据时，子代理带上 `artifact_evidence`，其中包含 `checked_at`。结果里没有证据时，这个键不出现。
 
 `POST /frames/{fid}/delegations/{child}/stop` 和 `POST /frames/{fid}/delegations/{child}/continue` 返回同一个投影。continue 返回的是存储里的子代理，而不是这次运行的结果信封。
 
-子代理的步骤卡（WebSocket 事件 `step_update` 和 `GET /frames/{fid}/steps`）键不变。其中的 `raw` 字符串现在先去掉主机路径再截断：`environment` 里的绝对路径（解释器、`env_root`）、所有 `durable_path`，以及绝对的 `path` 或 `filename`。子代理的输出正文、完成要点和结论保留。
+子代理的步骤卡（WebSocket 事件 `step_update` 和 `GET /frames/{fid}/steps`）键不变。其中的 `raw` 字符串现在先去掉主机路径再截断：`environment` 里的绝对路径（解释器、`env_root`）、所有 `durable_path`，以及绝对的 `path` 或 `filename`。子代理的输出正文、完成要点和结论按子代理写的原样保留，所以其中提到的主机路径也会保留。升级前已存下的步骤不会被改写。
 
 `docs/response-schemas.json` 已按真实响应重新采集。
 
@@ -126,7 +128,7 @@ CLI 和子代理的后台 job 不入库，结果里是 `persistent: false`。Web
 
 `@` 补全按文件名向项目的 artifact-index 要一页（20 行），再并上本会话的文件。`priority` 低于 0 的隐藏产物不会出现。弹出列表最多 8 条。搜索在途时，Enter、Tab 和发送按钮都会等这一页，再补全按下时所在的那个 token。请求超过 8 秒时显示「项目文件搜索失败，仅显示本会话文件」。本会话自己的文件仍在列表里。
 
-子代理证据面板是子代理结束时做的记录一致性核对。它对照版本记录、校验和、快照文件是否存在及其大小，以及产出它的 Cell。产出它的 Cell 由宿主在写入版本时按正在执行的 Cell 盖章，不采信 worker 发来的 id。它不授权这个子代理，之后再打开面板看到的是当时存下的记录（`checked_at`），不会在面板开着的时候重算。条目最多 12 条。超出时，面板会标明只显示前 12 条。
+子代理证据面板是子代理结束时做的记录一致性核对。它对照版本记录、校验和、快照文件是否存在及其大小，以及产出它的 Cell。宿主把产出它的 Cell 记为读到这次调用时正在执行的 Cell，前提是 worker 自己声称的 Cell 为空或与之相同；声称不一致时记为 `unattributed`，永远不会被核对通过。它不授权这个子代理，之后再打开面板看到的是当时存下的记录（`checked_at`），不会在面板开着的时候重算。条目最多 12 条。超出时，面板会标明只显示前 12 条。
 
 ### Auto Mode
 

@@ -3,8 +3,9 @@
 [中文说明](upgrading_zh.md)
 
 An install that is already on 0.3.0 reads the next section before the first
-start of the next release. A database that is still on 0.2.x follows the
-later section.
+start of the next release. A database still on 0.2.x is migrated by the next
+release straight to schema 34 in one open: read the later section for the
+steps up to schema 32 and the next section for 33 and 34.
 
 ## Upgrading to the next release (schema 32 → 34)
 
@@ -16,9 +17,12 @@ to the previous release. Copy the data directory yourself before you upgrade.
 
 Stop the daemon before you install or start the next release. Run
 `openai4s stop`, or quit the app, and check with `openai4s status` that no
-daemon is still running. An old process that keeps writing can store a new
-`judge` row with the original arguments after this upgrade has committed, and
-step 33 does not run again. The committed `user_version` is 34.
+daemon is still running. A process still running a build that has
+`host.judge` but not this release's audit projection, such as a source
+checkout of `main` after 0.3.0 (it still reports 0.3.0), can store a `judge`
+row with the original arguments after this upgrade has committed, and step 33
+does not run again. The published 0.3.0 package has no `host.judge` and writes
+no `judge` rows. The committed `user_version` is 34.
 
 Then copy the whole data directory while nothing is running. It holds
 artifacts, logs, and the access token, as well as the database. Include any
@@ -66,17 +70,20 @@ old data.
 
 During the rewrite the connection sets `PRAGMA secure_delete = ON`, then
 restores the previous mode by name (`OFF`, `ON`, or `FAST`) before the
-transaction commits. `secure_delete` zeros the pages that `UPDATE` touches.
+transaction commits. With `secure_delete` on, SQLite overwrites the bytes
+that the `UPDATE` replaces with zeros.
 
 A preview that is already byte for byte what a new write stores is left
 unchanged, including `<invalid template>`, `<unknown template>`, and a params
-marker. The migration does not look the template up again for those rows. A
+marker. A preview that names a template id counts as one only while the
+judgment registry still resolves that id; otherwise it is treated as raw,
+becomes `<unknown template>`, and loses its params marker. A
 raw preview that begins with a template id the judgment registry can resolve
 keeps that id, replaces the state with `<redacted judge state>`, and drops
 params. A raw preview that begins with an id matching
 `^[A-Za-z0-9_.:-]{1,100}$` which the registry does not resolve becomes
 `<unknown template>`. Every other raw preview becomes the state-only marker
-`{"state":"<redacted judge state>"}`.
+`[{"state": "<redacted judge state>"}]`.
 
 Bytes from a row deleted before the upgrade can remain in free pages. This
 migration does not read those pages. Stop the daemon and run `VACUUM` when
@@ -86,6 +93,10 @@ those leftover bytes have to be gone:
 sqlite3 ~/.openai4s/openai4s.db 'VACUUM'
 ```
 
+The container image has no `sqlite3` command. With the service stopped, run
+`VACUUM` on `/data/openai4s.db` through Python's `sqlite3` module from a
+one-off container that mounts the same volume.
+
 ### Downgrade
 
 Downgrade to the previous release is not supported.
@@ -93,8 +104,8 @@ Downgrade to the previous release is not supported.
 A 0.3.0 daemon pointed at the upgraded database stops before it writes and
 reports `future_schema` with both version numbers. That stop does not restore
 the previous rows. 0.2.0 does not check the schema version, so pointed at
-this database it opens it and writes. The way back to the previous data is
-the directory copy you made before upgrading:
+this database it opens it and writes. Stop the next release first. The way
+back to the previous data is the directory copy you made before upgrading:
 
 ```bash
 mv ~/.openai4s ~/.openai4s-next
@@ -128,11 +139,14 @@ In an unprivileged container, bubblewrap cannot create its namespaces, so
 Cells there means `OPENAI4S_EGRESS=off`, or a container privileged enough for
 `enforce` to establish the boundary. See [docker.md](docker.md).
 
-An Agent Cell carries `egress_boundary` on its result. The Notebook REPL
+A Web Agent Cell carries `egress_boundary` on its result. The Notebook REPL
 route returns only an `error` that starts with
-`egress_boundary_unavailable:`. Python bootstrap that fails first uses the
-prefix `kernel bootstrap failed: egress_boundary_unavailable:`. R uses
+`egress_boundary_unavailable:`. Inside the daemon, a Python bootstrap that
+fails before the worker is published raises an error that starts with
+`kernel bootstrap failed: egress_boundary_unavailable:`, and a new R worker's
+refusal reaches the Cell service as
 `R kernel unavailable: R kernel bootstrap failed: egress_boundary_unavailable:`.
+While allowlist is on, both end the Cell as `egress_boundary_refused`.
 
 These limits match [security.md](security.md) and stay for a later version:
 
@@ -163,12 +177,15 @@ In single-user mode, `openai4s url` prints the sign-in URL. That URL carries
 `docker exec <container> openai4s url`. A script that used to read the token
 out of the log has to call `openai4s url` instead.
 
-`openai4s serve` still opens a local browser when `OPENAI4S_NO_OPEN` is
-unset. Single-user mode opens the token URL. Team mode opens `/login`.
+`openai4s serve` still opens a local browser unless `OPENAI4S_NO_OPEN` is
+set or `--no-open` is passed. Single-user mode opens the token URL. Team mode
+opens `/login`.
 
-On a later open, the desktop app opens a token URL only when
-`openai4s status` verifies this data directory's daemon (pidfile, process
-start token, and `/health`). Otherwise it opens the bare origin.
+When the desktop app is opened again while something already listens on its
+port, it opens the sign-in URL from `openai4s url` (the token URL in
+single-user mode, `/login` in team mode) only when `openai4s status` verifies
+this data directory's daemon (pidfile, process start token, and `/health`).
+Otherwise it opens the bare origin.
 
 ### Judge audit rows
 
@@ -176,8 +193,8 @@ New `host_call_log` rows with `method="judge"` are projected by
 `HostCallRepository.log` before they are stored. A template id is kept only
 when the judgment registry resolves it. A string that matches
 `^[A-Za-z0-9_.:-]{1,100}$` and is not registered is stored as
-`<unknown template>`. Any other template string is stored as
-`<invalid template>`. State is always `<redacted judge state>`. When the
+`<unknown template>`. Any other template value, including a missing one, is
+stored as `<invalid template>`. State is always `<redacted judge state>`. When the
 call carried params, those are `<redacted judge params>`. Arguments that are
 not a one-element list of an object store only the state marker.
 
@@ -204,12 +221,16 @@ and the output it printed, can still quote lines of that source.
 Stdout kept for one job is a head of at most 256 KiB. While the job prints,
 that head is written at least once a second.
 
-A cleanup pass runs when a session first starts a background job in a daemon
-process, and again after a terminal receipt is written, at most once every
-ten minutes in that process. Each pass clears the output of the oldest
-terminal rows until the table's stored output is within 128 MiB, and deletes
-terminal rows that ended more than seven days ago. Between passes the table
-can run over either limit. Unfinished rows are kept.
+A cleanup pass runs the first time a session runtime in a daemon process
+uses background execution (`exec_background`, `exec_peek`, `exec_list`, or
+`exec_interrupt`), and again after a terminal receipt is written, at most once
+every ten minutes in that process. Each pass first stores `outcome_unknown` on
+rows that another daemon process left unfinished, with `ended_at` set to the
+time of that pass; from then on they are terminal rows like any other. It
+then clears the output of the oldest terminal rows until the table's stored
+output is within 128 MiB, and deletes terminal rows that ended more than seven
+days ago. A pass never deletes an unfinished row. Between passes the table can
+run over either limit.
 
 A row that had not finished reads as `outcome_unknown` when another daemon
 recorded it, which is the case after a restart, and also when this process
@@ -222,11 +243,13 @@ read from the receipt also has `source: "receipt"`, `output_truncated`,
 `code_sha256`, and `created_at`. When the receipt write failed, `exec_peek`
 includes `receipt_degraded: true`. That key is present only in that case.
 
-When `exec_interrupt` has no live process handle, `interrupt_undelivered`
-and `reason` are set to the same sentence: `the daemon has restarted;
-delivery cannot be confirmed` for a row another daemon recorded, or `this
-process no longer has a handle for this job; delivery cannot be confirmed`
-for a row this daemon recorded. When a live worker did not receive
+When `exec_interrupt` finds only the receipt, `interrupt_undelivered` and
+`reason` are set to the same sentence: `the daemon has restarted; delivery
+cannot be confirmed` when another daemon process recorded the job;
+`another session runtime in this process holds this job; this session cannot
+deliver the stop` when the job is still running elsewhere in this process;
+otherwise `this process no longer has a handle for this job; delivery cannot
+be confirmed`. When a live worker did not receive
 the stop, `interrupt_undelivered` is that delivery's reason, or
 `the stop request did not reach the worker`.
 
@@ -236,8 +259,9 @@ data directory is mode `0700` and the database file is mode `0600`.
 ### REST clients
 
 `GET /frames/{fid}/delegations` changes shape. The child objects omit the
-`result` and `output` keys. A client that only checks for null still sees
-those keys as missing. `artifact_refs` omit `durable_path`, and they omit an
+`result` and `output` keys. The keys are absent, not `null`: a client that
+reads `child["result"]` or compares it with `=== null` has to test whether the
+key exists. `artifact_refs` omit `durable_path`, and they omit an
 absolute `path` or `filename`. When the stored result has evidence, the child
 carries `artifact_evidence`, including `checked_at`. The key is absent when
 the result has none.
@@ -251,7 +275,9 @@ Delegate step cards keep their keys, on the `step_update` WebSocket event
 and on `GET /frames/{fid}/steps`. Their `raw` string now drops host paths
 before it is truncated: absolute paths inside `environment` (the
 interpreter, `env_root`), every `durable_path`, and an absolute `path` or
-`filename`. The child's output text, completion bullets, and conclusion stay.
+`filename`. The child's output text, completion bullets, and conclusion stay
+as the child wrote them, so text that names a host path still carries it.
+Steps stored before the upgrade are not rewritten.
 
 `docs/response-schemas.json` was captured again from real responses.
 
@@ -277,9 +303,10 @@ only this session's files." This session's files stay in the list.
 
 The delegation evidence panel is a record-consistency check made when the
 sub-agent finishes. It compares the version record, the checksum, the
-snapshot file's presence and size, and the producing Cell. The host stamps
-the producing Cell from the Cell it is running when the version is written,
-instead of taking the id the worker sends. It does not
+snapshot file's presence and size, and the producing Cell. The host records
+the producing Cell as the Cell it is executing when it reads the call,
+provided the worker's own claim is absent or names that same Cell; a claim
+that disagrees is recorded as `unattributed` and never verifies. It does not
 authorize the child, and a later read shows the stored record (`checked_at`)
 instead of running the check again while the panel is open. At most 12 items
 are kept. When there are more, the panel says it is showing the first 12.

@@ -629,7 +629,8 @@ def _data_dir(cfg: Any) -> Check:
             f"serve` or `openai4s run` migrates it to schema {supported}, which "
             f"reinstalling an older release does not undo. doctor does not "
             f"migrate it, so the checks that read the database did not open it",
-            "Back up the data directory first (docs/upgrading.md, section 1), "
+            "Back up the data directory first (docs/upgrading.md, the section "
+            "for the release you are upgrading from), "
             "then start `openai4s serve` or run `openai4s run` once and rerun "
             "`openai4s doctor`.",
             facts,
