@@ -35,12 +35,15 @@ SECRET_ARG_HOST_CALLS = frozenset(
 
 # ``host.judge`` keeps its replay-tape recording and its result digest.
 # The argument preview is replaced before the generic json.dumps, so every
-# writer of host_call_log is covered. Schema v33 calls the same projection.
+# writer of host_call_log is covered. Schema v33 only rewrites rows already
+# stored; new rows are projected here.
 REDACTED_JUDGE_STATE = "<redacted judge state>"
 REDACTED_JUDGE_PARAMS = "<redacted judge params>"
 _INVALID_JUDGE_TEMPLATE = "<invalid template>"
+_UNKNOWN_JUDGE_TEMPLATE = "<unknown template>"
 _JUDGE_TEMPLATE_BODY = r"[A-Za-z0-9_.:\-]{1,100}"
 _JUDGE_TEMPLATE_ID = re.compile("^" + _JUDGE_TEMPLATE_BODY + "$")
+_JUDGE_PREVIEW_KEYS = frozenset({"template", "state", "params"})
 # Historical previews are ``json.dumps`` (spaces after ":" and ",") cut at
 # 500 characters, so they are usually not valid JSON. The template id is
 # read from that prefix only.
@@ -53,21 +56,48 @@ def _bounded_audit_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)[:500]
 
 
+def _registered_judge_template(template_id: str) -> bool:
+    """Whether ``template_id`` is a template this process can run.
+
+    Imported lazily so opening the store does not import the judgment
+    package, and so a build that has removed that package still redacts.
+    A failed import stores no caller text.
+    """
+
+    try:
+        from openai4s.judgment.registry import get_template
+    except ImportError:
+        return False
+    try:
+        get_template(template_id)
+    except KeyError:
+        return False
+    return True
+
+
 def judge_audit_args(args: Any) -> list:
     """Project one ``host.judge`` call for ``host_call_log.args_preview``.
 
-    The result contains a safe template id when the call has one, the fixed
-    state marker, and the fixed params marker when the spec carried params.
-    Any other shape collapses to the state marker alone. This function never
-    serializes the original arguments.
+    A template id is kept only when :func:`openai4s.judgment.registry.get_template`
+    resolves it. A charset-safe id the registry does not know is
+    ``<unknown template>``. Any other template string is
+    ``<invalid template>``. State is the fixed marker. Params, when the
+    call carried them, are the fixed params marker. Any other shape
+    collapses to the state marker alone. This function never serializes
+    the original arguments.
     """
 
     if isinstance(args, list) and len(args) == 1 and isinstance(args[0], dict):
         spec = args[0]
         template = spec.get("template")
         if isinstance(template, str) and _JUDGE_TEMPLATE_ID.fullmatch(template):
+            kept = (
+                template
+                if _registered_judge_template(template)
+                else _UNKNOWN_JUDGE_TEMPLATE
+            )
             projected: dict[str, str] = {
-                "template": template,
+                "template": kept,
                 "state": REDACTED_JUDGE_STATE,
             }
         else:
@@ -81,15 +111,59 @@ def judge_audit_args(args: Any) -> list:
     return [{"state": REDACTED_JUDGE_STATE}]
 
 
-def redact_stored_judge_args_preview(preview: Any) -> str:
-    """Rewrite one stored ``args_preview`` with :func:`judge_audit_args`.
+def _is_projected_judge_preview(text: str) -> bool:
+    """Whether ``text`` is already a :func:`judge_audit_args` projection.
 
-    A safe template id is kept when the truncated preview still starts with
-    one. Every other preview becomes the state-only projection. Re-running
-    this on its own output is a no-op.
+    The charset-safe template id is accepted here without a registry lookup.
+    Migration 33 used to keep every such id, and a row it already rewrote
+    must stay byte for byte on a forced re-run.
+    """
+
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 1
+        or not isinstance(parsed[0], dict)
+    ):
+        return False
+    item = parsed[0]
+    if not set(item).issubset(_JUDGE_PREVIEW_KEYS):
+        return False
+    if item.get("state") != REDACTED_JUDGE_STATE:
+        return False
+    if "params" in item and item.get("params") != REDACTED_JUDGE_PARAMS:
+        return False
+    if "template" not in item:
+        return True
+    template = item.get("template")
+    if template in (_INVALID_JUDGE_TEMPLATE, _UNKNOWN_JUDGE_TEMPLATE):
+        return True
+    if not isinstance(template, str):
+        return False
+    return _JUDGE_TEMPLATE_ID.fullmatch(template) is not None
+
+
+def redact_stored_judge_args_preview(preview: Any) -> str:
+    """Rewrite one stored ``args_preview``.
+
+    A preview that already parses as one object, with keys limited to
+    ``template``, ``state`` and ``params``, ``state`` equal to the marker,
+    ``params`` absent or the marker, and ``template`` absent, a charset-safe
+    id, ``<invalid template>`` or ``<unknown template>``, is returned
+    unchanged. Every output of :func:`judge_audit_args` is such a preview.
+
+    Anything else is still raw. A charset-safe template id is read from the
+    prefix and passed through :func:`judge_audit_args`, so only an id the
+    registry resolves is kept, and params from the raw preview are not
+    copied. Every other raw preview becomes the state-only projection.
     """
 
     text = preview if isinstance(preview, str) else ""
+    if _is_projected_judge_preview(text):
+        return text
     match = _STORED_JUDGE_TEMPLATE.match(text)
     if match:
         projected = judge_audit_args([{"template": match.group(1)}])

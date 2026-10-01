@@ -17,6 +17,8 @@ from openai4s.storage.metadata import (
     FolderRepository,
     HostCallRepository,
     NotesRepository,
+    judge_audit_args,
+    redact_stored_judge_args_preview,
 )
 from openai4s.store import get_store
 
@@ -339,8 +341,9 @@ def test_judge_audit_preview_drops_state_and_params(tmp_path):
 
     One sentinel sits inside the first 500 characters of the raw dump and
     another past that cut, so a truncation of the original arguments would
-    still publish the first. Params and an unsafe template string are the
-    same kind of caller text.
+    still publish the first. Params, an unsafe template string, and a
+    charset-safe id the registry does not resolve are the same kind of
+    caller text. ``"a" * 100`` is stored as ``<unknown template>``.
     """
 
     store = _store(tmp_path)
@@ -445,9 +448,10 @@ def test_judge_audit_preview_drops_state_and_params(tmp_path):
     )
     assert judge_rows[3][1] == judge_rows[2][1]
     assert judge_rows[4][1] == json.dumps(
-        [{"template": safe_id, "state": "<redacted judge state>"}],
+        [{"template": "<unknown template>", "state": "<redacted judge state>"}],
         ensure_ascii=False,
     )
+    assert safe_id not in judge_rows[4][1]
     assert judge_rows[5][1] == state_only
     assert judge_rows[6][1] == state_only
     control = rows[7]
@@ -457,3 +461,105 @@ def test_judge_audit_preview_drops_state_and_params(tmp_path):
     )
     assert near in control[1]
     store.close()
+
+
+def test_judge_audit_outputs_are_fixed_points_of_the_stored_rewrite():
+    """Every projection ``judge_audit_args`` emits survives a forced v33 re-run.
+
+    The two shapes a new write produces, and that the old rewriter destroyed,
+    are included: a params marker, and ``<invalid template>``.
+    """
+
+    samples = [
+        [{"template": "system.probe", "state": {"secret": "x"}}],
+        [
+            {
+                "template": "features.custom",
+                "state": {"secret": "x"},
+                "params": {"specs": "y"},
+            }
+        ],
+        [{"template": "bad template", "state": {"secret": "x"}}],
+        [{"template": "bad template", "state": {"secret": "x"}, "params": {"p": "y"}}],
+        [{"template": "MRN-0012345-HIV", "state": {"secret": "x"}}],
+        [
+            {
+                "template": "MRN-0012345-HIV",
+                "state": {"secret": "x"},
+                "params": {"specs": "y"},
+            }
+        ],
+        [{"template": "a" * 100, "state": {"secret": "x"}}],
+        [{"template": "b" * 101, "state": {"secret": "x"}}],
+        [{"template": "system.probe", "state": {"secret": "x"}}, {"leak": "z"}],
+        f"not-a-list {'x'}",
+        [],
+        None,
+    ]
+    for args in samples:
+        projected = judge_audit_args(args)
+        stored = json.dumps(projected, ensure_ascii=False)
+        assert redact_stored_judge_args_preview(stored) == stored
+        again = json.loads(redact_stored_judge_args_preview(stored))
+        assert again == projected
+    params_marker = json.dumps(
+        [
+            {
+                "template": "features.custom",
+                "state": "<redacted judge state>",
+                "params": "<redacted judge params>",
+            }
+        ],
+        ensure_ascii=False,
+    )
+    invalid_marker = json.dumps(
+        [{"template": "<invalid template>", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    assert redact_stored_judge_args_preview(params_marker) == params_marker
+    assert redact_stored_judge_args_preview(invalid_marker) == invalid_marker
+
+
+def test_registered_template_ids_are_kept_and_unknown_ids_are_not():
+    """A charset match is not an allowlist. The registry is.
+
+    Every id ``get_template`` can resolve is copied through. A future
+    template that the projection does not ask the registry about would be
+    stored as ``<unknown template>``. ``MRN-0012345-HIV`` matches the
+    charset and is not a template, so the audit must not keep it.
+    """
+
+    import openai4s.judgment.registry as registry
+    from openai4s.judgment.registry import get_template
+
+    get_template("system.probe")
+    template_ids = sorted(registry._TEMPLATES)
+    assert "system.probe" in template_ids
+    assert "features.custom" in template_ids
+    assert "literature.screen" in template_ids
+    for template_id in template_ids:
+        projected = judge_audit_args(
+            [
+                {
+                    "template": template_id,
+                    "state": {"secret": "x"},
+                    "params": {"specs": "y"},
+                }
+            ]
+        )
+        assert projected == [
+            {
+                "template": template_id,
+                "state": "<redacted judge state>",
+                "params": "<redacted judge params>",
+            }
+        ]
+        stored = json.dumps(projected, ensure_ascii=False)
+        assert redact_stored_judge_args_preview(stored) == stored
+    unknown = judge_audit_args(
+        [{"template": "MRN-0012345-HIV", "state": {"patient": "x"}}]
+    )
+    assert unknown == [
+        {"template": "<unknown template>", "state": "<redacted judge state>"}
+    ]
+    assert "MRN-0012345-HIV" not in json.dumps(unknown)

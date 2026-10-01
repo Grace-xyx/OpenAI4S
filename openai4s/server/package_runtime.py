@@ -676,12 +676,16 @@ _FILE_CONTENT_METHODS = frozenset({"write_file", "edit_file"})
 def _host_call_names_secret_file(call: Mapping[str, Any]) -> bool:
     """Whether a host-call row's preview may carry a refused file's content.
 
-    The preview is ``json.dumps(args)[:500]`` and argument order is the
+    Most previews are ``json.dumps(args)[:500]``, and argument order is the
     caller's, so a content-first ``write_file`` spec can lose its path to the
-    truncation while still carrying the body. The row's resource keys hold
-    the path in full (``workspace:<path>``) and are read too; and a
-    file-content call whose preview was cut short is withheld, because what
-    it was writing can no longer be told from what it wrote.
+    truncation while still carrying the body. ``judge`` is not that dump:
+    ``HostCallRepository.log`` stores the audit projection (a registered
+    template id, or ``<invalid template>`` / ``<unknown template>``, the
+    state marker, and the params marker when the call carried params).
+    Secret-argument methods store a fixed redaction string. The row's
+    resource keys hold the path in full (``workspace:<path>``) and are read
+    too; and a file-content call whose preview was cut short is withheld,
+    because what it was writing can no longer be told from what it wrote.
     """
 
     preview = str(call.get("args_preview") or "")

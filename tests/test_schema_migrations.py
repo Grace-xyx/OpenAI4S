@@ -1657,7 +1657,10 @@ def test_storage_readmes_name_the_migration_numbers_the_code_uses(tmp_path):
             "artifact_browse_index"
         ),
         r"版本 (\d+) 增加可回滚的 Artifact browse 索引": "artifact_browse_index",
+        r"Version (\d+) rewrites": "redact_judge_host_call_args",
+        r"版本 (\d+) 改写": "redact_judge_host_call_args",
     }
+    matched: set[str] = set()
     for name in ("README.md", "README_zh.md"):
         text = Path("openai4s/storage") / name
         body = text.read_text("utf-8")
@@ -1665,10 +1668,12 @@ def test_storage_readmes_name_the_migration_numbers_the_code_uses(tmp_path):
             match = re.search(pattern, body)
             if match is None:
                 continue
+            matched.add(pattern)
             assert int(match.group(1)) == by_name[migration], (
                 f"{name} says migration {match.group(1)} for {migration}, "
                 f"but the code applies it as {by_name[migration]}"
             )
+    assert matched == set(claims)
 
 
 def _schema_objects(path: Path) -> set[tuple[str, str]]:
@@ -1956,13 +1961,17 @@ def test_hot_rollback_journal_does_not_bypass_the_future_schema_refusal(tmp_path
     assert rejected.value.actual_version == SCHEMA_VERSION + 1
 
 
-def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
+def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path, monkeypatch):
     """Migration 33 rewrites stored judge previews and leaves every other row.
 
     The truncated preview is the 500-character cut ``json.dumps`` actually
-    stored, so it is not valid JSON. A safe template id is taken from that
-    prefix. A second open, and a forced re-run of the same step, leave the
-    rewritten bytes alone and record version 33 once.
+    stored, so it is not valid JSON. A registered template id is taken from
+    that prefix. A second open takes the ``user_version`` fast path and does
+    not execute the step. Rewinding to 32 and opening again does. The two
+    shapes a new write stores — a params marker, and ``<invalid template>`` —
+    stay byte for byte across that forced re-run, and a ``judge`` row whose
+    ``call_id`` is NULL is rewritten. ``PRAGMA secure_delete`` after the
+    upgrade equals the value the connection had before it, including FAST.
     """
 
     near = f"SENTINEL-02-{uuid.uuid4()}"
@@ -2021,6 +2030,24 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
         [{"state": "<redacted judge state>"}],
         ensure_ascii=False,
     )
+    projected_params = json.dumps(
+        [
+            {
+                "template": "features.custom",
+                "state": "<redacted judge state>",
+                "params": "<redacted judge params>",
+            }
+        ],
+        ensure_ascii=False,
+    )
+    projected_invalid = json.dumps(
+        [{"template": "<invalid template>", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    null_raw = json.dumps(
+        [{"template": "system.probe", "state": {"secret": near}}],
+        ensure_ascii=False,
+    )
     control = json.dumps(
         [{"url": "https://example.test/keep"}],
         ensure_ascii=False,
@@ -2047,6 +2074,12 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
         "invalid": state_only,
         "kept": kept,
         "state": state_only,
+        "projected_params": projected_params,
+        "projected_invalid": projected_invalid,
+        "null_call": json.dumps(
+            [{"template": "system.probe", "state": "<redacted judge state>"}],
+            ensure_ascii=False,
+        ),
         "control": control,
     }
     methods = {key: "judge" for key in expected}
@@ -2057,6 +2090,9 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
         "invalid": invalid,
         "kept": kept,
         "state": state_only,
+        "projected_params": projected_params,
+        "projected_invalid": projected_invalid,
+        "null_call": null_raw,
         "control": control,
     }
 
@@ -2070,7 +2106,7 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
                 "call_id,method,args_preview,result_preview,result_digest,"
                 "ok,created_at) VALUES(?,?,?,?,?,?,?)",
                 (
-                    f"hc-{key}",
+                    None if key == "null_call" else f"hc-{key}",
                     methods[key],
                     inserted[key],
                     f"result:{key}",
@@ -2099,19 +2135,29 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
             if row["version"] == 33
         ]
 
+    def secure_delete_mode(connection):
+        return int(connection.execute("PRAGMA secure_delete").fetchone()[0])
+
+    def call_id_for(key):
+        return None if key == "null_call" else f"hc-{key}"
+
+    with sqlite3.connect(db) as probe:
+        secure_before = secure_delete_mode(probe)
+
     upgraded = get_store(db)
     try:
         rows = read_rows(upgraded)
+        assert secure_delete_mode(upgraded._conn) == secure_before
         assert upgraded.schema_state()["version"] == SCHEMA_VERSION == 34
         assert version_33_names(upgraded) == ["redact_judge_host_call_args"]
     finally:
         upgraded.close()
 
     by_id = {row[0]: row for row in rows}
-    assert set(by_id) == {f"hc-{key}" for key in inserted}
+    assert set(by_id) == {call_id_for(key) for key in inserted}
     for key, preview in expected.items():
         _call_id, method, args_preview, result_preview, result_digest = by_id[
-            f"hc-{key}"
+            call_id_for(key)
         ]
         assert method == methods[key]
         assert args_preview == preview
@@ -2149,10 +2195,19 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
         conn.commit()
     finally:
         conn.close()
+    real_pragmas = Store._apply_pragmas
+
+    def fast_secure_delete(self):
+        real_pragmas(self)
+        self._conn.execute("PRAGMA secure_delete = FAST").fetchall()
+
+    monkeypatch.setattr(Store, "_apply_pragmas", fast_secure_delete)
     rerun = get_store(db)
     try:
         assert read_rows(rerun) == rows
         assert version_33_names(rerun) == ["redact_judge_host_call_args"]
+        # Integer 2 is ON. The step has to put the name FAST back.
+        assert secure_delete_mode(rerun._conn) == 2
     finally:
         rerun.close()
     assert_disk_has_no_sentinel()

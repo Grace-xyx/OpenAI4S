@@ -222,9 +222,10 @@ def test_kernel_judge_audit_omits_state_on_every_path(tmp_path: Any) -> None:
         ensure_ascii=False,
     )
     assert rows[2][0] == json.dumps(
-        [{"template": "no.such.template", "state": "<redacted judge state>"}],
+        [{"template": "<unknown template>", "state": "<redacted judge state>"}],
         ensure_ascii=False,
     )
+    assert "no.such.template" not in rows[2][0]
 
     boom = _dispatcher(tmp_path / "boom", ExplodingBackend())
     with Kernel(dispatcher=boom, cwd=str(tmp_path)) as kernel:

@@ -165,7 +165,21 @@ does not inspect hashed dist assets.
 
 ## 5. Settings keys (Store)
 
-No schema migration. After removal nothing reads these rows. Optional cleanup
+Do not add a schema migration, and do not delete one. Migration 33
+(`redact_judge_host_call_args`, `Store._apply_redact_judge_host_call_args`)
+stays in the numbered sequence. It rewrites historical `host_call_log`
+rows. Dropping the step would skip that rewrite on a database that has not
+reached 33.
+
+Keep `AUDIT_ARG_PROJECTIONS["judge"]` in `openai4s/storage/metadata.py`
+(`judge_audit_args` and `redact_stored_judge_args_preview`).
+`HostCallRepository.log` projects `method="judge"` through that entry.
+Deleting it stores the raw arguments again. After `openai4s/judgment/` is
+gone, the projection's `get_template` import fails and every template id
+is stored as `<unknown template>`. That is the outcome to keep. Do not
+replace it with the caller's text.
+
+After removal nothing reads these settings rows. Optional cleanup
 on a running data dir (not required for the suite):
 
 ```text

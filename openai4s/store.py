@@ -20,7 +20,10 @@ as turns/cells/artifacts/compactions happen. Schema and write paths:
   notes             project notes
   lineage_edges     object-level data lineage: input_version -> output_version
   host_call_log     RPC audit (DERIVABLE_HOST_CALLS are NOT logged; the args of
-                    SECRET_ARG_HOST_CALLS are redacted before write)
+                    SECRET_ARG_HOST_CALLS are redacted before write, and
+                    host.judge args are projected before write: a registered
+                    template id, or "<invalid template>" / "<unknown template>",
+                    plus fixed state and params markers)
 
 Agent SQL (`host.query`) runs under a real SQLite authorizer installed for the
 duration of each statement, not behind a substring filter on the statement text.
@@ -1866,36 +1869,44 @@ class Store:
         """Version 33: redact raw host.judge state in the generic RPC audit.
 
         ``host_call_log.args_preview`` for ``method='judge'`` is rewritten
-        with :func:`openai4s.storage.metadata.redact_stored_judge_args_preview`,
-        the same projection new writes use. A stored preview is a
-        500-character ``json.dumps`` cut and usually not valid JSON. A safe
-        template id is taken from the prefix; every other preview becomes
-        the state-only marker. A row that already matches is left unchanged.
+        with :func:`openai4s.storage.metadata.redact_stored_judge_args_preview`.
+        New rows are projected by ``HostCallRepository.log``; this step only
+        rewrites rows already stored. A preview that is already that
+        projection is left byte for byte. A raw preview keeps a registered
+        template id taken from its prefix and replaces the state with the
+        marker; every other raw preview becomes the state-only marker.
+
+        Rows are updated by ``rowid``. ``call_id`` is nullable, and
+        ``WHERE call_id = NULL`` matches nothing.
 
         ``PRAGMA secure_delete`` is on for the rewrite so the replaced bytes
-        are zeroed in the page, then restored. Runs inside the transaction
-        owned by ``run_migrations``; it must not commit.
+        are zeroed in the page, then restored by name (``0`` is ``OFF``,
+        ``1`` is ``ON``, ``2`` is ``FAST``). An integer ``2`` is not FAST:
+        SQLite reads it as ON. Runs inside the transaction owned by
+        ``run_migrations``; it must not commit.
         """
 
         from openai4s.storage.metadata import redact_stored_judge_args_preview
 
+        # SQLite accepts the integer 2 as boolean ON. FAST is the name only.
+        secure_delete_names = {0: "OFF", 1: "ON", 2: "FAST"}
         previous_row = conn.execute("PRAGMA secure_delete").fetchone()
         previous = int(previous_row[0]) if previous_row is not None else 0
+        previous_name = secure_delete_names.get(previous, "OFF")
         try:
             conn.execute("PRAGMA secure_delete = ON").fetchall()
             rows = conn.execute(
-                "SELECT call_id, args_preview FROM host_call_log "
-                "WHERE method = 'judge'"
+                "SELECT rowid, args_preview FROM host_call_log WHERE method = 'judge'"
             ).fetchall()
             for row in rows:
                 updated = redact_stored_judge_args_preview(row["args_preview"])
                 if updated != row["args_preview"]:
                     conn.execute(
-                        "UPDATE host_call_log SET args_preview = ? WHERE call_id = ?",
-                        (updated, row["call_id"]),
+                        "UPDATE host_call_log SET args_preview = ? WHERE rowid = ?",
+                        (updated, row["rowid"]),
                     )
         finally:
-            conn.execute(f"PRAGMA secure_delete = {previous}").fetchall()
+            conn.execute(f"PRAGMA secure_delete = {previous_name}").fetchall()
 
     def _apply_background_exec_receipts(self, conn: sqlite3.Connection) -> None:
         """Version 34: bounded receipts for Web background cells.

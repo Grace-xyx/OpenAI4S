@@ -814,27 +814,41 @@ latency, `state_sha256`, and full probabilities. Raw state is omitted unless
 (`judgment_shadow`) carry hashes and verdict labels, not the code. That
 setting does not open a second copy in the generic RPC audit.
 
-`host_call_log.args_preview` for `method="judge"` stores a projection on
-every path that reaches `HostCallRepository.log` (success, soft failure,
-early return, and exception). A template id is kept when it matches
-`^[A-Za-z0-9_.:-]{1,100}$`; any other template string is stored as
-`<invalid template>`. State is always `<redacted judge state>`. When the call
-carried params, those are `<redacted judge params>`. A call whose arguments
-are not a one-element list of an object stores only the state marker.
-`result_preview` and `result_digest` are unchanged, and the call stays on
-the replay tape. Schema migration 33 rewrites historical `judge` rows with
-the same helper: a preview that still begins with a safe template id keeps
-that id and the state marker, and every other preview becomes the state-only
-marker. For that rewrite the migration sets `PRAGMA secure_delete = ON` and
-restores the previous value before the migration transaction commits, so the
-replaced bytes are zeroed in the page.
+`host_call_log.args_preview` for `method="judge"` is projected by
+`HostCallRepository.log` on every path that reaches it (success, soft
+failure, early return, and exception). A template id is kept only when the
+judgment registry resolves it. A string that matches
+`^[A-Za-z0-9_.:-]{1,100}$` but is not registered is stored as
+`<unknown template>`. Any other template string is stored as
+`<invalid template>`. State is always `<redacted judge state>`. When the
+call carried params, those are `<redacted judge params>`. A call whose
+arguments are not a one-element list of an object stores only the state
+marker. `result_preview` and `result_digest` are unchanged, and the call
+stays on the replay tape.
+
+Schema migration 33 does not project new rows. It rewrites `judge` rows
+already stored. For that rewrite the migration sets `PRAGMA secure_delete = ON`
+and restores the connection's previous mode by name (`OFF` / `ON` / `FAST`)
+before the migration transaction commits, so the bytes that `UPDATE` replaced
+are zeroed in those pages. A preview that is already the projection is left
+unchanged, including a params marker and `<invalid template>` or
+`<unknown template>`. A raw preview that still begins with a registered
+template id keeps that id and the state marker and drops params. Every
+other raw preview becomes the state-only marker.
+
+Stop the daemon before upgrading. A process still running the previous
+release keeps writing raw `judge` rows, and migration 33 does not run again
+once `user_version` is 33. Those rows stay raw.
 
 Copies of the original state can remain outside that row:
 
 - The pre-upgrade backup `<data_dir>/openai4s.db.v32.bak` holds the original
   text. A successful migration deletes it. A failed migration keeps it.
 - SQLite's rollback journal or WAL, and free pages the secure-delete pass
-  did not overwrite.
+  did not overwrite. `secure_delete` zeros pages the `UPDATE` touches. A
+  `judge` row deleted before the upgrade still occupies free pages, and this
+  migration does not read them. Stop the daemon and run `VACUUM` when those
+  leftover bytes have to be gone.
 - Any backup taken outside this process.
 - `openai4s_tape.json`, written while `OPENAI4S_RECORD_TAPE` is set. The
   recorder stores the raw arguments.
