@@ -862,6 +862,44 @@ def _absolute_path(value: str) -> bool:
     )
 
 
+def host_absolute_path(value: str) -> bool:
+    """True for a POSIX absolute path or a Windows drive path.
+
+    The predicate ``project_browser_artifact_refs`` uses for ``path`` and
+    ``filename``. Callers outside this module use this name so the rule stays
+    in one place.
+    """
+
+    return _absolute_path(value)
+
+
+def project_browser_artifact_refs(refs: list[Any]) -> list[dict[str, Any]]:
+    """Browser-safe artifact refs.
+
+    The one rule shared by ``project_browser_child`` and the delegate step
+    card. Unknown keys, including ``durable_path``, are dropped. An absolute
+    ``path`` or ``filename`` is dropped. A non-mapping entry is skipped.
+    """
+
+    safe_refs: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, Mapping):
+            continue
+        item: dict[str, Any] = {}
+        for key, value in ref.items():
+            if key not in _BROWSER_REF_KEYS:
+                continue
+            if (
+                key in ("filename", "path")
+                and isinstance(value, str)
+                and _absolute_path(value)
+            ):
+                continue
+            item[str(key)] = value
+        safe_refs.append(item)
+    return safe_refs
+
+
 #: The keys a browser sees on a delegation child. An allowlist, not a list
 #: of keys to drop: a child-shaped value can also be a run envelope
 #: (``final_message``, bullets, ``environment`` with interpreter paths), and
@@ -895,34 +933,18 @@ def project_browser_child(child: Mapping[str, Any]) -> dict[str, Any]:
 
     Only ``_BROWSER_CHILD_KEYS`` pass; ``result`` and ``output`` are absent,
     not null. Steering message bodies are omitted. ``artifact_refs`` keep
-    identity and a relative name: ``durable_path`` is dropped, and an
-    absolute ``path`` or ``filename`` is dropped. ``artifact_evidence`` is
-    left as stored, including a missing key. ``GET /frames/{id}/delegations``
-    and the stop/continue responses use this function. The WebSocket
-    ``delegation_child_event`` keeps its own narrower allowlist in
-    ``workbench_state.delegation_event_projection``.
+    identity and a relative name through ``project_browser_artifact_refs``:
+    ``durable_path`` is dropped, and an absolute ``path`` or ``filename`` is
+    dropped. ``artifact_evidence`` is left as stored, including a missing key.
+    ``GET /frames/{id}/delegations`` and the stop/continue responses use this
+    function. The WebSocket ``delegation_child_event`` keeps its own narrower
+    allowlist in ``workbench_state.delegation_event_projection``.
     """
 
     projected = {key: child[key] for key in _BROWSER_CHILD_KEYS if key in child}
     refs = projected.get("artifact_refs")
     if isinstance(refs, list):
-        safe_refs: list[dict[str, Any]] = []
-        for ref in refs:
-            if not isinstance(ref, Mapping):
-                continue
-            item: dict[str, Any] = {}
-            for key, value in ref.items():
-                if key not in _BROWSER_REF_KEYS:
-                    continue
-                if (
-                    key in ("filename", "path")
-                    and isinstance(value, str)
-                    and _absolute_path(value)
-                ):
-                    continue
-                item[str(key)] = value
-            safe_refs.append(item)
-        projected["artifact_refs"] = safe_refs
+        projected["artifact_refs"] = project_browser_artifact_refs(refs)
     steering = projected.get("steering")
     if isinstance(steering, Mapping):
         safe_steering = dict(steering)
