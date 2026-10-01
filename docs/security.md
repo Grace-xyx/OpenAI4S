@@ -225,15 +225,53 @@ stays on. The same check runs for every origin, including `system`,
 `recovery`, and `sidecar_recovery`, because skill sidecar bootstrap is
 third-party code.
 
-The refusal code is `egress_boundary_unavailable`. On a supported platform the
-remedy is macOS Seatbelt or Linux bubblewrap with
-`OPENAI4S_KERNEL_SANDBOX=enforce` (or `auto` after that self-test passes and
-still reports `network_policy=blocked`). `OPENAI4S_EGRESS=off`, the default,
-does not add this gate. A Cell that is already running is left alone; the
-mode is read again at the next Cell. `host.bash` inside a Cell is a
-subprocess of that kernel, so it inherits the kernel's network block. The
-host process's own domain check still applies before that subprocess is
-started.
+The refusal code is `egress_boundary_unavailable`. The gate does not require
+`OPENAI4S_KERNEL_SANDBOX=enforce`. `auto` admits the Cell when the self-test
+passes and still reports `network_policy=blocked`. `enforce` is the mode that
+refuses to start a kernel instead of degrading. The projected reason says the
+same thing: proof is the three facts above, and `enforce` is how an operator
+chooses fail-closed startup. On a supported platform the remedy is macOS
+Seatbelt or Linux bubblewrap. `OPENAI4S_EGRESS=off`, the default, does not add
+this gate. A Cell that is already running is left alone; the mode is read
+again at the next Cell. `host.bash` inside a Cell is a subprocess of that
+kernel, so it inherits the kernel's network block. The host process's own
+domain check still applies before that subprocess is started.
+
+An R Cell is refused in a different shape from a Python Cell. Python bootstrap
+that fails before the worker is published raises
+`kernel bootstrap failed: egress_boundary_unavailable: …`. A new R worker's
+environment probe is caught, shut down, and returned to the Cell service as
+the string `R kernel unavailable: R kernel bootstrap failed:
+egress_boundary_unavailable: …`, before the ordinary posture precheck runs.
+Both exact prefixes are recognized only while allowlist is on, and both
+project `egress_boundary_refused` with the same fields a typed
+`EgressBoundaryUnavailable` carries: code, reason, egress mode, sandbox, and
+remedy. Agent and Notebook Cells share that projection. When the session
+still has the kernel, the decision's `sandbox` fields are that kernel's
+measured posture. A new Python worker that failed before publication, and an
+R worker already shut down by the failed bootstrap, have no posture left to
+read, so those sandbox fields are null. The code, reason, and remedy stay
+the stable ones.
+
+In an unprivileged container, bubblewrap cannot create its namespaces, so
+`auto` degrades and the self-test does not report a raw-network block.
+Allowlist then refuses every new Python and R Cell with
+`egress_boundary_unavailable`. Admitting Cells there means
+`OPENAI4S_EGRESS=off`, or a container privileged enough for `enforce` to
+establish the boundary. See [docker.md](docker.md) for the namespace limits.
+
+These limits are known and left for a later version:
+
+- Lifecycle entry points `start_kernel`, `restart_kernel`, `set_env`, and
+  `_apply_pending_env` answer a boundary refusal with a generic HTTP 500.
+  They do not project `egress_boundary_refused`.
+- A cluster allocation is released the first time a Cell is refused for this
+  boundary.
+- A delegated sub-agent inside the Web daemon may write the refusal line to
+  stderr. That line is diagnostic noise beside the stable stop reason.
+- The gate runs once per Cell. Code the interpreter runs while the worker
+  process starts, including `.pth` files and `sitecustomize`, is outside
+  the Cell admission check.
 
 ### Executable Artifact previews use a scoped alternate origin
 

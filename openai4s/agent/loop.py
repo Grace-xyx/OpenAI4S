@@ -300,18 +300,6 @@ def _preauthorized_test_commands_note(commands: Sequence[str]) -> str:
     )
 
 
-def _is_egress_boundary_error(exc: BaseException) -> bool:
-    """True when a Cell was refused because allowlist has no proven boundary."""
-
-    from openai4s.egress import EGRESS_BOUNDARY_UNAVAILABLE, EgressBoundaryUnavailable
-
-    if isinstance(exc, EgressBoundaryUnavailable):
-        return True
-    if getattr(exc, "code", None) == EGRESS_BOUNDARY_UNAVAILABLE:
-        return True
-    return str(exc).startswith(f"{EGRESS_BOUNDARY_UNAVAILABLE}:")
-
-
 @dataclass
 class Agent:
     cfg: Config = field(default_factory=get_config)
@@ -1409,7 +1397,9 @@ class Agent:
             # user expression and uses this exact worker's measured posture.
             self._admit_spawned_cell_kernel(k)
         except BaseException as exc:
-            if _is_egress_boundary_error(exc):
+            from openai4s.egress import is_boundary_refusal
+
+            if is_boundary_refusal(exc):
                 raise
             self._shutdown_r_kernel()
             raise
@@ -1437,7 +1427,9 @@ class Agent:
                     kwargs["cell_id"] = cell_id
             return execute(code, **kwargs)
         except Exception as e:  # noqa: BLE001 — dead worker: drop it, soft-fail
-            if _is_egress_boundary_error(e):
+            from openai4s.egress import is_boundary_refusal
+
+            if is_boundary_refusal(e):
                 raise
             self._shutdown_r_kernel()
             return {"error": f"R kernel failed: {e}"}

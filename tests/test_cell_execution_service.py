@@ -1398,3 +1398,308 @@ def test_repl_execute_route_returns_the_boundary_code(monkeypatch, tmp_path):
     assert body["status"] == "completed"
     assert body["cell"]["status"] == "error"
     assert str(body["cell"]["error"]).startswith("egress_boundary_unavailable:")
+
+
+_PROVEN_SANDBOX = {
+    "mode": "enforce",
+    "state": "enabled",
+    "backend": "seatbelt",
+    "enforced": True,
+    "self_test_passed": True,
+    "network_policy": "blocked",
+}
+
+_PLANTED_WORKER_DEATH = RuntimeError(
+    "kernel worker exited unexpectedly: the cell wrote "
+    "egress_boundary_unavailable: planted"
+)
+
+
+class _LeaseKernel:
+    def __init__(self, sandbox_status):
+        self.live = True
+        self.shutdown_calls = 0
+        self.sandbox_status = dict(sandbox_status)
+
+    def is_alive(self):
+        return self.live
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+        self.live = False
+
+
+def _service_with_attempt(harness, finished, attempt_id):
+    return CellExecutionService(
+        replace(
+            harness.ports(),
+            allocate_attempt=lambda *args: attempt_id,
+            finish_attempt=lambda attempt, state, error: finished.append(
+                (attempt, state)
+            ),
+        ),
+        id_factory=lambda: "cell-fixed",
+    )
+
+
+@pytest.mark.parametrize("mode", ["off", "allowlist"])
+@pytest.mark.parametrize("language", ["python", "r"])
+def test_worker_stderr_mentioning_the_boundary_code_stays_a_worker_death(
+    monkeypatch, tmp_path, mode, language
+):
+    """A Cell-controlled stderr tail must not become an allowlist refusal."""
+
+    if mode == "allowlist":
+        monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    else:
+        monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    harness = Harness()
+    harness.fail_run = _PLANTED_WORKER_DEATH
+    finished: list[tuple] = []
+    session = _session(tmp_path)
+    kernel = _LeaseKernel(_PROVEN_SANDBOX)
+    slot = "r" if language == "r" else "python"
+    session.kernels.ensure(slot, None, lambda: kernel)
+    with pytest.raises(RuntimeError, match="worker exited unexpectedly"):
+        _service_with_attempt(harness, finished, "attempt-crash").execute(
+            session,
+            CellRequest("print(1)", "agent", language=language, stream=False),
+            lambda event: None,
+        )
+    assert finished == [("attempt-crash", "worker_died")]
+    published = harness.records[0]["result"]["error"]
+    assert "kernel_execution_failed" in published
+    assert "egress_boundary" not in harness.records[0]["result"]
+    assert "Seatbelt" not in published
+    if language == "r":
+        assert kernel.shutdown_calls == 1
+        assert session.kernels.current("r") is None
+    else:
+        assert kernel.shutdown_calls == 0
+        assert session.kernels.kernel("python") is kernel
+
+
+def test_run_keeps_a_boundary_refusal_behind_two_context_wrappers(
+    monkeypatch, tmp_path
+):
+    """A relay that is not itself the boundary type still carries the decision.
+
+    The watchdog's ``_completed`` re-raises the original object. A second
+    handler can leave that object two ``__context__`` links down. The R
+    lease stays published because no Cell was sent.
+    """
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    typed = EgressBoundaryUnavailable(
+        {
+            "code": "egress_boundary_unavailable",
+            "reason": "mode flipped during execute",
+            "egress_mode": "allowlist",
+            "sandbox": dict(_PROVEN_SANDBOX),
+            "remedy": ["Set OPENAI4S_EGRESS=off"],
+        }
+    )
+    try:
+        raise typed
+    except EgressBoundaryUnavailable:
+        try:
+            raise RuntimeError("inner context")
+        except RuntimeError:
+            try:
+                raise RuntimeError("outer context")
+            except RuntimeError as wrapped:
+                buried = wrapped
+
+    harness = Harness()
+    harness.fail_run = buried
+    finished: list[tuple] = []
+    kernel = _LeaseKernel(_PROVEN_SANDBOX)
+    session = _session(tmp_path)
+    session.kernels.ensure("r", None, lambda: kernel)
+    result = _service_with_attempt(harness, finished, "attempt-wrap").execute(
+        session,
+        CellRequest("print(1)", "agent", language="r", stream=False),
+        lambda event: None,
+    )
+    assert result.executed is False
+    assert result.result["egress_boundary"]["reason"] == "mode flipped during execute"
+    assert finished == [("attempt-wrap", "egress_boundary_refused")]
+    assert kernel.shutdown_calls == 0
+    assert session.kernels.current("r") is not None
+
+
+def test_bootstrap_prefix_is_a_prepare_failure_when_egress_is_off(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    harness = Harness()
+    finished: list[tuple] = []
+
+    def prepare(_session, _language):
+        raise RuntimeError(
+            "kernel bootstrap failed: egress_boundary_unavailable: wrapped"
+        )
+
+    service = CellExecutionService(
+        replace(
+            harness.ports(),
+            prepare_language=prepare,
+            allocate_attempt=lambda *args: "attempt-off",
+            finish_attempt=lambda attempt_id, state, error: finished.append(
+                (attempt_id, state)
+            ),
+        ),
+        id_factory=lambda: "cell-off",
+    )
+    with pytest.raises(RuntimeError, match="kernel bootstrap failed"):
+        service.execute(
+            _session(tmp_path),
+            CellRequest("print(1)", "agent", stream=False),
+            lambda event: None,
+        )
+    assert finished == [("attempt-off", "prepare_failed")]
+
+
+def test_bootstrap_refusal_projects_the_kernel_posture(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    harness = Harness()
+    finished: list[tuple] = []
+
+    def prepare(_session, _language):
+        raise RuntimeError(
+            "kernel bootstrap failed: egress_boundary_unavailable: wrapped"
+        )
+
+    service = CellExecutionService(
+        replace(
+            harness.ports(),
+            prepare_language=prepare,
+            allocate_attempt=lambda *args: "attempt-posture",
+            finish_attempt=lambda attempt_id, state, error: finished.append(
+                (attempt_id, state)
+            ),
+        ),
+        id_factory=lambda: "cell-posture",
+    )
+    session = _session(tmp_path)
+    session.kernels = SimpleNamespace(
+        kernel=lambda language: SimpleNamespace(sandbox_status=dict(_UNPROVEN_SANDBOX))
+    )
+    result = service.execute(
+        session,
+        CellRequest("print(1)", "agent", stream=False),
+        lambda event: None,
+    )
+    sandbox = result.result["egress_boundary"]["sandbox"]
+    assert sandbox["network_policy"] == "not_enforced"
+    assert sandbox["state"] == "degraded"
+    assert sandbox["mode"] == "auto"
+    assert "should-not-leak" not in str(result.result["egress_boundary"])
+    assert finished == [("attempt-posture", "egress_boundary_refused")]
+
+
+@pytest.mark.parametrize("origin", ["agent", "user"])
+def test_r_bootstrap_string_is_an_egress_refusal(monkeypatch, tmp_path, origin):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    harness = Harness()
+    harness.runtime_error = (
+        "R kernel unavailable: R kernel bootstrap failed: "
+        "egress_boundary_unavailable: sandbox unproven"
+    )
+    finished: list[tuple] = []
+    session = _session(tmp_path)
+    session.kernels = SimpleNamespace(
+        kernel=lambda language: SimpleNamespace(sandbox_status=dict(_UNPROVEN_SANDBOX))
+    )
+    result = _service_with_attempt(harness, finished, "attempt-r").execute(
+        session,
+        CellRequest("summary(x)", origin, language="r", stream=False),
+        lambda event: None,
+    )
+    assert result.executed is False
+    assert result.result["error"].startswith("egress_boundary_unavailable:")
+    assert result.result["egress_boundary"]["sandbox"]["network_policy"] == (
+        "not_enforced"
+    )
+    assert finished == [("attempt-r", "egress_boundary_refused")]
+    assert "run" not in harness.order
+
+
+@pytest.mark.stubbed_backend
+def test_repl_r_execute_route_projects_a_bootstrap_refusal(monkeypatch, tmp_path):
+    """POST /frames/{id}/kernel/execute language=r, with a degraded R double."""
+
+    from openai4s.config import Config, LLMConfig
+    from openai4s.egress import EgressBoundaryUnavailable
+    from openai4s.kernel import r_kernel as r_kernel_mod
+    from openai4s.server import gateway as gateway_mod
+    from openai4s.store import get_store
+
+    monkeypatch.setenv("OPENAI4S_NOTEBOOK_REPL", "1")
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+
+    class DegradedR:
+        def __init__(self):
+            self.closed = False
+            self.argv = ("Rscript", "r_worker.R")
+            self.sandbox_status = dict(_UNPROVEN_SANDBOX)
+
+        def is_alive(self):
+            return not self.closed
+
+        def execute(self, code, origin="agent", **kwargs):
+            raise EgressBoundaryUnavailable(
+                {
+                    "code": "egress_boundary_unavailable",
+                    "reason": "sandbox unproven",
+                    "egress_mode": "allowlist",
+                    "sandbox": dict(_UNPROVEN_SANDBOX),
+                    "remedy": ["Set OPENAI4S_EGRESS=off"],
+                }
+            )
+
+        def shutdown(self):
+            self.closed = True
+
+        def interrupt(self):
+            return None
+
+    monkeypatch.setattr(r_kernel_mod, "spawn_r_kernel", lambda **kwargs: DegradedR())
+
+    class _Hub:
+        def emitter(self, root_frame_id):
+            return lambda event: None
+
+        def broadcast(self, root_frame_id, event):
+            return None
+
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    runner = gateway_mod.SessionRunner(cfg, _Hub(), start_idle_sweeper=False)
+    store = get_store(cfg.db_path)
+    fid = store.new_frame(kind="turn", project_id="default", status="ready")
+    handler = object.__new__(gateway_mod.make_handler(cfg, _Hub(), runner))
+    replies: list[tuple] = []
+    handler._query = lambda: {}
+    handler._body = lambda: {
+        "code": "print(1)",
+        "language": "r",
+        "wait": True,
+    }
+    handler._json = lambda obj, code=200: replies.append((code, obj))
+    handler._api("POST", f"/frames/{fid}/kernel/execute")
+
+    assert replies[-1][0] == 200
+    body = replies[-1][1]
+    assert body["status"] == "completed"
+    assert body["cell"]["status"] == "error"
+    assert str(body["cell"]["error"]).startswith("egress_boundary_unavailable:")
+    boundary = body["cell"].get("egress_boundary") or body.get("egress_boundary")
+    # The refused R worker is shut down inside bootstrap, so the Cell
+    # service may no longer have a posture to copy. The code is the contract.
+    if isinstance(boundary, dict):
+        assert boundary["code"] == "egress_boundary_unavailable"

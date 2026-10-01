@@ -369,7 +369,9 @@ class CellExecutionService:
                 else None
             )
         except BaseException as exc:
-            egress_decision = _egress_decision_from_failure(exc)
+            egress_decision = _egress_decision_from_failure(
+                exc, _session_sandbox_status(session, request.language)
+            )
             if egress_decision is not None:
                 return self._refuse_egress_boundary(
                     session,
@@ -429,6 +431,27 @@ class CellExecutionService:
                 generation_id,
             )
         if runtime_error is not None:
+            # R bootstrap is stringified before this service sees it:
+            # ``R kernel unavailable: R kernel bootstrap failed:
+            # egress_boundary_unavailable: …``. That happens before the
+            # posture precheck below, and the refused worker has already
+            # been shut down, so the precheck cannot recover the code.
+            egress_decision = _egress_decision_from_failure(
+                RuntimeError(runtime_error),
+                _session_sandbox_status(session, request.language),
+            )
+            if egress_decision is not None:
+                return self._refuse_egress_boundary(
+                    session,
+                    request,
+                    emit,
+                    index,
+                    cell_id,
+                    kernel_id,
+                    attempt_id,
+                    generation_id,
+                    egress_decision,
+                )
             return self._soft_error(
                 session,
                 request,
@@ -505,7 +528,9 @@ class CellExecutionService:
             with frame_scope(session.root_frame_id):
                 result = self.ports.run(session, request, cell_id, on_chunk, lease)
         except BaseException as exc:
-            egress_decision = _egress_decision_from_failure(exc)
+            egress_decision = _egress_decision_from_failure(
+                exc, _session_sandbox_status(session, request.language)
+            )
             if egress_decision is not None:
                 # The kernel is still usable: a boundary refusal sends no
                 # Cell, so the R lease stays published for a later Cell.
@@ -1057,59 +1082,24 @@ def activity_title(code: str, index: int) -> str:
     return f"Running analysis · cell {index}"
 
 
-def _egress_decision_from_failure(exc: BaseException) -> dict[str, Any] | None:
-    """Recover a stable allowlist refusal from a typed or wrapped failure.
+def _egress_decision_from_failure(
+    exc: BaseException,
+    sandbox_status: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Project a trusted boundary refusal, or None when ``exc`` is not one.
 
-    Bootstrap stores ``str(error)`` and the spawner re-raises a
-    ``RuntimeError`` with no cause. The code token is enough to rebuild the
-    decision. When the mode has already flipped back to off, the canonical
-    reason is used instead of the exception text, which can carry paths.
+    Recognition is ``egress.is_boundary_refusal``: a typed boundary
+    exception on the cause/context chain, or one of the two exact bootstrap
+    prefixes while allowlist is on. The measured ``sandbox_status`` fills a
+    prefix refusal when this session still has that kernel. A missing kernel
+    leaves the sandbox fields null.
     """
 
-    from openai4s.egress import (
-        EGRESS_BOUNDARY_UNAVAILABLE,
-        EgressBoundaryUnavailable,
-        cell_admission_refusal,
-    )
+    from openai4s.egress import boundary_refusal_decision, is_boundary_refusal
 
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        decision = getattr(current, "decision", None)
-        if isinstance(current, EgressBoundaryUnavailable) and isinstance(
-            decision, dict
-        ):
-            return dict(decision)
-        cause = current.__cause__
-        if isinstance(cause, BaseException):
-            current = cause
-            continue
-        context = current.__context__
-        if isinstance(context, EgressBoundaryUnavailable):
-            current = context
-            continue
-        break
-    if EGRESS_BOUNDARY_UNAVAILABLE not in str(exc):
+    if not is_boundary_refusal(exc):
         return None
-    fresh = cell_admission_refusal(None)
-    if fresh is not None:
-        return fresh
-    keys = (
-        "mode",
-        "state",
-        "backend",
-        "enforced",
-        "self_test_passed",
-        "network_policy",
-    )
-    return {
-        "code": EGRESS_BOUNDARY_UNAVAILABLE,
-        "reason": EgressBoundaryUnavailable.stable_reason,
-        "egress_mode": "allowlist",
-        "sandbox": {key: None for key in keys},
-        "remedy": list(EgressBoundaryUnavailable.stable_remedy),
-    }
+    return boundary_refusal_decision(exc, sandbox_status)
 
 
 def _session_sandbox_status(

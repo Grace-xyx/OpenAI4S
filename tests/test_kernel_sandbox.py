@@ -1742,7 +1742,11 @@ def _enforce_boundary_available() -> bool:
         return False
 
 
-_ENFORCE_BOUNDARY = _enforce_boundary_available()
+@pytest.fixture(scope="session")
+def enforce_boundary_available() -> bool:
+    """Probe a real enforce self-test once per session, not at collection."""
+
+    return _enforce_boundary_available()
 
 
 def _connection_was_blocked(info: object) -> bool:
@@ -1754,11 +1758,9 @@ def _connection_was_blocked(info: object) -> bool:
     return errno in _BLOCKED_ERRNOS
 
 
-@pytest.mark.skipif(
-    not _ENFORCE_BOUNDARY,
-    reason="this machine cannot enforce a kernel sandbox that blocks raw network",
-)
-def test_allowlist_enforce_runs_a_cell_and_blocks_raw_network(monkeypatch, tmp_path):
+def test_allowlist_enforce_runs_a_cell_and_blocks_raw_network(
+    monkeypatch, tmp_path, enforce_boundary_available
+):
     """A proven sandbox is admitted, and the Cell's own sockets stay blocked.
 
     Removing the admission gate leaves this green: the OS boundary, not the
@@ -1770,6 +1772,10 @@ def test_allowlist_enforce_runs_a_cell_and_blocks_raw_network(monkeypatch, tmp_p
     from openai4s.config import Config, LLMConfig
     from openai4s.host_dispatch import build_dispatcher
 
+    if not enforce_boundary_available:
+        pytest.skip(
+            "this machine cannot enforce a kernel sandbox that blocks raw network"
+        )
     monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "enforce")
     monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
     cfg = Config(
@@ -1831,43 +1837,8 @@ print(json.dumps({
     assert _connection_was_blocked(child), payload
 
 
-@pytest.mark.skipif(
-    not _ENFORCE_BOUNDARY,
-    reason="this machine cannot enforce a kernel sandbox that blocks raw network",
-)
-def test_allowlist_enforce_blocks_raw_network_from_r(monkeypatch, tmp_path):
-    from openai4s.kernel.r_kernel import resolve_r_interpreter, spawn_r_kernel
-
-    if not resolve_r_interpreter():
-        pytest.skip("Rscript is not available")
-    monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "enforce")
-    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
-    cell = """
-msg <- tryCatch({
-  con <- socketConnection(host="192.0.2.1", port=9, blocking=TRUE, open="rb", timeout=1)
-  close(con)
-  "connected"
-}, error=function(e) conditionMessage(e))
-cat(msg, "\\n")
-"""
-    kernel = spawn_r_kernel(cwd=str(tmp_path))
-    try:
-        result = kernel.execute(cell, origin="agent")
-    finally:
-        kernel.shutdown()
-    assert not result.get("error"), result
-    text = str(result.get("stdout") or "").lower()
-    assert "connected" not in text
-    assert "timed out" not in text and "timeout" not in text
-    assert any(
-        marker in text
-        for marker in (
-            "permission",
-            "unreachable",
-            "denied",
-            "cannot",
-            "failed",
-            "refused",
-            "not permitted",
-        )
-    ), text
+# No R sibling of the test above. Under Seatbelt, base-R socketConnection
+# reports "cannot open the connection" and "<host>:<port> cannot be opened",
+# the same family of text an unsandboxed Rscript emits. It does not surface
+# EPERM or an unreachable-route marker, so a string assertion cannot tell
+# the sandbox apart from a refused connection.

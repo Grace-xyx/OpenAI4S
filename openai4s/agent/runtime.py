@@ -1141,18 +1141,6 @@ class KernelGenerationRecorder:
         return str(generation_id) if generation_id else None
 
 
-def _is_egress_boundary_refusal(exc: BaseException) -> bool:
-    """True when a Cell refusal carries the stable allowlist boundary code."""
-
-    from openai4s.egress import EGRESS_BOUNDARY_UNAVAILABLE, EgressBoundaryUnavailable
-
-    if isinstance(exc, EgressBoundaryUnavailable):
-        return True
-    if getattr(exc, "code", None) == EGRESS_BOUNDARY_UNAVAILABLE:
-        return True
-    return str(exc).startswith(f"{EGRESS_BOUNDARY_UNAVAILABLE}:")
-
-
 @dataclass
 class LocalActionExecutor:
     """Execute one selected action against a run-scoped local runtime."""
@@ -1221,7 +1209,9 @@ class LocalActionExecutor:
             try:
                 self.admit_cell(action)
             except BaseException as exc:
-                if _is_egress_boundary_refusal(exc):
+                from openai4s.egress import is_boundary_refusal
+
+                if is_boundary_refusal(exc):
                     return self._egress_boundary_outcome(exc)
                 raise
             return self._execute_code(action, reply, state)
@@ -1420,7 +1410,9 @@ class LocalActionExecutor:
             if result is not None and artifact_receipts:
                 result["_openai4s_artifact_receipts"] = list(artifact_receipts)
         except BaseException as exc:
-            if _is_egress_boundary_refusal(exc):
+            from openai4s.egress import is_boundary_refusal
+
+            if is_boundary_refusal(exc):
                 try:
                     if hooks is not None:
                         failed_result = (

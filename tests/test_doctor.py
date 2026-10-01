@@ -906,6 +906,28 @@ def test_allowlist_fails_isolation_when_the_sandbox_is_off(cfg, monkeypatch):
     assert "Seatbelt" in check["remedy"] or "bubblewrap" in check["remedy"]
 
 
+def test_allowlist_keeps_the_detail_of_a_check_that_already_failed(cfg, monkeypatch):
+    """A failed self-test keeps its own sentence; the code is only a prefix."""
+
+    from openai4s.security.sandbox import SandboxUnavailableError
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "enforce")
+
+    def refusing(_workspace, **_kwargs):
+        raise SandboxUnavailableError("self-test failed under enforce")
+
+    monkeypatch.setattr("openai4s.security.sandbox.create_kernel_sandbox", refusing)
+    check = _by_name(doctor.report(cfg))["isolation"]
+    assert check["status"] == doctor.FAIL
+    assert check["detail"].startswith("egress_boundary_unavailable:")
+    assert "self-test failed under enforce" in check["detail"]
+    assert "could not be established" in check["detail"]
+    assert "Install bubblewrap" in check["remedy"]
+    assert "OPENAI4S_EGRESS=off" not in check["remedy"]
+    assert "admits a new Cell" not in check["detail"]
+
+
 def test_allowlist_keeps_a_proven_sandbox_and_fails_raw_network(cfg, monkeypatch):
     from openai4s.security.sandbox import KernelSandbox, SandboxStatus
 

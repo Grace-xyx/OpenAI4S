@@ -598,6 +598,85 @@ def test_cell_admission_follows_a_live_mode_switch(monkeypatch):
     assert egress.cell_admission_refusal(degraded) is None
 
 
+def test_boundary_refusal_recognizes_typed_exceptions_and_exact_prefixes(monkeypatch):
+    """The code token inside an unrelated message is not a refusal."""
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    decision = {
+        "code": "egress_boundary_unavailable",
+        "reason": "measured",
+        "egress_mode": "allowlist",
+        "sandbox": {"network_policy": "not_enforced"},
+        "remedy": ["Set OPENAI4S_EGRESS=off"],
+    }
+    typed = EgressBoundaryUnavailable(decision)
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    assert egress.is_boundary_refusal(typed) is True
+    assert egress.boundary_refusal_decision(typed)["reason"] == "measured"
+
+    try:
+        raise RuntimeError("watchdog relay") from typed
+    except RuntimeError as wrapped:
+        cause_wrapped = wrapped
+    assert egress.is_boundary_refusal(cause_wrapped) is True
+    assert egress.boundary_refusal_decision(cause_wrapped)["reason"] == "measured"
+
+    try:
+        raise typed
+    except EgressBoundaryUnavailable:
+        try:
+            raise RuntimeError("implicit context")
+        except RuntimeError as wrapped:
+            context_wrapped = wrapped
+    assert context_wrapped.__cause__ is None
+    assert egress.is_boundary_refusal(context_wrapped) is True
+
+    coded = PermissionError("egress_boundary_unavailable: cli admission")
+    coded.code = "egress_boundary_unavailable"
+    coded.decision = dict(decision)
+    assert egress.is_boundary_refusal(coded) is True
+
+    planted = RuntimeError(
+        "kernel worker exited unexpectedly: stderr said "
+        "egress_boundary_unavailable: planted"
+    )
+    assert egress.is_boundary_refusal(planted) is False
+    assert egress.boundary_refusal_decision(planted) is None
+    bare_prefix = RuntimeError("egress_boundary_unavailable: not a bootstrap wrap")
+    assert egress.is_boundary_refusal(bare_prefix) is False
+
+    bootstrap = RuntimeError(
+        "kernel bootstrap failed: egress_boundary_unavailable: wrapped"
+    )
+    r_bootstrap = RuntimeError(
+        "R kernel unavailable: R kernel bootstrap failed: "
+        "egress_boundary_unavailable: wrapped"
+    )
+    assert egress.is_boundary_refusal(bootstrap) is False
+    assert egress.is_boundary_refusal(r_bootstrap) is False
+    _allowlist(monkeypatch)
+    assert egress.is_boundary_refusal(bootstrap) is True
+    assert egress.is_boundary_refusal(r_bootstrap) is True
+    rebuilt = egress.boundary_refusal_decision(
+        bootstrap,
+        {
+            "mode": "auto",
+            "state": "degraded",
+            "backend": None,
+            "enforced": False,
+            "self_test_passed": False,
+            "network_policy": "not_enforced",
+            "workspace": "/tmp/openai4s-should-not-leak",
+        },
+    )
+    assert rebuilt["sandbox"]["network_policy"] == "not_enforced"
+    assert rebuilt["sandbox"]["state"] == "degraded"
+    assert "should-not-leak" not in json.dumps(rebuilt)
+    missing = egress.boundary_refusal_decision(r_bootstrap, None)
+    assert set(missing["sandbox"].values()) == {None}
+
+
 def test_boundary_holds_rejects_a_remote_backend_on_sandbox_status():
     from openai4s.security.sandbox import boundary_holds
     from openai4s.server.skill_network_admission import host_only_boundary_holds

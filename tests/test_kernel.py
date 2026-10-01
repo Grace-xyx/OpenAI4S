@@ -1681,6 +1681,47 @@ def _degraded_kernel_sandbox(tmp_path):
     )
 
 
+def test_off_mode_does_not_read_sandbox_status_before_the_cell(monkeypatch, tmp_path):
+    """The admission gate reads posture only after it knows the mode is allowlist."""
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    events: list[str] = []
+    real = Kernel.sandbox_status.fget
+
+    def counting(self):
+        events.append("status")
+        return real(self)
+
+    monkeypatch.setattr(Kernel, "sandbox_status", property(counting))
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    kernel = Kernel(
+        dispatcher=_echo_dispatcher,
+        cwd=str(tmp_path),
+        sandbox=_degraded_kernel_sandbox(tmp_path),
+    )
+    real_write = kernel._transport.write_line
+
+    def spy_write(line: str) -> None:
+        events.append("write")
+        real_write(line)
+
+    kernel._transport.write_line = spy_write
+    try:
+        events.clear()
+        result = kernel.execute("print(1)", origin="agent")
+        assert result["error"] is None
+        assert events[0] == "write"
+        assert "status" not in events[: events.index("write")]
+        monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+        events.clear()
+        with pytest.raises(EgressBoundaryUnavailable):
+            kernel.execute("print(2)", origin="agent")
+        assert events == ["status"]
+    finally:
+        kernel.shutdown()
+
+
 def test_allowlist_refuses_every_origin_before_a_frame_or_fifo(monkeypatch, tmp_path):
     """The gate sits after the liveness check and before any worker byte."""
 

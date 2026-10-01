@@ -549,15 +549,19 @@ class Kernel:
                     raise RuntimeError("kernel worker is not alive")
                 # Allowlist admits a Cell only after this kernel has proven it
                 # blocks raw network. The check is before any fifo or frame,
-                # and it applies to every origin, including bootstrap.
+                # and it applies to every origin, including bootstrap. Read
+                # the mode first: ``sandbox_status`` is not needed while
+                # egress is off, and it is a measured snapshot.
                 from openai4s.egress import (
                     EgressBoundaryUnavailable,
                     cell_admission_refusal,
+                    egress_mode,
                 )
 
-                decision = cell_admission_refusal(self.sandbox_status)
-                if decision is not None:
-                    raise EgressBoundaryUnavailable(decision)
+                if egress_mode() == "allowlist":
+                    decision = cell_admission_refusal(self.sandbox_status)
+                    if decision is not None:
+                        raise EgressBoundaryUnavailable(decision)
                 cell_id = str(cell_id or uuid.uuid4())
                 request: dict[str, Any] = {
                     "type": "execute",

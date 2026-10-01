@@ -357,8 +357,24 @@ def _with_allowlist_boundary(check: Check) -> Check:
     decision = cell_admission_refusal(check.facts)
     if decision is None:
         return check
-    remedy = " ".join(str(item) for item in decision.get("remedy") or [])
     code = str(decision.get("code") or "egress_boundary_unavailable")
+    # A check that already failed has its own detail and remedy. Prefix the
+    # stable code and leave that text in place. A warning or an otherwise
+    # passing probe has no failure of its own, so the boundary copy is the
+    # explanation.
+    if check.status == FAIL:
+        detail = str(check.detail or "")
+        prefix = f"{code}: "
+        if not detail.startswith(prefix):
+            detail = prefix + detail
+        return Check(
+            check.name,
+            FAIL,
+            detail,
+            check.remedy,
+            dict(check.facts),
+        )
+    remedy = " ".join(str(item) for item in decision.get("remedy") or [])
     reason = str(decision.get("reason") or check.detail)
     return Check(
         check.name,
