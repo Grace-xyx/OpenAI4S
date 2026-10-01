@@ -317,15 +317,19 @@ cd "$OPENAI4S_DATA_DIR"
 URL="http://$OPENAI4S_HOST:$OPENAI4S_PORT/"
 
 open_url() {
+  # $1 is what the browser opens (the bare origin by default). The fallback
+  # message only ever names the bare origin, so a sign-in URL never reaches
+  # the journal or ~/.xsession-errors.
+  local target="${1:-$URL}"
   # Ordered by how likely each is to exist on a headless-ish box; every one of
   # them is optional, and a server install with no browser must still serve.
   for opener in xdg-open gio open sensible-browser x-www-browser www-browser; do
     if command -v "$opener" >/dev/null 2>&1; then
-      "$opener" "$URL" >/dev/null 2>&1 &
+      "$opener" "$target" >/dev/null 2>&1 &
       return 0
     fi
   done
-  echo "OpenAI4S is serving at $URL" >&2
+  echo "OpenAI4S is serving at $URL (run 'openai4s url' for a sign-in link)" >&2
   return 0
 }
 
@@ -338,13 +342,23 @@ s.settimeout(0.4)
 sys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)
 PROBE
 then
-  # app.out no longer contains the token. Ask the running daemon for the
-  # sign-in URL (token in single-user mode, /login in team mode) and fall
-  # back to the bare origin if that command fails. First start is unchanged
-  # and still opens $URL.
-  SIGN_IN_URL="$("$PY" -m openai4s url 2>/dev/null | tail -n 1)" || SIGN_IN_URL=""
-  URL="${SIGN_IN_URL:-$URL}"
-  open_url
+  # app.out no longer contains the token, so ask for the sign-in URL (token
+  # in single-user mode, /login in team mode). The probe above only proves
+  # that *something* answers on the port: ask only when `status` verifies this
+  # data dir's own daemon (pidfile + start token + /health at its recorded
+  # endpoint). Anything else listening there gets the bare origin, never the
+  # access token. First start is unchanged and still opens $URL.
+  # relaunch-sign-in:begin
+  SIGN_IN_URL=""
+  if "$PY" -m openai4s status >/dev/null 2>&1; then
+    SIGN_IN_URL="$("$PY" -m openai4s url 2>/dev/null | tail -n 1)" || SIGN_IN_URL=""
+    case "$SIGN_IN_URL" in
+      http://*|https://*) ;;
+      *) SIGN_IN_URL="" ;;
+    esac
+  fi
+  # relaunch-sign-in:end
+  open_url "${SIGN_IN_URL:-$URL}"
   exit 0
 fi
 

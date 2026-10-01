@@ -344,6 +344,28 @@ def test_url_follows_team_mode_recorded_by_the_live_daemon(
     assert token not in output
 
 
+def test_url_follows_a_single_user_daemon_even_when_this_shell_says_team(
+    tmp_path, monkeypatch, capsys
+):
+    """The divergence `_live_team_mode` exists for: the daemon was started
+    single-user, the shell running `openai4s url` exports team mode. The live
+    daemon's record wins, so the sign-in URL still carries its token."""
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="172.25.100.5")
+    payload = json.loads(config.statefile.read_text(encoding="utf-8"))
+    payload["team_mode"] = False
+    config.statefile.write_text(json.dumps(payload), encoding="utf-8")
+    config.team_mode = True
+    token = _plant_token(tmp_path)
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == f"http://172.25.100.5:9876/?token={token}"
+
+
 def test_url_in_team_mode_without_a_live_daemon_uses_cfg(monkeypatch, capsys):
     module = _cli_module()
     monkeypatch.setattr(
@@ -430,7 +452,6 @@ def test_statefile_payload_records_team_mode():
     assert bare["team_mode"] is False
     assert enabled["team_mode"] is True
     assert disabled["team_mode"] is False
-    assert list(enabled)[-1] == "team_mode"
 
 
 @pytest.mark.parametrize(

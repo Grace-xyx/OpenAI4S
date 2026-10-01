@@ -311,8 +311,8 @@ def test_startup_auth_banner_names_the_recovery_and_brackets_ipv6():
     )
     assert team == "[openai4s] team mode: sign in at http://[::1]:8760/login"
     assert wild == "[openai4s] team mode: sign in at http://localhost:9/login"
-    token = "tok-03-" + uuid.uuid4().hex
-    assert token not in single and token not in team and token not in wild
+    assert "token" not in single.replace("access token required", "")
+    assert "?token=" not in single + team + wild
 
 
 def test_gateway_banner_omits_the_token(tmp_path, capsys):
@@ -581,18 +581,90 @@ def test_sign_in_url_keeps_the_single_user_token_and_brackets_ipv6(tmp_path):
     assert _sign_in_url(cfg, team_mode=True) == "http://localhost:9/login"
 
 
-def test_desktop_relaunch_asks_for_the_sign_in_url():
-    needle = (
-        'SIGN_IN_URL="$("$PY" -m openai4s url 2>/dev/null | tail -n 1)" '
-        '|| SIGN_IN_URL=""'
+_LAUNCHERS = ("scripts/build_macos_dmg.sh", "scripts/build_linux_bundle.sh")
+_RELAUNCH_TOKEN_URL = "http://127.0.0.1:8760/?token=tok-relaunch"
+
+
+def _relaunch_block(script: str) -> str:
+    text = Path(script).read_text(encoding="utf-8")
+    begin, end = "# relaunch-sign-in:begin", "# relaunch-sign-in:end"
+    assert text.count(begin) == 1 and text.count(end) == 1
+    return text[text.index(begin) : text.index(end)]
+
+
+@pytest.mark.parametrize("script", _LAUNCHERS)
+@pytest.mark.parametrize(
+    ("status_rc", "url_out", "expected"),
+    [
+        # Something answers on the port, but `status` cannot verify this data
+        # dir's daemon: whatever is listening must not receive the token.
+        (1, _RELAUNCH_TOKEN_URL, ""),
+        (2, _RELAUNCH_TOKEN_URL, ""),
+        # The verified daemon: its sign-in URL goes to the browser.
+        (0, _RELAUNCH_TOKEN_URL, _RELAUNCH_TOKEN_URL),
+        # A verified daemon whose `url` printed something that is not a URL.
+        (0, "error: no token yet", ""),
+    ],
+)
+def test_desktop_relaunch_signs_in_only_to_a_verified_daemon(
+    tmp_path, script, status_rc, url_out, expected
+):
+    """The relaunch branch is entered on a bare TCP connect, which anything
+    bound to the port passes. The launcher's own block runs here, unmodified,
+    under ``set -e`` with a stand-in interpreter."""
+    stub = tmp_path / "python"
+    stub.write_text(
+        "#!/bin/bash\n"
+        f'if [ "$1 $2 $3" = "-m openai4s status" ]; then exit {status_rc}; fi\n'
+        f'if [ "$1 $2 $3" = "-m openai4s url" ]; then echo \'{url_out}\'; exit 0; fi\n'
+        "exit 97\n",
+        encoding="utf-8",
     )
-    macos = Path("scripts/build_macos_dmg.sh").read_text(encoding="utf-8")
-    linux = Path("scripts/build_linux_bundle.sh").read_text(encoding="utf-8")
-    assert needle in macos
-    assert needle in linux
+    stub.chmod(0o755)
+    program = (
+        'set -e\nPY="$1"\n' + _relaunch_block(script) + 'printf "%s" "$SIGN_IN_URL"\n'
+    )
+    done = subprocess.run(
+        ["/bin/bash", "-c", program, "launcher", str(stub)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == expected
+
+
+def test_desktop_relaunch_opens_the_verified_url_or_the_bare_origin():
+    macos = Path(_LAUNCHERS[0]).read_text(encoding="utf-8")
+    linux = Path(_LAUNCHERS[1]).read_text(encoding="utf-8")
     assert 'exec /usr/bin/open "${SIGN_IN_URL:-$URL}"' in macos
-    assert 'exec "$PY" -u -m openai4s serve' in macos
-    assert macos.index(needle) < macos.index('exec "$PY" -u -m openai4s serve')
-    assert 'URL="${SIGN_IN_URL:-$URL}"' in linux
-    assert "( sleep 2; open_url )" in linux
-    assert linux.index(needle) < linux.index("( sleep 2; open_url )")
+    assert 'open_url "${SIGN_IN_URL:-$URL}"' in linux
+    # First start is unchanged: `serve` opens the browser itself.
+    assert macos.index("# relaunch-sign-in:end") < macos.index(
+        'exec "$PY" -u -m openai4s serve'
+    )
+    assert linux.index("# relaunch-sign-in:end") < linux.index("( sleep 2; open_url )")
+
+
+def test_linux_open_url_fallback_never_prints_the_sign_in_url(tmp_path):
+    """With no opener installed the launcher reports where it is serving on
+    stderr, which a desktop session sends to the journal or
+    ~/.xsession-errors. That line must name the bare origin only."""
+    text = Path(_LAUNCHERS[1]).read_text(encoding="utf-8")
+    start = text.index("open_url() {")
+    end = text.index("\n}\n", start) + 3
+    program = (
+        'URL="http://127.0.0.1:8760/"\n'
+        + text[start:end]
+        + f'open_url "{_RELAUNCH_TOKEN_URL}"\n'
+    )
+    done = subprocess.run(
+        ["/bin/bash", "-c", program],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path)},
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "tok-relaunch" not in done.stdout + done.stderr
+    assert "http://127.0.0.1:8760/" in done.stderr

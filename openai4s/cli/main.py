@@ -2126,9 +2126,9 @@ def _daemon_credential_hint(cfg) -> str:
         return (
             f"error: cannot read the daemon's access token at {path} "
             "(it is owner-only). The token lives in that file on the host the "
-            "daemon runs on, and `openai4s url` prints a sign-in link that "
-            "includes it. Run this as the user the daemon runs as, or set "
-            "OPENAI4S_TOKEN to the contents of that file."
+            "daemon runs on; in single-user mode, `openai4s url` run as the "
+            "daemon's user prints a sign-in link that includes it. Run this "
+            "as that user, or set OPENAI4S_TOKEN to the contents of that file."
         )
     return (
         f"error: no daemon access token at {path}. Start the daemon with "
