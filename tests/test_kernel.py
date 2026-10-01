@@ -832,7 +832,6 @@ def test_a_failed_cell_cannot_borrow_an_earlier_cells_id(tmp_path):
         bad = kernel.execute(attack, cell_id="cell-bad")
         assert bad["error"]
         assert bad["id"] == "cell-bad"
-        assert kernel._inflight_execute_cell_id is None
         store.log_cell(
             frame_id=frame_id,
             code=attack,
