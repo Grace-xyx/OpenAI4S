@@ -95,7 +95,8 @@ export type ArtifactIndexQuery = {
   signal?: AbortSignal;
 };
 
-function clampIndexLimit(limit: number | undefined): number {
+/** Page size for artifact-index. Empty, non-finite, or <1 falls back to the Files page. */
+export function clampIndexLimit(limit: number | undefined): number {
   if (limit == null || !Number.isFinite(limit) || limit < 1) return FILES_PAGE_SIZE;
   return Math.min(Math.max(1, Math.floor(limit)), FILES_MAX_PAGE_SIZE);
 }

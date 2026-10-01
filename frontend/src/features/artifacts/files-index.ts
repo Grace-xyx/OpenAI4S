@@ -1,6 +1,6 @@
 import { artifacts as artifactsSignal, artifactsFrameId, artifactsFrameGeneration, filesScope, projectArtifacts } from "../../stores/artifacts";
 import { _openGen, currentId, project } from "../../stores/session";
-import { fetchArtifactIndexPage, isApiStatus } from "./api";
+import { clampIndexLimit, fetchArtifactIndexPage, isApiStatus } from "./api";
 import { filesT } from "./copy";
 import {
   artifactsReadError,
@@ -18,7 +18,7 @@ import {
   filesQuery,
 } from "./state";
 import type { ArtifactIndexPage, ArtifactRow, FilesOrigin } from "./types";
-import { FILES_MAX_PAGE_SIZE, FILES_PAGE_SIZE } from "./types";
+import { FILES_PAGE_SIZE } from "./types";
 
 export type FilesFilter = {
   q: string;
@@ -122,11 +122,6 @@ export function filesGridArtifacts(): ArtifactRow[] {
   return filesIndexItems.value.filter((a) => (a.priority || 0) >= 0);
 }
 
-function clampLimit(limit: number): number {
-  if (!Number.isFinite(limit) || limit < 1) return FILES_PAGE_SIZE;
-  return Math.min(Math.max(1, Math.floor(limit)), FILES_MAX_PAGE_SIZE);
-}
-
 function fetchArtifactIndex(
   pid: string,
   filter: FilesFilter,
@@ -141,7 +136,6 @@ function fetchArtifactIndex(
     limit,
   });
 }
-
 
 function dropFilesCursor(): void {
   filesNextCursor.value = null;
@@ -169,7 +163,7 @@ export async function browseFiles(opts: BrowseFilesOpts = {}): Promise<void> {
   const req = ++filesIndexReq.value;
   const filter = currentFilesFilter();
   const scope = filesScope.value;
-  const limit = clampLimit(opts.limit ?? FILES_PAGE_SIZE);
+  const limit = clampIndexLimit(opts.limit ?? FILES_PAGE_SIZE);
   const pid = project.value || "";
   const fid = currentId.value;
   const fp = currentFilesFingerprint();
