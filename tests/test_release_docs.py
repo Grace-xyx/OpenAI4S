@@ -20,6 +20,7 @@ paragraph cannot hide one.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -122,6 +123,11 @@ def test_concrete_version_examples_match_the_tree_or_are_placeholders():
 
 UPGRADING = ROOT / "docs" / "upgrading.md"
 UPGRADING_ZH = ROOT / "docs" / "upgrading_zh.md"
+#: The 0.2.x guide is now the second section. Its checks read only that
+#: section, so a phrase the next-release section also uses cannot keep them
+#: green.
+FROM_020_EN = "## Upgrading from 0.2.x to 0.3.0"
+FROM_020_ZH = "## 从 0.2.x 升级到 0.3.0"
 MIGRATIONS = ROOT / "openai4s" / "storage" / "migrations.py"
 
 #: The schema the published 0.2.0 wheel creates. A fact about a release that
@@ -156,8 +162,8 @@ def test_the_upgrade_guide_states_the_schema_change_the_backup_and_no_downgrade(
         re.search(r"^SCHEMA_VERSION = (\d+)$", MIGRATIONS.read_text("utf-8"), re.M)[1]
     )
     assert current >= 32, "the upgrade guide names a schema this tree does not reach"
-    english = _normalised(UPGRADING)
-    chinese = _normalised(UPGRADING_ZH)
+    english = " ".join(_section(UPGRADING, FROM_020_EN).split())
+    chinese = " ".join(_section(UPGRADING_ZH, FROM_020_ZH).split())
     # A container keeps the database on its volume, not under ~/.openai4s, so
     # the backup instruction has to name the directory the image really uses.
     image_data_dir = re.search(
@@ -197,8 +203,8 @@ def test_the_upgrade_guide_says_what_old_records_and_a_failed_upgrade_look_like(
       unknown (the Store read relabels the `repl` rows, and never fills in a
       list).
     """
-    english = _normalised(UPGRADING)
-    chinese = _normalised(UPGRADING_ZH)
+    english = " ".join(_section(UPGRADING, FROM_020_EN).split())
+    chinese = " ".join(_section(UPGRADING_ZH, FROM_020_ZH).split())
 
     render = (ROOT / "frontend" / "src" / "features" / "md" / "render.ts").read_text(
         "utf-8"
@@ -261,6 +267,45 @@ def test_the_next_release_upgrade_section_names_the_migration_the_backup_and_no_
     assert "单人模式下，`openai4s url` 会打印登录地址。" in chinese
     assert "The child objects omit the `result` and `output` keys." in english
     assert "子代理对象不再包含 `result` 和 `output` 这两个键。" in chinese
+
+
+def _string_literals(path: Path) -> set[str]:
+    # The AST folds implicit concatenation, so a sentence split over several
+    # source lines is still one literal here.
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+
+def test_the_next_release_section_quotes_the_strings_the_code_returns():
+    """A client matches these strings, so both halves quote them exactly as
+    the code returns them: the three receipt-only `exec_interrupt` reasons,
+    the Cell a disagreeing claim is recorded as, and the state-only judge
+    marker. They are read from the code's own literals, so rewording one
+    fails here until both halves change."""
+    dispatch = _string_literals(ROOT / "openai4s" / "host_dispatch.py")
+    reasons = sorted(
+        text
+        for text in dispatch
+        if "delivery cannot be confirmed" in text or "cannot deliver the stop" in text
+    )
+    assert len(reasons) == 3, reasons
+    assert "unattributed" in _string_literals(
+        ROOT / "openai4s" / "kernel" / "manager.py"
+    )
+    assert "<redacted judge state>" in _string_literals(
+        ROOT / "openai4s" / "storage" / "metadata.py"
+    )
+    english = " ".join(_section(UPGRADING, NEXT_RELEASE_EN).split())
+    chinese = " ".join(_section(UPGRADING_ZH, NEXT_RELEASE_ZH).split())
+    for text in (english, chinese):
+        for reason in reasons:
+            assert f"`{reason}`" in text, reason
+        assert "`unattributed`" in text
+        assert '`[{"state": "<redacted judge state>"}]`' in text
 
 
 # -- what each platform can actually download ----------------------------------
