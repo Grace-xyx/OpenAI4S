@@ -1256,6 +1256,9 @@ def test_prune_drops_expired_terminals_and_clears_oldest_output_first(tmp_path):
         start("exec-live", "daemon-a")
         repo.mark_running("exec-live", 8_000)
         repo.save_output("exec-live", "C" * 40, False)
+        # Same-instance non-terminal rows now read as outcome_unknown unless
+        # this process still holds the job. This row is the held one.
+        background_mod._claim_live("exec-live")
         start("exec-foreign", "daemon-b")
         report = repo.prune(10_000, current_instance="daemon-a")
         assert report["deleted"] == 1
@@ -1292,6 +1295,7 @@ def test_prune_drops_expired_terminals_and_clears_oldest_output_first(tmp_path):
             == "running"
         )
     finally:
+        background_mod._forget_live("exec-live")
         store.close()
 
 
@@ -1352,8 +1356,7 @@ def test_interrupt_of_a_receipt_without_a_process_does_not_change_the_row(tmp_pa
         assert isinstance(report["interrupt_undelivered"], str)
         assert report["interrupt_undelivered"] == report["reason"]
         assert report["reason"] == (
-            "no live process handle for this exec in this daemon; "
-            "delivery cannot be confirmed"
+            "the daemon has restarted; delivery cannot be confirmed"
         )
         assert report["status"] == "done"
         assert report["stdout"] == "stay"
@@ -1622,4 +1625,314 @@ def test_finish_does_not_lose_to_a_later_mark_running(tmp_path):
         assert row["output"] == "final"
         assert row["error"] is None
     finally:
+        store.close()
+
+
+class _ExplodingLifetime:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        raise RuntimeError("lifetime exploded")
+
+
+def _bound(store, instance="daemon-a"):
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    return BoundBackgroundReceipts(
+        store.background_exec_receipts,
+        root_frame_id="root-a",
+        frame_id="root-a",
+        daemon_instance=instance,
+        owner_user_id=None,
+    )
+
+
+def _join_executor(executor, exec_id):
+    job = executor._get(exec_id)
+    assert job._thread is not None
+    job._thread.join(2)
+    assert not job._thread.is_alive()
+    return job
+
+
+def test_same_instance_peek_is_unknown_after_a_failed_terminal_write(tmp_path):
+    """A new dispatcher in this process must not poll a receipt whose write died.
+
+    The row stays non-terminal. The job is no longer in the process-wide live
+    set, so the read derives outcome_unknown instead of waiting for a restart.
+    """
+
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+
+    class _BoomFinish(BoundBackgroundReceipts):
+        def finish(self, *args, **kwargs):
+            raise RuntimeError("receipt finish failed")
+
+    original = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel(chunks=("x",)))
+    try:
+        original._bg()
+        inner = original._bg_executor.receipts
+        original._bg_executor.receipts = _BoomFinish(
+            inner._repository,
+            root_frame_id=inner._root_frame_id,
+            frame_id=inner._frame_id,
+            daemon_instance=inner._daemon_instance,
+            owner_user_id=inner._owner_user_id,
+        )
+        launched = original._m_exec_background({"code": "print('x')"})
+        _join(original, launched["exec_id"])
+        assert _raw(store, launched["exec_id"])["status"] in {"launching", "running"}
+        fresh = _dispatcher(
+            cfg,
+            root,
+            "daemon-a",
+            lambda: (_ for _ in ()).throw(AssertionError("replayed")),
+        )
+        peeked = fresh._m_exec_peek(launched["exec_id"])
+        assert peeked["status"] == "outcome_unknown"
+        assert peeked["done"] is True
+        assert peeked["source"] == "receipt"
+        assert _raw(store, launched["exec_id"])["status"] in {"launching", "running"}
+    finally:
+        original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_same_instance_peek_stays_running_while_the_job_is_live(tmp_path):
+    """The live set is per job. A second dispatcher still sees a running one."""
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    kernel = _WaitKernel()
+    original = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    try:
+        launched = original._m_exec_background({"code": "while True: pass"})
+        assert kernel.entered.wait(2)
+        other = _dispatcher(
+            cfg,
+            root,
+            "daemon-a",
+            lambda: (_ for _ in ()).throw(AssertionError("replayed")),
+        )
+        peeked = other._m_exec_peek(launched["exec_id"])
+        assert peeked["status"] == "running"
+        assert peeked["done"] is False
+        assert peeked["source"] == "receipt"
+        assert background_mod.background_job_is_live(launched["exec_id"]) is True
+    finally:
+        kernel.release.set()
+        original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_closed_spawn_records_launch_failed_when_lifetime_exit_raises(tmp_path):
+    _cfg, store = _cfg_store(tmp_path)
+    holder: dict = {}
+
+    def factory():
+        holder["executor"].shutdown(timeout_per_job=0.0)
+        return _OkKernel()
+
+    executor = BackgroundExecutor(
+        factory,
+        dispatcher=None,
+        lifetime_factory=_ExplodingLifetime,
+        receipts=_bound(store),
+    )
+    holder["executor"] = executor
+    try:
+        with pytest.raises(RuntimeError, match="background executor is closed"):
+            executor.launch("print(1)")
+        row = store._conn.execute(
+            "SELECT status, error FROM background_exec_receipts"
+        ).fetchone()
+        assert row["status"] == "launch_failed"
+        assert "closed" in str(row["error"])
+    finally:
+        store.close()
+
+
+def test_thread_start_failure_records_launch_failed_when_lifetime_exit_raises(
+    tmp_path, monkeypatch
+):
+    class _BoomThread(threading.Thread):
+        def start(self):
+            raise RuntimeError("thread refused")
+
+    monkeypatch.setattr(background_mod.threading, "Thread", _BoomThread)
+    _cfg, store = _cfg_store(tmp_path)
+    executor = BackgroundExecutor(
+        lambda: _OkKernel(),
+        dispatcher=None,
+        lifetime_factory=_ExplodingLifetime,
+        receipts=_bound(store),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="lifetime exploded"):
+            executor.launch("print(1)")
+        row = store._conn.execute(
+            "SELECT status, error FROM background_exec_receipts"
+        ).fetchone()
+        assert row["status"] == "launch_failed"
+        assert row["error"] == "background worker thread could not be started"
+    finally:
+        store.close()
+
+
+def test_terminal_prune_runs_again_only_after_the_injected_interval(tmp_path):
+    from openai4s.kernel.background import PRUNE_INTERVAL_MS
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    background_mod._receipt_prune_last_ms = None
+    calls = {"n": 0}
+
+    class _Counting(BoundBackgroundReceipts):
+        def prune(self, now):
+            calls["n"] += 1
+            return super().prune(now)
+
+    clock = {"now": 5_000_000}
+    _cfg, store = _cfg_store(tmp_path)
+    executor = BackgroundExecutor(
+        lambda: _OkKernel(),
+        dispatcher=None,
+        receipts=_Counting(
+            store.background_exec_receipts,
+            root_frame_id="root-a",
+            frame_id="root-a",
+            daemon_instance="daemon-a",
+            owner_user_id=None,
+        ),
+        clock_ms=lambda: clock["now"],
+    )
+
+    def finish(code: str) -> None:
+        launched = executor.launch(code)
+        _join_executor(executor, launched["exec_id"])
+
+    try:
+        finish("one")
+        assert calls["n"] == 1
+        clock["now"] += PRUNE_INTERVAL_MS - 1
+        finish("two")
+        assert calls["n"] == 1
+        clock["now"] += 1
+        finish("three")
+        assert calls["n"] == 2
+    finally:
+        background_mod._receipt_prune_last_ms = None
+        executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_quota_trim_clears_the_oldest_terminal_rows_in_one_update(tmp_path):
+    """Three oldest rows of five, one UPDATE. The per-row loop issued three."""
+
+    from openai4s.storage.background_execs import BackgroundExecReceiptRepository
+
+    _cfg, store = _cfg_store(tmp_path)
+    repo = BackgroundExecReceiptRepository(
+        store._conn,
+        store._lock,
+        clock_ms=lambda: 10_000,
+        max_output_bytes=80,
+        max_total_output_bytes=70,
+        terminal_ttl_ms=10**12,
+    )
+    bodies = ("A", "B", "C", "D", "E")
+    try:
+        for index, body in enumerate(bodies, start=1):
+            exec_id = f"exec-q{index}"
+            repo.begin(
+                exec_id=exec_id,
+                root_frame_id="root-a",
+                frame_id="root-a",
+                owner_user_id=None,
+                daemon_instance="daemon-a",
+                origin="agent",
+                code_sha256="ab" * 32,
+                code_chars=1,
+            )
+            repo.finish(
+                exec_id,
+                status="done",
+                error=None,
+                interrupted=False,
+                ended_at=1_000 * index,
+                output=body * 30,
+                truncated=False,
+            )
+        statements: list[str] = []
+        store._conn.set_trace_callback(statements.append)
+        try:
+            report = repo.prune(10_000, current_instance="daemon-a")
+        finally:
+            store._conn.set_trace_callback(None)
+        clears = [sql for sql in statements if "output=''" in sql]
+        assert len(clears) == 1
+        assert report["cleared"] == 3
+        for index, body in enumerate(bodies, start=1):
+            row = repo.get(
+                f"exec-q{index}",
+                root_frame_id="root-a",
+                current_instance="daemon-a",
+            )
+            assert row is not None
+            assert row["status"] == "done"
+            if index <= 3:
+                assert row["output"] == ""
+                assert row["output_truncated"] == 1
+            else:
+                assert row["output"] == body * 30
+    finally:
+        store.close()
+
+
+def test_receipt_interrupt_names_a_missing_handle_in_the_same_daemon(tmp_path):
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    original = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel(chunks=("stay",)))
+    try:
+        launched = original._m_exec_background({"code": "print('stay')"})
+        _join(original, launched["exec_id"])
+        same = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel())
+        report = same._m_exec_interrupt(launched["exec_id"])
+        assert isinstance(report["interrupt_undelivered"], str)
+        assert report["interrupt_undelivered"] == report["reason"]
+        assert report["reason"] == (
+            "this process no longer has a handle for this job; "
+            "delivery cannot be confirmed"
+        )
+        assert report["status"] == "done"
+    finally:
+        original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_receipt_daemon_instance_is_the_shared_process_id_when_unset(tmp_path):
+    from openai4s.host_dispatch import build_dispatcher
+    from openai4s.process_instance import PROCESS_INSTANCE_ID
+    from openai4s.server.session_recovery import (
+        PROCESS_INSTANCE_ID as recovery_instance,
+    )
+
+    assert recovery_instance is PROCESS_INSTANCE_ID
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    dispatcher = build_dispatcher(cfg, frame_id=root)
+    dispatcher.durable_background = True
+    dispatcher.background_kernel_factory = lambda: _OkKernel(chunks=("id",))
+    try:
+        assert getattr(dispatcher, "daemon_instance", None) in (None, "")
+        launched = dispatcher._m_exec_background({"code": "print(1)"})
+        _join(dispatcher, launched["exec_id"])
+        stored = _raw(store, launched["exec_id"])["daemon_instance"]
+        assert stored == PROCESS_INSTANCE_ID
+        assert stored == recovery_instance
+    finally:
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
         store.close()

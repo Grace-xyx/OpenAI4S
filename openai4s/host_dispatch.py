@@ -3192,7 +3192,8 @@ class HostDispatcher:
         host_calls still resolve against the same store/session.
         """
         if self._bg_executor is None:
-            from openai4s.kernel.background import DAEMON_INSTANCE, BackgroundExecutor
+            from openai4s.kernel.background import BackgroundExecutor
+            from openai4s.process_instance import PROCESS_INSTANCE_ID
 
             receipts = None
             if getattr(self, "durable_background", False):
@@ -3210,7 +3211,7 @@ class HostDispatcher:
                     if isinstance(user, str) and user.strip():
                         owner = user.strip()
                 configured = getattr(self, "daemon_instance", None)
-                instance = str(configured or DAEMON_INSTANCE)
+                instance = str(configured or PROCESS_INSTANCE_ID)
                 receipts = BoundBackgroundReceipts(
                     store.background_exec_receipts,
                     root_frame_id=root,
@@ -3284,15 +3285,22 @@ class HostDispatcher:
             row = receipts.get(str(exec_id))
             if row is None:
                 raise
+            from openai4s.process_instance import PROCESS_INSTANCE_ID
             from openai4s.storage.background_execs import project_receipt
 
             report = project_receipt(row)
             # The same string type the live path reports; `reason` repeats it
             # for callers written against the first receipt release.
-            reason = (
-                "no live process handle for this exec in this daemon; "
-                "delivery cannot be confirmed"
-            )
+            configured = getattr(self, "daemon_instance", None)
+            current = str(configured or PROCESS_INSTANCE_ID)
+            stored = str(row.get("daemon_instance") or "")
+            if stored == current:
+                reason = (
+                    "this process no longer has a handle for this job; "
+                    "delivery cannot be confirmed"
+                )
+            else:
+                reason = "the daemon has restarted; delivery cannot be confirmed"
             report["interrupt_undelivered"] = reason
             report["reason"] = reason
             return report

@@ -3,9 +3,9 @@
 A receipt is written before the worker exists. It stores a SHA-256 of the
 code and the character count, never the source. Output is a head snapshot,
 replaced wholesale on each flush. ``effective_status`` is the only rule that
-turns a non-terminal row from another daemon instance into
-``outcome_unknown``; ``get`` and ``list`` both use it, and neither rewrites
-the row.
+turns a non-terminal row into ``outcome_unknown``: the row's daemon instance
+is not the reader, or this process no longer holds the job. ``get`` and
+``list`` both use it, and neither rewrites the row.
 
 The constructor is passive. DDL is applied by the numbered Store migration.
 """
@@ -132,15 +132,22 @@ def bound_output(text: str, *, limit: int) -> tuple[str, int, bool]:
 
 
 def effective_status(row: Mapping[str, Any], current_instance: str) -> str:
-    """Non-terminal rows from another daemon read as ``outcome_unknown``.
+    """Non-terminal rows with no live owner read as ``outcome_unknown``.
 
-    This is the only derivation. It does not write.
+    This is the only derivation. It does not write. A row qualifies when its
+    ``daemon_instance`` is not ``current_instance``, or when this process has
+    no live job for its ``exec_id``. Terminal rows pass through.
     """
 
     status = str(row.get("status") or "")
-    if status not in TERMINAL_STATUSES and str(row.get("daemon_instance") or "") != str(
-        current_instance
-    ):
+    if status in TERMINAL_STATUSES:
+        return status
+    if str(row.get("daemon_instance") or "") != str(current_instance):
+        return OUTCOME_UNKNOWN
+    # Lazy: this repository must not import the kernel package at load.
+    from openai4s.kernel.background import background_job_is_live
+
+    if not background_job_is_live(str(row.get("exec_id") or "")):
         return OUTCOME_UNKNOWN
     return status
 
@@ -368,7 +375,9 @@ class BackgroundExecReceiptRepository:
         """Mark foreign non-terminal rows, drop expired terminals, trim output.
 
         Non-terminal rows are never deleted. Output is cleared from the oldest
-        terminal row first until the stored total is within the quota.
+        terminal row first until the stored total is within the quota. Victims
+        are chosen in one ordered read and cleared in fixed-size batches, so
+        the total is not recomputed once per row.
         """
 
         moment = int(now)
@@ -389,30 +398,54 @@ class BackgroundExecReceiptRepository:
                 "AND ended_at IS NOT NULL AND ended_at < ?",
                 (*terminals, cutoff),
             )
-            cleared = 0
-            total = self._output_total_locked()
-            while total > self._max_total_output_bytes:
-                victim = self._conn.execute(
-                    "SELECT exec_id, output_bytes FROM background_exec_receipts "
-                    f"WHERE status IN ({terminal_marks}) AND output_bytes>0 "
-                    "ORDER BY ended_at ASC, created_at ASC, exec_id ASC LIMIT 1",
-                    terminals,
-                ).fetchone()
-                if victim is None:
-                    break
-                self._conn.execute(
-                    "UPDATE background_exec_receipts SET output='', output_bytes=0, "
-                    "output_truncated=1, updated_at=? WHERE exec_id=?",
-                    (moment, victim["exec_id"]),
-                )
-                total -= int(victim["output_bytes"] or 0)
-                cleared += 1
+            cleared = self._clear_quota_locked(moment)
             self._conn.commit()
         return {
             "marked_unknown": int(marked.rowcount or 0),
             "deleted": int(deleted.rowcount or 0),
             "cleared": cleared,
         }
+
+    def _clear_quota_locked(self, moment: int) -> int:
+        """Clear oldest terminal output until the stored total is in quota.
+
+        Caller holds the repository lock. Order matches the previous per-row
+        loop: ``ended_at``, then ``created_at``, then ``exec_id``. One read
+        selects every victim; updates run in fixed-size batches.
+        """
+
+        total = self._output_total_locked()
+        excess = total - self._max_total_output_bytes
+        if excess <= 0:
+            return 0
+        terminals = tuple(sorted(TERMINAL_STATUSES))
+        marks = ",".join("?" for _ in terminals)
+        victims = self._conn.execute(
+            "SELECT exec_id, output_bytes FROM background_exec_receipts "
+            f"WHERE status IN ({marks}) AND output_bytes>0 "
+            "ORDER BY ended_at ASC, created_at ASC, exec_id ASC",
+            terminals,
+        ).fetchall()
+        chosen: list[str] = []
+        freed = 0
+        for victim in victims:
+            if freed >= excess:
+                break
+            chosen.append(str(victim["exec_id"]))
+            freed += int(victim["output_bytes"] or 0)
+        cleared = 0
+        batch = 400
+        for start in range(0, len(chosen), batch):
+            chunk = chosen[start : start + batch]
+            placeholders = ",".join("?" for _ in chunk)
+            result = self._conn.execute(
+                "UPDATE background_exec_receipts SET output='', output_bytes=0, "
+                "output_truncated=1, updated_at=? "
+                f"WHERE exec_id IN ({placeholders})",
+                (moment, *chunk),
+            )
+            cleared += int(result.rowcount or 0)
+        return cleared
 
     def _output_total_locked(self) -> int:
         row = self._conn.execute(

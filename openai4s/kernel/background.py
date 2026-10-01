@@ -34,9 +34,48 @@ from typing import Any
 MAX_PEEK_CHARS = 1_000_000
 _TRUNCATION_MARKER = f"\n...(truncated at {MAX_PEEK_CHARS} characters)"
 
-#: One id for this process. Web receipts and a restarted daemon compare it;
-#: a different value means the worker that owned the row is gone.
-DAEMON_INSTANCE = uuid.uuid4().hex
+#: Process-wide exec ids whose worker this process still owns. Slot claim
+#: inserts; publishing a terminal state, or failing the launch, removes.
+#: A non-terminal receipt whose id is absent reads as ``outcome_unknown``.
+#: That derivation does not rewrite the row.
+_live_guard = threading.Lock()
+_live_exec_ids: set[str] = set()
+
+#: At most one post-terminal receipt cleanup per process per this interval.
+#: The stamp is the last attempt, successful or not, so a failing pass does
+#: not retry on every later finish. A clock that moves backwards is due.
+PRUNE_INTERVAL_MS = 10 * 60 * 1000
+_prune_guard = threading.Lock()
+_receipt_prune_last_ms: int | None = None
+
+
+def background_job_is_live(exec_id: str) -> bool:
+    """True when this process still holds ``exec_id``."""
+
+    with _live_guard:
+        return str(exec_id) in _live_exec_ids
+
+
+def _claim_live(exec_id: str) -> None:
+    with _live_guard:
+        _live_exec_ids.add(str(exec_id))
+
+
+def _forget_live(exec_id: str) -> None:
+    with _live_guard:
+        _live_exec_ids.discard(str(exec_id))
+
+
+def _reserve_receipt_prune(now: int) -> bool:
+    """Return whether this process may run receipt cleanup at ``now``."""
+
+    global _receipt_prune_last_ms
+    with _prune_guard:
+        last = _receipt_prune_last_ms
+        if last is not None and 0 <= now - last < PRUNE_INTERVAL_MS:
+            return False
+        _receipt_prune_last_ms = now
+        return True
 
 
 class _BackgroundJob:
@@ -144,6 +183,7 @@ class BackgroundExecutor:
         *,
         lifetime_factory: Any = None,
         receipts: Any = None,
+        clock_ms: Any = None,
     ):
         # kernel_factory -> a fresh Kernel bound to `dispatcher`.
         self._kernel_factory = kernel_factory
@@ -154,6 +194,8 @@ class BackgroundExecutor:
         self._lifetime_factory = lifetime_factory
         # Bound Web receipt adapter. None keeps the job in process memory.
         self.receipts = receipts
+        # Milliseconds. Tests inject this so a rate-limited prune does not sleep.
+        self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
         self._jobs: dict[str, _BackgroundJob] = {}
         self._lock = threading.Lock()
         self._closed = False
@@ -220,12 +262,14 @@ class BackgroundExecutor:
                     f"host.exec_interrupt or wait for it to finish"
                 )
             self._jobs[exec_id] = job
+            _claim_live(exec_id)
         if self.receipts is not None:
             try:
                 self.receipts.begin(exec_id=exec_id, code=code, origin=origin)
             except Exception:
                 with self._lock:
                     self._jobs.pop(exec_id, None)
+                _forget_live(exec_id)
                 self._exit_lifetime(job)
                 raise RuntimeError(
                     "background receipt could not be recorded; refusing to start"
@@ -233,6 +277,7 @@ class BackgroundExecutor:
             except BaseException:
                 with self._lock:
                     self._jobs.pop(exec_id, None)
+                _forget_live(exec_id)
                 self._exit_lifetime(job)
                 raise
         try:
@@ -258,9 +303,14 @@ class BackgroundExecutor:
                 # nobody else has a handle on it.
                 self._jobs.pop(exec_id, None)
                 try:
-                    job._kernel.shutdown()
+                    try:
+                        job._kernel.shutdown()
+                    finally:
+                        self._exit_lifetime(job)
                 finally:
-                    self._exit_lifetime(job)
+                    # A lifetime-exit error must not skip the launch_failed
+                    # receipt. The explicit raise then replaces that error,
+                    # the same way an egress refusal keeps its own exception.
                     self._record_launch_failed(exec_id, "background executor is closed")
                     raise RuntimeError("background executor is closed")
 
@@ -371,9 +421,11 @@ class BackgroundExecutor:
             with self._lock:
                 self._jobs.pop(exec_id, None)
             try:
-                job._kernel.shutdown()
+                try:
+                    job._kernel.shutdown()
+                finally:
+                    self._exit_lifetime(job)
             finally:
-                self._exit_lifetime(job)
                 self._record_launch_failed(
                     exec_id, "background worker thread could not be started"
                 )
@@ -386,6 +438,7 @@ class BackgroundExecutor:
         }
 
     def _record_launch_failed(self, exec_id: str, error: str) -> None:
+        _forget_live(exec_id)
         receipts = self.receipts
         if receipts is None:
             return
@@ -395,12 +448,32 @@ class BackgroundExecutor:
                 status="launch_failed",
                 error=error,
                 interrupted=False,
-                ended_at=int(time.time() * 1000),
+                ended_at=int(self._clock_ms()),
                 output="",
                 truncated=False,
             )
         except Exception:
             return
+        self._prune_after_terminal(None)
+
+    def _prune_after_terminal(self, job: _BackgroundJob | None) -> None:
+        """Clean receipts after a terminal write, at most once per interval.
+
+        The job's terminal state is already recorded. A prune failure only
+        marks in-memory degradation and is not raised to the caller.
+        """
+
+        receipts = self.receipts
+        if receipts is None:
+            return
+        now = int(self._clock_ms())
+        if not _reserve_receipt_prune(now):
+            return
+        try:
+            receipts.prune(now)
+        except Exception:
+            if job is not None:
+                job.receipt_degraded = True
 
     def _mark_running(self, job: _BackgroundJob) -> None:
         receipts = self.receipts
@@ -500,33 +573,39 @@ class BackgroundExecutor:
 
     def _finish_receipt(self, job: _BackgroundJob) -> None:
         receipts = self.receipts
-        if receipts is None:
-            return
-        with job._lock:
-            timer = job._flush_timer
-            job._flush_timer = None
-            status = job.status
-            error = job.error
-            interrupted = job.interrupted
-            ended = job.ended_at
-            text = "".join(job._buf)
-            truncated = job._buf_truncated
-        if timer is not None:
-            timer.cancel()
-        if status not in ("done", "failed", "interrupted"):
-            status = "failed"
+        wrote = False
         try:
-            receipts.finish(
-                job.exec_id,
-                status=status,
-                error=error,
-                interrupted=interrupted,
-                ended_at=int(ended or time.time() * 1000),
-                output=text,
-                truncated=truncated,
-            )
-        except Exception:
-            job.receipt_degraded = True
+            if receipts is not None:
+                with job._lock:
+                    timer = job._flush_timer
+                    job._flush_timer = None
+                    status = job.status
+                    error = job.error
+                    interrupted = job.interrupted
+                    ended = job.ended_at
+                    text = "".join(job._buf)
+                    truncated = job._buf_truncated
+                if timer is not None:
+                    timer.cancel()
+                if status not in ("done", "failed", "interrupted"):
+                    status = "failed"
+                try:
+                    receipts.finish(
+                        job.exec_id,
+                        status=status,
+                        error=error,
+                        interrupted=interrupted,
+                        ended_at=int(ended or self._clock_ms()),
+                        output=text,
+                        truncated=truncated,
+                    )
+                    wrote = True
+                except Exception:
+                    job.receipt_degraded = True
+        finally:
+            _forget_live(job.exec_id)
+        if wrote:
+            self._prune_after_terminal(job)
 
     def _get(self, exec_id: str) -> _BackgroundJob:
         with self._lock:
