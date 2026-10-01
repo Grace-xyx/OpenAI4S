@@ -7,8 +7,20 @@ import { skillsCatalog } from "../../stores/customize";
 import { currentId, project, sessions } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { filesT } from "../artifacts/copy";
+import { bindComposer } from "../send/send";
 import { loadSkillsCatalog } from "./catalog";
-import { AC_DEBOUNCE_MS, AC_INDEX_LIMIT, ac, acClose, acPick, acUpdate } from "./composer";
+import {
+  AC_DEBOUNCE_MS,
+  AC_INDEX_LIMIT,
+  AC_INDEX_TIMEOUT_MS,
+  ac,
+  acClose,
+  acPending,
+  acPick,
+  acRender,
+  acUpdate,
+  bindComposerAutocomplete,
+} from "./composer";
 
 /** Just enough DOM for the composer popup (no jsdom here). */
 class El {
@@ -31,16 +43,46 @@ class El {
   insertBefore(child: El): El {
     return this.appendChild(child);
   }
+  remove(): void {
+    const parent = this.parentNode;
+    if (!parent) return;
+    parent.children = parent.children.filter((child) => child !== this);
+    this.parentNode = null;
+  }
 }
+
+type FakeKey = {
+  type: string;
+  key?: string;
+  shiftKey?: boolean;
+  isComposing?: boolean;
+  keyCode?: number;
+  target?: unknown;
+  stopped?: boolean;
+  preventDefault: () => void;
+  stopImmediatePropagation: () => void;
+};
 
 class Composer extends El {
   value = "";
   selectionStart = 0;
   scrollHeight = 40;
+  private listeners = new Map<string, Array<(e: FakeKey) => void>>();
   setSelectionRange(start: number): void {
     this.selectionStart = start;
   }
   focus(): void {}
+  addEventListener(type: string, fn: (e: FakeKey) => void): void {
+    const list = this.listeners.get(type) || [];
+    list.push(fn);
+    this.listeners.set(type, list);
+  }
+  emit(e: FakeKey): void {
+    for (const fn of this.listeners.get(e.type) || []) {
+      fn(e);
+      if (e.stopped) break;
+    }
+  }
 }
 
 let composer: Composer;
@@ -59,10 +101,14 @@ type Pending = {
 
 let inflight: Pending[] = [];
 
-/** Each artifact-index request waits until the test answers it. Abort is ignored. */
-function pendingIndex(): Pending[] {
+/**
+ * Each artifact-index request waits until the test answers it.
+ * `respectAbort` rejects on the signal; the default stub ignores abort so a
+ * late 200 still arrives after `acClose`.
+ */
+function pendingIndex(respectAbort = false): Pending[] {
   inflight = [];
-  vi.stubGlobal("fetch", (input: unknown) => {
+  vi.stubGlobal("fetch", (input: unknown, init?: { signal?: AbortSignal }) => {
     return new Promise((resolve, reject) => {
       let settled = false;
       const pending: Pending = {
@@ -82,6 +128,14 @@ function pendingIndex(): Pending[] {
           reject(err);
         },
       };
+      const signal = init?.signal;
+      if (respectAbort && signal) {
+        const onAbort = () => {
+          pending.reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
       inflight.push(pending);
     });
   });
@@ -108,12 +162,73 @@ function hintText(): string {
   return node ? node.textContent : "";
 }
 
+/** Literal copy. `filesT` returns the key itself when the entry is missing, so a length check cannot see that. */
+const HINTS = {
+  searching: ["正在搜索项目文件…", "Searching project files…"],
+  failed: [
+    "项目文件搜索失败，仅显示本会话文件",
+    "Project file search failed. Showing only this session's files.",
+  ],
+  recent: [
+    "显示最近的项目文件，输入文件名可搜索全部",
+    "Showing the most recent project files. Type a filename to search all of them.",
+  ],
+} as const;
+
+function expectHint(kind: keyof typeof HINTS, text = hintText()): void {
+  expect(HINTS[kind]).toContain(text);
+  expect(text.includes("ac.files.")).toBe(false);
+}
+
+function fakeKey(key: string): FakeKey {
+  const e: FakeKey = {
+    type: "keydown",
+    key,
+    target: composer,
+    preventDefault: () => {},
+    stopImmediatePropagation: () => {
+      e.stopped = true;
+    },
+  };
+  return e;
+}
+
+function bindKeys(): { dispatch: ReturnType<typeof vi.fn>; fire: (e: FakeKey) => void } {
+  const dispatch = vi.fn(() => Promise.resolve());
+  const listeners: Record<string, Array<(e: FakeKey) => void>> = {};
+  const root = {
+    dataset: {} as Record<string, string>,
+    addEventListener(type: string, fn: (e: FakeKey) => void) {
+      (listeners[type] ||= []).push(fn);
+    },
+  };
+  Object.assign(document, { documentElement: root });
+  bindComposerAutocomplete();
+  bindComposer(dispatch);
+  return {
+    dispatch,
+    fire(e: FakeKey) {
+      composer.emit(e);
+      if (!e.stopped) {
+        for (const fn of listeners.keydown || []) fn(e);
+      }
+    },
+  };
+}
+
 function labels(): string[] {
   return ac.items.map((item) => item.label);
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+    const ctrl = new AbortController();
+    setTimeout(() => {
+      ctrl.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    }, ms);
+    return ctrl.signal;
+  });
   resetStoreFields();
   acClose();
   inflight = [];
@@ -141,6 +256,7 @@ afterEach(() => {
   inflight = [];
   acClose();
   vi.clearAllTimers();
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -195,7 +311,8 @@ describe("composer @ mentions use one artifact-index page", () => {
     expect(pending).toHaveLength(2);
     pending[1]!.resolve(page([art({ id: "new", filename: "abc-new.txt", version_id: "v-new" })]));
     await newer;
-    pending[0]!.resolve(page([art({ id: "old", filename: "ab-old.txt", version_id: "v-old" })]));
+    // `abc-old.txt` still matches the newer query, so only the generation guard can drop it.
+    pending[0]!.resolve(page([art({ id: "old", filename: "abc-old.txt", version_id: "v-old" })]));
     await older;
     expect(ac.open).toBe(true);
     expect(labels()).toEqual(["abc-new.txt"]);
@@ -212,7 +329,7 @@ describe("composer @ mentions use one artifact-index page", () => {
     await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
     expect(pending).toHaveLength(1);
     expect(pending[0]!.url).toContain("/projects/proj%2F1/artifact-index?");
-    expect(hintText()).toBe(filesT("ac.files.searching"));
+    expectHint("searching");
     expect(labels()).toEqual(["ab-local.txt"]);
     project.value = "proj/2";
     pending[0]!.resolve(page([art({ id: "old", filename: "ab-old.txt", version_id: "v-old" })]));
@@ -256,7 +373,7 @@ describe("composer @ mentions use one artifact-index page", () => {
     expect(urls[0]).toContain("/projects/proj/artifact-index?q=abc&limit=20");
     expect(urls[0]).not.toMatch(/\/artifacts(?:\?|$)/);
     expect(labels()).toEqual(["abc-local.txt"]);
-    expect(hintText()).toBe(filesT("ac.files.failed"));
+    expectHint("failed");
     expect(ac.open).toBe(true);
   });
 
@@ -299,7 +416,7 @@ describe("composer @ mentions use one artifact-index page", () => {
     pending[0]!.resolve(page([art({ id: "recent", filename: "recent.txt", version_id: "v-recent" })]));
     await update;
     expect(labels()).toEqual(["recent.txt"]);
-    expect(hintText()).toBe(filesT("ac.files.recent"));
+    expectHint("recent");
   });
 
   it("sends only the last request of a 5-character burst", async () => {
@@ -346,7 +463,7 @@ describe("composer @ mentions use one artifact-index page", () => {
     type("@abc");
     const update = acUpdate();
     await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
-    expect(hintText()).toBe(filesT("ac.files.searching"));
+    expectHint("searching");
     expect(labels()).toEqual(["abc-local.txt"]);
     pending[0]!.resolve(page([art({ id: "remote", filename: "abc-remote.txt", version_id: "v-remote" })]));
     await update;
@@ -441,7 +558,18 @@ describe("filename-search hints", () => {
     );
     expect(src.toLowerCase()).not.toContain("full-text");
     expect(src.toLowerCase()).not.toContain("full text");
-    expect(filesT("ac.files.searching").length).toBeGreaterThan(0);
+    expectHint("searching", filesT("ac.files.searching"));
+    expectHint("failed", filesT("ac.files.failed"));
+    expectHint("recent", filesT("ac.files.recent"));
+    const css = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../../../openai4s/server/webui/style.css"),
+      "utf8",
+    );
+    const hintRule = css.slice(css.indexOf(".composer-ac .ac-hint{"), css.indexOf(".composer-ac .ac-hint{") + 240);
+    expect(hintRule).toContain("position:sticky");
+    expect(hintRule).toContain("bottom:0");
+    expect(hintRule).toContain("var(--bg)");
+    expect(css).toContain(".composer-ac .ac-list{overflow:auto");
   });
 });
 
@@ -485,5 +613,262 @@ describe("the shared skills catalog", () => {
     answer();
     await expect(first).resolves.toEqual(SKILLS);
     expect(requests).toBe(1);
+  });
+});
+
+describe("applied rows stay up while the next @ search is in flight", () => {
+  it("refilters the page already applied instead of replacing it with this session", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    type("@pl");
+    const first = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    pending[0]!.resolve(
+      page([
+        art({ id: "plot", filename: "plot.png", version_id: "v-plot" }),
+        art({ id: "extra", filename: "extra-plot.txt", version_id: "v-extra" }),
+      ]),
+    );
+    await first;
+    expect(labels()).toEqual(["plot.png", "extra-plot.txt"]);
+
+    type("@plo");
+    const second = acUpdate();
+    expect(acPending()).toBe(true);
+    expect(ac.open).toBe(true);
+    expect(labels()).toEqual(["plot.png", "extra-plot.txt"]);
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    pending[1]!.resolve(page([art({ id: "plot", filename: "plot.png", version_id: "v-plot" })]));
+    await second;
+    expect(labels()).toEqual(["plot.png"]);
+  });
+
+  it("keeps the highlighted insert across a notice redraw and a reorder", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [
+      art({ id: "plot", filename: "plot.png", version_id: "v-plot" }),
+      art({ id: "plan", filename: "plan.md", version_id: "v-plan" }),
+    ];
+    const pending = pendingIndex();
+    type("@p");
+    const update = acUpdate();
+    expect(labels()).toEqual(["plot.png", "plan.md"]);
+    ac.idx = 1;
+    acRender();
+    const list = popup?.children.find((child) => String(child.className).split(/\s+/).includes("ac-list"));
+    const highlighted = list?.children.find((child) => String(child.className).split(/\s+/).includes("on"));
+    expect(highlighted).toBeTruthy();
+
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    expectHint("searching");
+    expect(ac.items[ac.idx]?.insert).toBe("plan.md#v-plan");
+    expect(highlighted?.parentNode).toBe(list);
+    const hint = popup?.children.find((child) => String(child.className).split(/\s+/).includes("ac-hint"));
+    expect(hint?.parentNode).toBe(popup);
+    expect(list?.children.some((child) => String(child.className).split(/\s+/).includes("ac-hint"))).toBe(false);
+
+    pending[0]!.resolve(
+      page([
+        art({ id: "pca", filename: "pca.csv", version_id: "v-pca" }),
+        art({ id: "plot", filename: "plot.png", version_id: "v-plot" }),
+        art({ id: "plan", filename: "plan.md", version_id: "v-plan" }),
+      ]),
+    );
+    await update;
+    expect(ac.items[ac.idx]?.insert).toBe("plan.md#v-plan");
+    expect(labels()[0]).toBe("pca.csv");
+
+    type("@pl");
+    const narrowed = acUpdate();
+    expect(acPending()).toBe(true);
+    expect(labels()).toEqual(["plot.png", "plan.md"]);
+    expect(ac.items[ac.idx]?.insert).toBe("plan.md#v-plan");
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    pending[1]!.resolve(page([art({ id: "plan", filename: "plan.md", version_id: "v-plan" })]));
+    await narrowed;
+  });
+});
+
+describe("a dismiss invalidates a late page", () => {
+  async function startSearch(respectAbort: boolean): Promise<{ pending: Pending[]; update: Promise<void> }> {
+    project.value = "proj-dismiss";
+    currentId.value = "sess";
+    artifacts.value = [art({ id: "local", filename: "abc-local.txt", version_id: "v-local" })];
+    const pending = pendingIndex(respectAbort);
+    type("@abc");
+    const update = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    expect(pending).toHaveLength(1);
+    expect(acPending()).toBe(true);
+    expect(ac.open).toBe(true);
+    return { pending, update };
+  }
+
+  function deliverLate(pending: Pending[]): void {
+    pending[0]?.resolve(page([art({ id: "late", filename: "abc-late.txt", version_id: "v-late" })]));
+  }
+
+  it.each([true, false])(
+    "Escape, blur, and pick ignore a late 200 (abort respected=%s)",
+    async (respectAbort) => {
+      const keys = bindKeys();
+      const escape = await startSearch(respectAbort);
+      keys.fire(fakeKey("Escape"));
+      expect(ac.open).toBe(false);
+      expect(acPending()).toBe(false);
+      deliverLate(escape.pending);
+      await escape.update;
+      expect(ac.open).toBe(false);
+      expect(labels()).not.toContain("abc-late.txt");
+      expect(hintText()).toBe("");
+
+      const blur = await startSearch(respectAbort);
+      const shown = labels();
+      composer.emit({ ...fakeKey("unused"), type: "blur" });
+      expect(acPending()).toBe(false);
+      deliverLate(blur.pending);
+      await blur.update;
+      expect(labels()).toEqual(shown);
+      expect(labels()).not.toContain("abc-late.txt");
+      await vi.advanceTimersByTimeAsync(120);
+      expect(ac.open).toBe(false);
+
+      const pick = await startSearch(respectAbort);
+      acPick(0);
+      expect(composer.value).toBe("@abc-local.txt#v-local ");
+      type("@abc");
+      deliverLate(pick.pending);
+      await pick.update;
+      expect(ac.open).toBe(false);
+      expect(labels()).not.toContain("abc-late.txt");
+      expect(hintText()).toBe("");
+    },
+  );
+
+  it.each([true, false])(
+    "Escape during an empty debounce cancels the search (abort respected=%s)",
+    async (respectAbort) => {
+      project.value = "proj";
+      artifacts.value = [];
+      const pending = pendingIndex(respectAbort);
+      type("@zzz");
+      const update = acUpdate();
+      expect(ac.open).toBe(false);
+      expect(acPending()).toBe(true);
+      bindKeys().fire(fakeKey("Escape"));
+      expect(acPending()).toBe(false);
+      await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+      await update;
+      expect(pending).toHaveLength(0);
+      expect(ac.open).toBe(false);
+    },
+  );
+});
+
+describe("Enter waits for the in-flight page", () => {
+  it("does not send, then completes from the highlighted row once the page lands", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [art({ id: "plot", filename: "plot.png", version_id: "v-session" })];
+    const pending = pendingIndex();
+    const keys = bindKeys();
+    type("@plot");
+    const update = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    expect(acPending()).toBe(true);
+    expect(ac.items[ac.idx]?.insert).toBe("plot.png#v-session");
+    keys.fire(fakeKey("Enter"));
+    expect(keys.dispatch).not.toHaveBeenCalled();
+    expect(composer.value).toBe("@plot");
+    pending[0]!.resolve(page([art({ id: "plot", filename: "plot.png", version_id: "v-server" })]));
+    await update;
+    expect(keys.dispatch).not.toHaveBeenCalled();
+    expect(composer.value).toBe("@plot.png#v-server ");
+    expect(ac.open).toBe(false);
+  });
+
+  it("does nothing when the page that lands has no rows", async () => {
+    project.value = "proj";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    const keys = bindKeys();
+    type("@zzz");
+    const update = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    expect(acPending()).toBe(true);
+    keys.fire(fakeKey("Enter"));
+    expect(keys.dispatch).not.toHaveBeenCalled();
+    pending[0]!.resolve(page([]));
+    await update;
+    expect(composer.value).toBe("@zzz");
+    expect(ac.open).toBe(false);
+    expect(keys.dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("a notice with no rows", () => {
+  it("closes the popup when the recent page or the failure has nothing to list", async () => {
+    project.value = "proj";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    type("@");
+    const recent = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    pending[0]!.resolve(page([]));
+    await recent;
+    expect(ac.open).toBe(false);
+    expect(hintText()).toBe("");
+
+    vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
+    type("@zzz");
+    const failed = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    await failed;
+    expect(ac.open).toBe(false);
+    expect(hintText()).toBe("");
+  });
+});
+
+describe("an index request that times out", () => {
+  it("shows the failure hint and does not treat a user abort as that failure", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [art({ id: "local", filename: "abc-local.txt", version_id: "v-local" })];
+    vi.stubGlobal("fetch", (_input: unknown, init?: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        const fail = () => {
+          const reason = signal?.reason;
+          reject(reason instanceof Error ? reason : Object.assign(new Error("aborted"), { name: "AbortError" }));
+        };
+        if (!signal) return;
+        if (signal.aborted) fail();
+        else signal.addEventListener("abort", fail, { once: true });
+      });
+    });
+    type("@abc");
+    const update = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    expect(AbortSignal.timeout).toHaveBeenCalledWith(AC_INDEX_TIMEOUT_MS);
+    expectHint("searching");
+    await vi.advanceTimersByTimeAsync(AC_INDEX_TIMEOUT_MS);
+    await update;
+    expect(labels()).toEqual(["abc-local.txt"]);
+    expectHint("failed");
+    expect(ac.open).toBe(true);
+
+    const pending = pendingIndex(true);
+    type("@abcd");
+    const next = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    expect(acPending()).toBe(true);
+    bindKeys().fire(fakeKey("Escape"));
+    pending[0]?.resolve(page([art({ id: "late", filename: "abcd-late.txt", version_id: "v-late" })]));
+    await next;
+    expect(ac.open).toBe(false);
+    expect(hintText()).toBe("");
   });
 });

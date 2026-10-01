@@ -5,11 +5,15 @@
  * `@` files (one artifact-index page + this session, version-pinned),
  * `#` sessions, `/` skills. Popup is `#composer-ac`. `ac` is the live
  * controller hung on window so F-11's send() keydown can see `ac.open`.
+ * `acPending()` is true while an `@` search is debouncing or in flight;
+ * Enter and Tab wait for that page instead of sending a bare `@name`.
  *
  * `@` does not keep a project-wide cache and does not call
  * `GET /projects/{pid}/artifacts`. A page is one filename query, limit 20.
  * A response whose project, session, or update generation no longer matches
- * is discarded. Hidden rows (`priority < 0`) stay out.
+ * is discarded. Hidden rows (`priority < 0`) stay out. A user dismiss
+ * (Escape, blur, pick) bumps the generation so a late page cannot reopen
+ * the popup. An empty paint inside `showFilePopup` does not.
  */
 
 import { t } from "../../i18n/runtime";
@@ -52,6 +56,8 @@ export const ac: AcState = {
 export const AC_DEBOUNCE_MS = 150;
 /** Rows asked of artifact-index. The popup still caps at `AC_LIMIT` (8). */
 export const AC_INDEX_LIMIT = 20;
+/** Abort an index request that has not settled. A user abort is not a failure hint. */
+export const AC_INDEX_TIMEOUT_MS = 8000;
 
 type AcNotice = "loading" | "error" | "recent";
 
@@ -74,12 +80,21 @@ type AcDecision =
   | { kind: "local" }
   | { kind: "close" };
 
-/** Bumped by every `acUpdate`. A load that settles after a newer one started is dropped. */
+/**
+ * Bumped by every `acUpdate` and by a user dismiss. A load that settles
+ * after a newer generation started is dropped.
+ */
 let acSeq = 0;
 let acNotice: AcNotice | null = null;
 let acTimer: ReturnType<typeof setTimeout> | null = null;
 let acAbort: AbortController | null = null;
 let debounceResolve: (() => void) | null = null;
+/** Last rows actually applied for this anchor. Keystrokes re-filter these, not a fresh session list. */
+let appliedItems: AcItem[] = [];
+let appliedPid = "";
+let appliedSession = "";
+/** Enter/Tab landed while a search was in flight. Completed when that page settles, if the token is still there. */
+let acAcceptArmed = false;
 
 function projectId(): string {
   return effProject() || "";
@@ -87,6 +102,11 @@ function projectId(): string {
 
 function sessionKey(): string {
   return currentId.value || "";
+}
+
+/** True while an `@` search is waiting out the debounce or the index request. */
+export function acPending(): boolean {
+  return acTimer !== null || acAbort !== null;
 }
 
 function isShownArtifact(row: ArtifactLike | null | undefined): row is ArtifactLike {
@@ -101,10 +121,6 @@ function sessionCandidates(): ArtifactLike[] {
 
 function toItems(rows: ArtifactLike[]): AcItem[] {
   return rows.map((a) => artifactToAcItem(a, currentId.value, t("ac.fromOtherSession")));
-}
-
-function isAbortError(err: unknown): boolean {
-  return !!err && typeof err === "object" && (err as { name?: string }).name === "AbortError";
 }
 
 function clearDebounce(): void {
@@ -130,6 +146,12 @@ function cancelFileSearch(): void {
   abortInFlight();
 }
 
+function forgetApplied(): void {
+  appliedItems = [];
+  appliedPid = "";
+  appliedSession = "";
+}
+
 /**
  * A newer keystroke owns the popup: leave it alone.
  * The project or session moved under this same update: do not render the
@@ -144,20 +166,61 @@ function decide(token: AcToken): AcDecision {
   return { kind: "apply", now };
 }
 
+function sameAnchor(d: { trigger: string; start: number }): boolean {
+  return ac.trigger === d.trigger && ac.start === d.start;
+}
+
+function canRefine(d: ComposerDetect): boolean {
+  return (
+    d.trigger === "@" &&
+    sameAnchor(d) &&
+    appliedPid === projectId() &&
+    appliedSession === sessionKey() &&
+    appliedItems.length > 0
+  );
+}
+
+function nextIndex(items: AcItem[], keep: boolean): number {
+  if (!keep || items.length === 0) return 0;
+  const prev = ac.items[ac.idx]?.insert;
+  return Math.max(0, items.findIndex((item) => item.insert === prev));
+}
+
+function sameItemList(a: AcItem[], b: AcItem[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.insert !== y.insert || x.label !== y.label || x.sub !== y.sub) return false;
+  }
+  return true;
+}
+
+function isHintNode(node: Element): boolean {
+  return String(node.className).split(/\s+/).includes("ac-hint");
+}
+
 function settle(token: AcToken, rows: ArtifactLike[], notice: AcNotice | null): void {
   const decision = decide(token);
   if (decision.kind === "drop") return;
   if (decision.kind === "apply") {
     showFilePopup(rows, decision.now, notice);
+    finishArmedAccept();
     return;
   }
   if (decision.kind === "local") {
     const now = acDetect();
-    if (!now || now.trigger !== "@") acClose();
-    else showFilePopup(sessionCandidates(), now, null);
+    if (!now || now.trigger !== "@") {
+      acAcceptArmed = false;
+      hidePopup();
+    } else {
+      showFilePopup(sessionCandidates(), now, null);
+      finishArmedAccept();
+    }
     return;
   }
-  acClose();
+  acAcceptArmed = false;
+  hidePopup();
 }
 
 export function acDetect(): ComposerDetect | null {
@@ -205,37 +268,95 @@ export function ensureComposerAc(): HTMLElement | null {
   return box;
 }
 
-export function acClose(): void {
+/** Hide the popup without invalidating an in-flight search. */
+function hidePopup(): void {
   ac.open = false;
   ac.items = [];
   ac.idx = 0;
   acNotice = null;
-  cancelFileSearch();
   const b = $("#composer-ac");
   if (!b) return;
   b.classList.add("hidden");
   b.innerHTML = "";
 }
 
-function showFilePopup(rows: ArtifactLike[], d: ComposerDetect, notice: AcNotice | null): void {
-  const items = rankComposerItems(toItems(rows), d.query);
-  if (!items.length && !notice) {
-    acClose();
+export function acClose(): void {
+  acSeq += 1;
+  acAcceptArmed = false;
+  cancelFileSearch();
+  forgetApplied();
+  ac.trigger = "";
+  ac.start = 0;
+  hidePopup();
+}
+
+function rememberApplied(items: AcItem[]): void {
+  appliedItems = items;
+  appliedPid = projectId();
+  appliedSession = sessionKey();
+}
+
+/**
+ * Paint `@` rows. `replaceApplied` stores them as the set later keystrokes
+ * re-filter. An empty non-loading paint hides without bumping `acSeq`.
+ * Recent-page and failure hints with no rows are not left on screen.
+ */
+function publishFileItems(
+  items: AcItem[],
+  d: ComposerDetect,
+  notice: AcNotice | null,
+  replaceApplied: boolean,
+): void {
+  if (!items.length && notice !== "loading") {
+    if (replaceApplied) forgetApplied();
+    hidePopup();
     return;
   }
+  const keep = sameAnchor(d);
+  const idx = nextIndex(items, keep);
+  const rowsSame = keep && ac.idx === idx && sameItemList(ac.items, items);
   acNotice = notice;
   ac.items = items;
-  ac.idx = 0;
+  ac.idx = items.length ? idx : 0;
   ac.trigger = d.trigger;
   ac.start = d.start;
   ac.open = items.length > 0;
+  if (replaceApplied) rememberApplied(items);
+  if (rowsSame) {
+    syncHint();
+    return;
+  }
   acRender();
+}
+
+function showFilePopup(rows: ArtifactLike[], d: ComposerDetect, notice: AcNotice | null): void {
+  publishFileItems(rankComposerItems(toItems(rows), d.query), d, notice, true);
+}
+
+function refineApplied(d: ComposerDetect, notice: AcNotice | null): void {
+  publishFileItems(rankComposerItems(appliedItems, d.query), d, notice, false);
+}
+
+function syncHint(): void {
+  const box = ensureComposerAc();
+  if (!box) return;
+  const kids = Array.from(box.children);
+  const hint = kids.find((node) => isHintNode(node)) as HTMLElement | undefined;
+  if (!acNotice) {
+    hint?.remove();
+  } else {
+    const text = filesT(NOTICE_KEY[acNotice]);
+    if (hint) hint.textContent = text;
+    else box.appendChild(el("div", "ac-hint", text));
+  }
+  box.classList.remove("hidden");
 }
 
 export function acRender(): void {
   const box = ensureComposerAc();
   if (!box) return;
   box.innerHTML = "";
+  const list = el("div", "ac-list");
   ac.items.forEach((it, i) => {
     const row = el("div", "ac-item" + (i === ac.idx ? " on" : ""));
     row.appendChild(el("span", "ac-lbl", ac.trigger + (it.label || "")));
@@ -244,8 +365,9 @@ export function acRender(): void {
       e.preventDefault();
       acPick(i);
     };
-    box.appendChild(row);
+    list.appendChild(row);
   });
+  box.appendChild(list);
   if (acNotice) box.appendChild(el("div", "ac-hint", filesT(NOTICE_KEY[acNotice])));
   box.classList.remove("hidden");
 }
@@ -267,6 +389,15 @@ export function acPick(i: number): void {
   c.focus();
 }
 
+function finishArmedAccept(): void {
+  if (!acAcceptArmed) return;
+  acAcceptArmed = false;
+  if (!ac.open || ac.items.length === 0) return;
+  const now = acDetect();
+  if (!now || now.trigger !== "@" || now.start !== ac.start) return;
+  acPick(ac.idx);
+}
+
 async function runFileSearch(seq: number): Promise<void> {
   if (seq !== acSeq) return;
   const d = acDetect();
@@ -284,14 +415,16 @@ async function runFileSearch(seq: number): Promise<void> {
     settle(token, sessionCandidates(), null);
     return;
   }
-  showFilePopup(sessionCandidates(), d, "loading");
+  if (canRefine(d)) refineApplied(d, "loading");
+  else showFilePopup(sessionCandidates(), d, "loading");
   const ctrl = new AbortController();
+  const signal = AbortSignal.any([ctrl.signal, AbortSignal.timeout(AC_INDEX_TIMEOUT_MS)]);
   acAbort = ctrl;
   try {
-    const merged = await acProjectFiles(token.query, ctrl.signal);
+    const merged = await acProjectFiles(token.query, signal);
     settle(token, merged, token.query ? null : "recent");
-  } catch (err) {
-    if (isAbortError(err)) return;
+  } catch {
+    if (ctrl.signal.aborted) return;
     settle(token, sessionCandidates(), "error");
   } finally {
     if (acAbort === ctrl) acAbort = null;
@@ -299,12 +432,13 @@ async function runFileSearch(seq: number): Promise<void> {
 }
 
 function scheduleFileSearch(seq: number): Promise<void> {
+  const d = acDetect();
+  const refine = !!d && d.trigger === "@" && canRefine(d);
   clearDebounce();
   abortInFlight();
-  const d = acDetect();
   if (!d || d.trigger !== "@" || seq !== acSeq) return Promise.resolve();
-  // Session rows are local. With no project there is no index to query.
-  showFilePopup(sessionCandidates(), d, null);
+  if (refine) refineApplied(d, null);
+  else showFilePopup(sessionCandidates(), d, null);
   if (!projectId()) return Promise.resolve();
   return new Promise((resolve) => {
     debounceResolve = resolve;
@@ -343,15 +477,17 @@ async function finishOther(seq: number, d: ComposerDetect): Promise<void> {
     acClose();
     return;
   }
+  const keep = sameAnchor(now);
   ac.open = true;
+  ac.idx = nextIndex(items, keep);
   ac.items = items;
-  ac.idx = 0;
   ac.trigger = now.trigger;
   ac.start = now.start;
   acRender();
 }
 
 export function acUpdate(): Promise<void> {
+  acAcceptArmed = false;
   const seq = ++acSeq;
   const d = acDetect();
   if (!d) {
@@ -368,11 +504,27 @@ export function acUpdate(): Promise<void> {
 
 function onComposerKeydown(e: KeyboardEvent): void {
   if (e.isComposing || e.keyCode === 229) return;
-  if (!ac.open && !acNotice) return;
-  if (e.key === "Escape") {
+  const pending = acPending();
+  if (e.key === "Escape" && (ac.open || acNotice || pending)) {
     e.preventDefault();
     e.stopImmediatePropagation();
     acClose();
+    return;
+  }
+  if (e.key === "Enter" || e.key === "Tab") {
+    if (ac.open || pending) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (pending) {
+        acAcceptArmed = true;
+        return;
+      }
+      if (ac.items.length > 0) acPick(ac.idx);
+      return;
+    }
+    // Send clears the composer without an input event. A notice-only popup
+    // would otherwise stay up over the empty box.
+    if (e.key === "Enter" && !e.shiftKey && acNotice) acClose();
     return;
   }
   if (!ac.open || ac.items.length === 0) return;
@@ -388,45 +540,48 @@ function onComposerKeydown(e: KeyboardEvent): void {
     e.stopImmediatePropagation();
     ac.idx = (ac.idx - 1 + ac.items.length) % ac.items.length;
     acRender();
-    return;
-  }
-  if (e.key === "Enter" || e.key === "Tab") {
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    acPick(ac.idx);
-    return;
   }
 }
 
-let composerBound = false;
+const boundComposers = new WeakSet<HTMLTextAreaElement>();
+let autocompleteWatching = false;
 
 function attachComposer(c: HTMLTextAreaElement): void {
-  if (composerBound) return;
-  composerBound = true;
+  if (boundComposers.has(c)) return;
+  boundComposers.add(c);
   ensureComposerAc();
   c.addEventListener("input", () => {
     void acUpdate();
   });
   c.addEventListener("keydown", onComposerKeydown, true);
-  c.addEventListener("blur", () => setTimeout(acClose, 120));
+  c.addEventListener("blur", () => {
+    cancelFileSearch();
+    acAcceptArmed = false;
+    const seq = ++acSeq;
+    setTimeout(() => {
+      if (seq === acSeq) hidePopup();
+    }, 120);
+  });
 }
 
 export function bindComposerAutocomplete(): void {
-  if (typeof document === "undefined" || composerBound) return;
-  const tryBind = (): void => {
+  if (typeof document === "undefined") return;
+  const tryBind = (): boolean => {
     const c = document.getElementById("composer") as HTMLTextAreaElement | null;
-    if (c) attachComposer(c);
+    if (!c) return false;
+    attachComposer(c);
+    return true;
   };
-  tryBind();
-  if (composerBound) return;
-  if (typeof MutationObserver === "function") {
-    const ob = new MutationObserver(() => {
-      tryBind();
-      if (composerBound) ob.disconnect();
-    });
-    ob.observe(document.documentElement || document.body, {
-      childList: true,
-      subtree: true,
-    });
-  }
+  if (tryBind()) return;
+  if (autocompleteWatching || typeof MutationObserver !== "function") return;
+  autocompleteWatching = true;
+  const ob = new MutationObserver(() => {
+    if (!tryBind()) return;
+    autocompleteWatching = false;
+    ob.disconnect();
+  });
+  ob.observe(document.documentElement || document.body, {
+    childList: true,
+    subtree: true,
+  });
 }
