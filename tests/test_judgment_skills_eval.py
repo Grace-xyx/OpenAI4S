@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+import openai4s.store as store_mod
 from harness.evals import judgment_skills as ev
+from openai4s.config import Config
+from openai4s.storage.migrations import SCHEMA_VERSION
 
 CASES_PATH = ev.CASES_PATH
 LOCK_PATH = ev.LOCK_PATH
@@ -21,12 +23,43 @@ def cases() -> list[dict]:
     return ev.load_cases(CASES_PATH)
 
 
+@pytest.fixture
+def eval_cfg(tmp_path: Path) -> Config:
+    # Explicit, not resolved from the environment: the loader opens
+    # `cfg.db_path` on every search. This was a module-scoped `Config()`, set
+    # up before conftest's per-test OPENAI4S_DATA_DIR redirect, so it read the
+    # developer's real ~/.openai4s database.
+    return Config(data_dir=tmp_path / "eval-data")
+
+
 # Function-scoped on purpose. A module-scoped fixture is instantiated before
 # conftest's per-test `isolated_openai4s_home`, so it resolved the developer's
 # real ~/.openai4s -- see `test_skill_names_are_read_under_this_tests_data_dir`.
 @pytest.fixture
-def skill_names() -> set[str]:
-    return ev.known_skill_names()
+def skill_names(eval_cfg: Config) -> set[str]:
+    return ev.known_skill_names(eval_cfg)
+
+
+@pytest.fixture
+def opened_stores(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Every database path a `Store` is constructed for while the test runs."""
+
+    opened: list[Path] = []
+    original = store_mod.Store.__init__
+
+    def recording_init(self, db_path, *args, **kwargs):
+        opened.append(Path(db_path))
+        original(self, db_path, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.Store, "__init__", recording_init)
+    return opened
+
+
+def _tree(root: Path) -> dict[str, tuple[int, int]]:
+    return {
+        str(path.relative_to(root)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in sorted(root.rglob("*"))
+    }
 
 
 def test_dataset_schema_and_counts(cases: list[dict]) -> None:
@@ -75,19 +108,21 @@ def test_gold_names_exist_in_the_loader(
 
 
 def test_skill_names_are_read_under_this_tests_data_dir(
-    skill_names: set[str], tmp_path: Path
+    skill_names: set[str], eval_cfg: Config, tmp_path: Path
 ) -> None:
     """The loader behind ``skill_names`` sees this test's isolated data dir.
 
     When the fixture was module-scoped it ran before the per-test redirect:
     the developer's real ``user-skills`` fed the gold-name check, and the
     loader it cached carried the real ``openai4s.db`` into every later search.
+    Under the suite-wide floor a module-scoped fixture would land in scratch
+    space instead -- still not this test's directory, so this still fails.
     """
 
     assert skill_names
     loader = ev._LOADER  # the one the fixture built, not a fresh lookup
     assert loader is not None
-    assert loader.cfg.data_dir == Path(os.environ["OPENAI4S_DATA_DIR"])
+    assert loader.cfg.data_dir == eval_cfg.data_dir
     assert tmp_path in loader.cfg.data_dir.parents
 
 
@@ -359,12 +394,14 @@ def test_assign_splits_is_deterministic() -> None:
 
 
 @pytest.mark.slow
-def test_b0_and_b2_run_offline_on_the_dev_split(cases: list[dict]) -> None:
+def test_b0_and_b2_run_offline_on_the_dev_split(
+    cases: list[dict], eval_cfg: Config
+) -> None:
     dev = [case for case in cases if case["split"] == "dev"]
     assert dev
     terms = ev.load_glossary(TERMS_PATH)
     for system in ("B0", "B2"):
-        report = ev.evaluate_system(system, dev, terms=terms)
+        report = ev.evaluate_system(system, dev, terms=terms, cfg=eval_cfg)
         assert report["overall"]["n"] == len(dev)
         assert report["system"] == system
         errors = [row["error"] for row in report["cases"] if row.get("error")]
@@ -376,3 +413,75 @@ def test_b0_and_b2_run_offline_on_the_dev_split(cases: list[dict]) -> None:
         # B0/B2 do not call a judgment backend.
         assert report["overall"]["input_tokens"] == 0
         assert report["overall"]["cost_usd"] == 0.0
+
+
+def _plant_newer_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point HOME at a ~/.openai4s that a newer build already migrated.
+
+    This is the developer machine the offline suite failed on: opening that
+    database raises FutureSchemaError, and opening an older one would migrate
+    it for good.
+    """
+
+    home = tmp_path / "home"
+    database = home / ".openai4s" / "openai4s.db"
+    database.parent.mkdir(parents=True)
+    conn = sqlite3.connect(database)
+    try:
+        conn.execute("CREATE TABLE sentinel (x)")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def test_explicit_cfg_keeps_the_eval_out_of_the_home_data_dir(
+    cases: list[dict],
+    eval_cfg: Config,
+    opened_stores: list[Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _plant_newer_home(tmp_path, monkeypatch)
+    # The window a module-scoped fixture runs in: conftest's per-test redirect
+    # is not applied yet, so a default Config() resolves the home data dir.
+    monkeypatch.delenv("OPENAI4S_DATA_DIR", raising=False)
+    assert Config().data_dir == home / ".openai4s"
+    before = _tree(home)
+
+    assert ev.known_skill_names(eval_cfg)
+    dev = [case for case in cases if case["split"] == "dev"][:8]
+    report = ev.evaluate_system("B0", dev, cfg=eval_cfg)
+
+    assert [row["error"] for row in report["cases"] if row.get("error")] == []
+    assert opened_stores, "B0 search never opened a Store; the probe saw nothing"
+    assert all(path.is_relative_to(eval_cfg.data_dir) for path in opened_stores)
+    assert _tree(home) == before
+
+
+def test_default_cfg_is_resolved_per_call_not_pinned_by_the_first(
+    cases: list[dict],
+    opened_stores: list[Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _plant_newer_home(tmp_path, monkeypatch)
+    before = _tree(home)
+    dev = [case for case in cases if case["split"] == "dev"][:4]
+    # Two data dirs in one process, as two tests on one xdist worker see them.
+    # The loader used to be resolved once and cached for the process, so the
+    # second run searched the first run's database -- or, when the first call
+    # came from outside the redirect, the home one.
+    for name in ("first", "second"):
+        data_dir = tmp_path / name
+        monkeypatch.setenv("OPENAI4S_DATA_DIR", str(data_dir))
+        opened_stores.clear()
+
+        report = ev.evaluate_system("B0", dev)
+
+        assert [row["error"] for row in report["cases"] if row.get("error")] == []
+        assert opened_stores, f"{name}: search never opened this run's Store"
+        assert all(path.is_relative_to(data_dir) for path in opened_stores), name
+    assert _tree(home) == before

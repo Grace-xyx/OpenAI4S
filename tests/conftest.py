@@ -1,10 +1,13 @@
 """Pytest fixtures + path setup for the openai4s test suite."""
 
+import atexit
 import copy
 import functools
 import os
 import re
+import shutil
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -258,6 +261,22 @@ class _RealDataDirGuard:
 
 
 _REAL_DATA_DIR_GUARD = _RealDataDirGuard(_real_data_dirs())
+
+# The per-test redirect in `isolated_openai4s_home` is function-scoped, but
+# collection imports every test module first and pytest sets up module- and
+# session-scoped fixtures before any function-scoped one. In that window the
+# data dir was whatever the shell had, usually nothing, so it resolved to
+# ~/.openai4s. With this floor, that window -- and the redirect's undo --
+# resolve a scratch directory rather than the developer's. The guard above
+# still catches what bypasses it (`Path.home()`, a test that deletes the
+# variable, a script outside pytest).
+#
+# Order matters: the guard must read the real roots first. Set before it, the
+# floor would be taken for the developer's exported data dir, and the guard
+# would refuse every pre-redirect Store in scratch space.
+_SUITE_DATA_DIR = tempfile.mkdtemp(prefix="openai4s-suite-data-")
+os.environ["OPENAI4S_DATA_DIR"] = _SUITE_DATA_DIR
+atexit.register(shutil.rmtree, _SUITE_DATA_DIR, ignore_errors=True)
 
 
 @pytest.fixture(scope="session", autouse=True)
