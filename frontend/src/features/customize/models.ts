@@ -4,10 +4,16 @@
  * (`GET /model-profiles` readiness is local-only; `POST .../probe` spends
  * quota). Capability-receipt badges read the B-04 additive field when present.
  */
+import { effect } from "@preact/signals";
 import { publicText } from "../scrub/scrub";
 import { t, tOptional } from "../../i18n";
+import { copyLookup, type CopyTable } from "../../i18n/copy";
+import { isReady } from "../../compat/stub";
 import { defaultModel, defaultModelName, models } from "../../stores/customize";
-import { api } from "./api";
+import { currentId } from "../../stores/session";
+import { field } from "../../stores/signal-field";
+import { running } from "../../stores/stream";
+import { api, apiErrorText } from "./api";
 
 export const LOCAL_MODEL_KINDS = new Set([
   "ollama",
@@ -162,6 +168,8 @@ export type ComposerModel = {
   name: string;
   description: string;
   model: string;
+  /** The profile revision choosing this entry pins now; 0 for the live entry. */
+  revision: number;
 };
 
 /**
@@ -186,11 +194,13 @@ function readComposerModels(payload: Record<string, unknown>): ComposerModel[] {
       const row = raw as Record<string, unknown>;
       const id = entryText(row.id);
       if (!id || list.some((entry) => entry.id === id)) return;
+      const revision = Number(row.revision);
       list.push({
         id,
         name: entryText(row.name) || id,
         description: entryText(row.description),
         model: entryText(row.model),
+        revision: Number.isInteger(revision) && revision > 0 ? revision : 0,
       });
     });
   });
@@ -235,25 +245,328 @@ export async function loadModels(): Promise<void> {
   }
 }
 
+
 /**
- * Choose an entry: the stores move at once, `PUT /models/default` makes it the
- * server's default (a profile id activates that profile). A refused write puts
- * the previous choice back rather than showing a selection the server did not
- * take.
+ * The model configuration the open session is pinned to, as `GET /frames/{id}`
+ * reports it. `profileId: ""` means the session was read and is not pinned yet
+ * (its first send binds whatever is the default then); `null`, or a pin for
+ * another frame, means nothing is known for the session on screen.
  */
-export async function chooseComposerModel(id: string): Promise<boolean> {
+export type SessionModelPin = { frameId: string; profileId: string; revision: number };
+
+export const sessionModelPin = field((): SessionModelPin | null => null);
+
+/** The last pin seen per session, so reopening one shows it before the read lands. */
+const knownPins = new Map<string, SessionModelPin>();
+
+/**
+ * Bumped by every read and every local write of the pin. A read applies its
+ * answer only if nothing touched the pin after it started: `GET /frames/{id}`
+ * is queued behind the burst of reads opening a session, and a slow one used
+ * to land after the user's own switch and put the old pin back.
+ */
+let pinVersion = 0;
+
+function setPin(pin: SessionModelPin | null): void {
+  pinVersion += 1;
+  if (pin) knownPins.set(pin.frameId, pin);
+  sessionModelPin.value = pin;
+  if (pin?.profileId) refreshListFor(pin);
+}
+
+/** Pins the list was already reloaded for, so a truly deleted profile asks once. */
+const listRefreshedFor = new Set<string>();
+
+/**
+ * A pin naming a profile the list does not have, or a newer revision than the
+ * list says, is first evidence that the list is stale (another tab, an admin)
+ * -- not that the profile is gone. Reload it once before saying so.
+ */
+function refreshListFor(pin: SessionModelPin): void {
+  const list = models.peek() as ComposerModel[];
+  // Nothing loaded yet: boot's own load is what fills it, not evidence of staleness.
+  if (!list.length) return;
+  const entry = list.find((item) => item.id === pin.profileId);
+  if (entry && !(pin.revision && entry.revision && pin.revision > entry.revision)) return;
+  const key = `${pin.profileId}@${pin.revision}`;
+  if (listRefreshedFor.has(key)) return;
+  listRefreshedFor.add(key);
+  void loadModels();
+}
+
+function readPin(frameId: string, raw: Record<string, unknown> | null | undefined): SessionModelPin {
+  const revision = Number(raw?.model_profile_revision);
+  return {
+    frameId,
+    profileId: entryText(raw?.model_profile_id),
+    revision: Number.isInteger(revision) && revision > 0 ? revision : 0,
+  };
+}
+
+/** Read the open session's pin. A late answer, or one overtaken by a switch, is dropped. */
+export async function loadSessionModelPin(frameId: string | null): Promise<void> {
+  if (!frameId) {
+    setPin(null);
+    return;
+  }
+  if (sessionModelPin.peek()?.frameId !== frameId) setPin(knownPins.get(frameId) || null);
+  const version = ++pinVersion;
+  try {
+    const frame = await api(`/frames/${encodeURIComponent(frameId)}`);
+    // `{}` is the route's answer for a frame it does not know: nothing learned.
+    if (version !== pinVersion || currentId.peek() !== frameId || !frame.id) return;
+    setPin(readPin(frameId, frame));
+  } catch {
+    // Unreadable (offline, or a session this member cannot see): keep what is
+    // shown, which falls back to the default when nothing is known.
+  }
+}
+
+/**
+ * Record what `POST /frames/{id}/model-binding` answered, from either caller
+ * (this selector, or the send path's re-bind prompt).
+ */
+/** A mark taken before a send, so its 202 can tell whether a choice came after. */
+export function composerChoiceMark(): number {
+  return choiceSeq;
+}
+
+/**
+ * The pair a sent message was admitted under (the 202's `model_binding`). It
+ * is how the composer learns the pin a first send writes -- and the server's
+ * answer at admission, so it is taken unless the user chose a model after the
+ * send started (`mark`): that choice is newer, and its own answer stands.
+ */
+export function noteAdmittedModelBinding(frameId: string, binding: unknown, mark: number): void {
+  if (mark !== choiceSeq) return;
+  noteSessionModelBinding(frameId, { binding });
+}
+
+/** Tests: forget every session's cached pin and any queued re-pin. */
+export function resetSessionModelState(): void {
+  knownPins.clear();
+  listRefreshedFor.clear();
+  pinChain = Promise.resolve();
+  stopPinWatch?.();
+}
+
+export function noteSessionModelBinding(frameId: string, answer: unknown): void {
+  const raw =
+    answer && typeof answer === "object" ? (answer as { binding?: unknown }).binding : null;
+  if (!raw || typeof raw !== "object") return;
+  const pin = readPin(frameId, raw as Record<string, unknown>);
+  knownPins.set(frameId, pin);
+  if (currentId.peek() === frameId) setPin(pin);
+}
+
+let stopPinWatch: (() => void) | null = null;
+
+/** Follow the open session: each newly opened session's pin is read. Idempotent. */
+export function watchSessionModelPin(): () => void {
+  if (stopPinWatch) return stopPinWatch;
+  let last: string | null | undefined;
+  const dispose = effect(() => {
+    const frameId = currentId.value;
+    if (frameId === last) return;
+    last = frameId;
+    void loadSessionModelPin(frameId);
+  });
+  stopPinWatch = () => {
+    dispose();
+    stopPinWatch = null;
+  };
+  return stopPinWatch;
+}
+
+/** What the selector shows for the session on screen. */
+export type ComposerSelection = { value: string; placeholder: string | null };
+
+/**
+ * The open session's own pin when it has one, else the server default -- which
+ * is also what an unsent session's first send will bind. A pin the list cannot
+ * show as one of its entries (a deleted profile, or an earlier revision of a
+ * listed one) is shown as a disabled placeholder saying so: showing the entry
+ * would name a configuration the session does not run, and re-choosing an
+ * already-selected option fires no change, so it could not be moved off it.
+ */
+export function composerSelection(): ComposerSelection {
+  const list = models.value as ComposerModel[];
+  const fallback = typeof defaultModel.value === "string" ? defaultModel.value : "";
+  const frameId = currentId.value;
+  const pin = sessionModelPin.value;
+  if (!frameId || !pin || pin.frameId !== frameId || !pin.profileId) {
+    return { value: fallback, placeholder: null };
+  }
+  const entry = list.find((item) => item.id === pin.profileId);
+  if (!entry) return { value: "", placeholder: modelT("model.session.unavailable") };
+  if (pin.revision && entry.revision && pin.revision < entry.revision) {
+    return { value: "", placeholder: modelT("model.session.earlier", entry.name || entry.id) };
+  }
+  return { value: entry.id, placeholder: null };
+}
+
+const MODEL_COPY: CopyTable = {
+  en: {
+    "model.session.unavailable": "Model no longer available",
+    "model.session.earlier": "{0} (earlier configuration)",
+    "model.session.switched": "This session now uses {0}",
+    "model.session.switchedNextTurn":
+      "This session uses {0} from your next message; the turn already running keeps its model",
+    "model.session.switchFailed": "Could not switch this session's model: {0}",
+    "model.default.adminOnly": "Only an admin can change the default model",
+  },
+  zh: {
+    "model.session.unavailable": "原模型已不可用",
+    "model.session.earlier": "{0}（旧配置）",
+    "model.session.switched": "该会话已切换到 {0}",
+    "model.session.switchedNextTurn": "该会话将从你的下一条消息起使用 {0}；正在运行的这一轮保持原模型",
+    "model.session.switchFailed": "未能切换该会话的模型：{0}",
+    "model.default.adminOnly": "只有管理员可以修改默认模型",
+  },
+};
+
+export const modelT = copyLookup(MODEL_COPY);
+
+type Bridged = { hint?: (message: string, err?: boolean) => void; openCust?: (tab?: string) => void };
+
+function bridged(): Bridged {
+  return ((globalThis as { window?: unknown }).window || {}) as Bridged;
+}
+
+function hint(message: string, err = false): void {
+  const fn = bridged().hint;
+  if (isReady(fn)) fn(message, err);
+}
+
+function errorCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : "";
+}
+
+/** Only the latest choice may finish: a quick second pick supersedes the first. */
+let choiceSeq = 0;
+
+/**
+ * The server default only: the stores move at once, a refusal puts them back
+ * -- unless a newer choice has moved them since. A profile id activates that
+ * profile, which rewrites the live model, i.e. the list's first entry: the
+ * list is reloaded so that entry names what the daemon now runs, instead of a
+ * model id the next pick would be refused for (`model_selection_stale`).
+ */
+async function chooseDefaultModel(id: string, seq: number): Promise<boolean> {
   const previous = defaultModel.value;
   const previousName = defaultModelName.value;
   defaultModel.value = id;
   defaultModelName.value = composerModelName(id);
   try {
     await api("/models/default", { method: "PUT", body: JSON.stringify({ model_id: id }) });
-    return true;
-  } catch {
-    defaultModel.value = previous;
-    defaultModelName.value = previousName;
+  } catch (error) {
+    if (seq === choiceSeq) {
+      defaultModel.value = previous;
+      defaultModelName.value = previousName;
+    }
+    return Promise.reject(error);
+  }
+  if (seq === choiceSeq) void loadModels();
+  return true;
+}
+
+/**
+ * Session re-pins go out one at a time, in the order they were made. Sent
+ * concurrently, two quick picks could be applied by the server in either
+ * order, leaving it pinned to the first while the selector showed the second.
+ */
+let pinChain: Promise<unknown> = Promise.resolve();
+
+/** How long a re-pin waits behind an earlier one before it goes out anyway. */
+const PIN_CHAIN_WAIT_MS = 15_000;
+
+/** `prior` settled, or `ms` passed -- whichever is first. Never rejects. */
+function settledOrTimeout(prior: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    prior.then(done, done);
+  });
+}
+
+/**
+ * Choose an entry. With a session open, that session is re-pinned to it first
+ * (`POST /frames/{id}/model-binding {model_id}`): a session runs on the
+ * configuration it is pinned to, so `PUT /models/default` alone -- all this
+ * used to do -- changed what new sessions bind and nothing in the
+ * conversation on screen. It then becomes the server default too
+ * (`PUT /models/default`; a profile id activates that profile), so new
+ * conversations start on it.
+ *
+ * A refused re-pin changes nothing, the default included. A refused default
+ * (in team mode only an admin may set it) leaves the session's switch in
+ * place: that one was the session owner's to make.
+ */
+export async function chooseComposerModel(id: string): Promise<boolean> {
+  const seq = ++choiceSeq;
+  const frameId = currentId.peek();
+  if (!frameId) {
+    try {
+      return await chooseDefaultModel(id, seq);
+    } catch (error) {
+      if (seq === choiceSeq && errorCode(error) === "admin_only") {
+        hint(modelT("model.default.adminOnly"));
+      }
+      return false;
+    }
+  }
+  const shown = sessionModelPin.peek();
+  const previous = shown?.frameId === frameId ? shown : knownPins.get(frameId) || null;
+  setPin({ frameId, profileId: id, revision: 0 });
+  let answer: Record<string, unknown>;
+  try {
+    // A request that never settles must not hold every later pick hostage.
+    const sent = settledOrTimeout(pinChain, PIN_CHAIN_WAIT_MS).then(() =>
+      api(`/frames/${encodeURIComponent(frameId)}/model-binding`, {
+        method: "POST",
+        body: JSON.stringify({ model_id: id }),
+      }),
+    );
+    pinChain = sent.catch(() => undefined);
+    answer = await sent;
+  } catch (error) {
+    if (seq !== choiceSeq) return false;
+    if (currentId.peek() === frameId) {
+      if (!previous) knownPins.delete(frameId);
+      setPin(previous);
+      // What is shown was a guess (the pin before this choice, which may
+      // itself have been an unconfirmed one): ask the server what it is.
+      void loadSessionModelPin(frameId);
+      hint(modelT("model.session.switchFailed", apiErrorText(error)), true);
+      const code = errorCode(error);
+      if (code === "model_profile_not_found" || code === "model_selection_stale") {
+        void loadModels();
+      } else if (code === "model_profile_needs_key") {
+        const open = bridged().openCust;
+        if (isReady(open)) open("models");
+      }
+    }
     return false;
   }
+  if (seq !== choiceSeq) return false;
+  noteSessionModelBinding(frameId, answer);
+  if (currentId.peek() === frameId) {
+    const list = models.value as ComposerModel[];
+    const bound = sessionModelPin.peek()?.profileId || id;
+    const name = (list.find((entry) => entry.id === bound) || list.find((entry) => entry.id === id))?.name || id;
+    hint(modelT(running.peek() ? "model.session.switchedNextTurn" : "model.session.switched", name));
+  }
+  try {
+    await chooseDefaultModel(id, seq);
+  } catch {
+    // Most often a member in team mode: the default is an admin's. The
+    // session's own switch, which was theirs to make, stands.
+  }
+  return true;
 }
 
 export { t };

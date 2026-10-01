@@ -83,7 +83,7 @@ Seatbelt/bubblewrap 无法建立并通过自测，Cell 即使在
 
 团队模式加的是账号，并不会把每一个 daemon 级的面都变成按人的。有些事是**对着整个实例**做的，那就是运维的事，无论谁登录了：
 
-- 写实例配置——LLM 提供方、它的端点与凭据、模型 profile、默认模型。改一下 `llm_base_url`，全员的流量就指向了写的人选的主机；
+- 写实例配置——LLM 提供方、它的端点与凭据、模型 profile、默认模型。改一下 `llm_base_url`，全员的流量就指向了写的人选的主机。选择**自己的**会话跑在管理员*已保存*的哪个 profile 上则不算实例配置：composer 的选择框会改绑当前打开的会话（`POST /frames/{id}/model-binding {model_id}`），会话所有者或管理员可以这样做，其他成员不行（`403 owner_only`）；同一个选择框的 `PUT /models/default` 仍只有管理员能做，所以成员的切换既不会改默认值，也不会动别人的会话；
 - 旧的 compute-job 运行器（`/compute/jobs`），它以 daemon 自己的 uid 执行 `bash -c <command>`——读也不给，因为一条作业行就是某个人敲下的命令；
 - 向任一内置 backend 提交批处理作业（`POST /orchestration/jobs`）。`local` 以 daemon 身份、在 kernel 沙箱之外执行 argv；`cluster` 则用 daemon 的 Unix 身份和站点凭据调用调度器。OpenAI4S 没有经过鉴权的“浏览器成员 → 调度器账号”映射，因此两种 backend 都不能当作该成员自己的执行身份；
 - 为会话请求交互式集群放置（`POST /sessions/{id}/compute`），它调用的是同一套 daemon 管理的调度器身份。会话属主可以释放一份已有的分配，但只有管理员可以请求分配；

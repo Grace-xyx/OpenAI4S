@@ -6,7 +6,7 @@
  */
 import { LANG, onLanguageChange } from "../../i18n";
 import { custTab, openCust } from "./actions";
-import { loadModels } from "./models";
+import { loadModels, watchSessionModelPin } from "./models";
 import { customizeOpen, customizeTab } from "./state";
 import { telemetryRow } from "./telemetry";
 import { hint } from "./host";
@@ -87,6 +87,8 @@ export function bootCustomize(target: WindowBag = globalThis as unknown as Windo
   // Stores only: `#model-select` renders from them once the shell mounts, so
   // this does not have to wait for the composer to exist.
   void loadModels();
+  // And the open session's own pin, which the selector shows in its place.
+  watchSessionModelPin();
   onLanguageChange(() => {
     if (customizeOpen.value) custTab(customizeTab.value);
   });

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultModel, defaultModelName, models } from "../../stores/customize";
 import { resetStoreFields } from "../../stores/signal-field";
 import { loadModels } from "./host";
+import { currentId } from "../../stores/session";
+import { resetSessionModelState, sessionModelPin, watchSessionModelPin } from "./models";
 import { bootCustomize } from "./index";
 
 const fetchMock = vi.fn();
@@ -29,6 +31,7 @@ function calls(): Array<[string, string]> {
 
 beforeEach(() => {
   resetStoreFields();
+  resetSessionModelState();
   fetchMock.mockReset().mockImplementation((url: string) =>
     Promise.resolve(url === "/api/v1/models" ? response(PAYLOAD) : response({}, 404)),
   );
@@ -97,5 +100,83 @@ describe("composer model loading", () => {
     bootCustomize({});
     await vi.waitFor(() => expect(calls()).toContainEqual(["/api/v1/models", "GET"]));
     await vi.waitFor(() => expect((models.value as unknown[]).length).toBe(2));
+  });
+});
+
+describe("the open session's model pin", () => {
+  let stop: (() => void) | null = null;
+  afterEach(() => {
+    stop?.();
+    stop = null;
+  });
+
+  function frames(answers: Record<string, () => Promise<Response>>) {
+    fetchMock.mockImplementation((url: string) => {
+      const match = /^\/api\/v1\/frames\/([^/]+)$/.exec(String(url));
+      if (match && answers[match[1]!]) return answers[match[1]!]!();
+      return Promise.resolve(url === "/api/v1/models" ? response(PAYLOAD) : response({}, 404));
+    });
+  }
+
+  it("is read when a session opens, and again when another one does", async () => {
+    frames({
+      frame_1: () => Promise.resolve(response({ id: "frame_1", model_profile_id: "mp-claude", model_profile_revision: 3 })),
+      frame_2: () => Promise.resolve(response({ id: "frame_2", model_profile_id: null, model_profile_revision: null })),
+    });
+    stop = watchSessionModelPin();
+    currentId.value = "frame_1";
+    await vi.waitFor(() =>
+      expect(sessionModelPin.value).toEqual({ frameId: "frame_1", profileId: "mp-claude", revision: 3 }),
+    );
+    currentId.value = "frame_2";
+    await vi.waitFor(() => expect(sessionModelPin.value).toEqual({ frameId: "frame_2", profileId: "", revision: 0 }));
+    currentId.value = null;
+    await vi.waitFor(() => expect(sessionModelPin.value).toBeNull());
+  });
+
+  it("drops a late answer for a session that is no longer open", async () => {
+    let late: (value: Response) => void = () => {};
+    frames({
+      frame_1: () => new Promise<Response>((resolve) => (late = resolve)),
+      frame_2: () => Promise.resolve(response({ id: "frame_2", model_profile_id: "mp-b", model_profile_revision: 1 })),
+    });
+    stop = watchSessionModelPin();
+    currentId.value = "frame_1";
+    currentId.value = "frame_2";
+    await vi.waitFor(() => expect(sessionModelPin.value?.frameId).toBe("frame_2"));
+    late(response({ id: "frame_1", model_profile_id: "mp-claude", model_profile_revision: 3 }));
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sessionModelPin.value).toEqual({ frameId: "frame_2", profileId: "mp-b", revision: 1 });
+  });
+
+  it("is one watch however many times boot runs", async () => {
+    frames({
+      frame_7: () => Promise.resolve(response({ id: "frame_7", model_profile_id: "mp-claude", model_profile_revision: 2 })),
+    });
+    stop = watchSessionModelPin();
+    expect(watchSessionModelPin()).toBe(stop);
+    currentId.value = "frame_7";
+    await vi.waitFor(() => expect(sessionModelPin.value?.frameId).toBe("frame_7"));
+    expect(calls().filter(([url]) => url === "/api/v1/frames/frame_7")).toHaveLength(1);
+  });
+
+  it("an unreadable session leaves no unhandled rejection and shows nothing it did not read", async () => {
+    frames({ frame_8: () => Promise.resolve(response({ error: "not found" }, 404)) });
+    stop = watchSessionModelPin();
+    currentId.value = "frame_8";
+    await vi.waitFor(() => expect(calls()).toContainEqual(["/api/v1/frames/frame_8", "GET"]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sessionModelPin.value).toBeNull();
+  });
+
+  it("is wired at boot", async () => {
+    frames({
+      frame_9: () => Promise.resolve(response({ id: "frame_9", model_profile_id: "mp-claude", model_profile_revision: 2 })),
+    });
+    currentId.value = "frame_9";
+    bootCustomize({});
+    await vi.waitFor(() => expect(calls()).toContainEqual(["/api/v1/frames/frame_9", "GET"]));
+    await vi.waitFor(() => expect(sessionModelPin.value?.profileId).toBe("mp-claude"));
   });
 });

@@ -20,6 +20,7 @@ import { _openGen, currentId, project } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { running } from "../../stores/stream";
 import { UPLOAD_STATE } from "../chrome/upload";
+import { sessionModelPin } from "../customize/models";
 import { rebindConfirmText, rebindDoneText, send } from "./send";
 import { closeTurnTicket } from "./ticket";
 
@@ -193,6 +194,26 @@ describe("send(): a message the server refuses before admission", () => {
     expect(lastHint()).toBe(rebindDoneText({ binding: { bound: false } }));
     expect(lastHint()).not.toBe(t("model.rebind.done"));
     expect(running.value).toBe(false);
+  });
+
+  it("a confirmed rebind moves the composer selector to the session's new pin", async () => {
+    routes["/frames/frame_1/message"] = refusal("model_revision_unavailable", "no longer usable; rebind it");
+    routes["/frames/frame_1/model-binding"] = {
+      status: 200,
+      body: { ok: true, binding: { model_profile_id: "mp-b", model_profile_revision: 3, bound: true } },
+    };
+    vi.stubGlobal("confirm", () => true);
+    const bodies: unknown[] = [];
+    const routed = globalThis.fetch;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/model-binding")) bodies.push(init?.body);
+      return routed(url, init);
+    });
+    await send("hello");
+
+    expect(sessionModelPin.value).toEqual({ frameId: "frame_1", profileId: "mp-b", revision: 3 });
+    // The prompt re-binds to the ACTIVE configuration, as it says: no target.
+    expect(bodies).toEqual([undefined]);
   });
 
   it("shows the rebind's own refusal and opens Models for model_profile_needs_active", async () => {

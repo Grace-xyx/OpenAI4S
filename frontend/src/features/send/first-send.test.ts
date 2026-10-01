@@ -20,6 +20,7 @@ import { resetStoreFields } from "../../stores/signal-field";
 import { pendingRequestId, running } from "../../stores/stream";
 import { UPLOAD_STATE } from "../chrome/upload";
 import { SUBMISSION_GRACE_MS, send } from "./send";
+import { sessionModelPin } from "../customize/models";
 import { closeTurnTicket } from "./ticket";
 
 type FakeEl = Record<string, unknown> & {
@@ -104,7 +105,12 @@ describe("send(): first message of a fresh session", () => {
       let body: unknown = {};
       if (path === "/frames") body = { id: "frame_new" };
       else if (path === "/frames/frame_new/message") {
-        body = { request_id: "req-1", execution_id: "exec-1", queue_position: 0 };
+        body = {
+          request_id: "req-1",
+          execution_id: "exec-1",
+          queue_position: 0,
+          model_binding: { model_profile_id: "mp-active", model_profile_revision: 2 },
+        };
       }
       return Promise.resolve({
         ok: true,
@@ -143,6 +149,9 @@ describe("send(): first message of a fresh session", () => {
     expect(pendingRequestId.value).toBe("req-1");
     expect(composer.value).toBe("");
     expect(historyUnconfirmed.value).toBe(0);
+    // The first send is what pinned the session; the composer now shows that
+    // pin, not whatever the default becomes later.
+    expect(sessionModelPin.value).toEqual({ frameId: "frame_new", profileId: "mp-active", revision: 2 });
   });
 });
 

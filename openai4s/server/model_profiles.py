@@ -851,7 +851,7 @@ class ModelProfileService:
         appears, resolved through its protocol's default.
         """
         live = self.store.get_setting("llm_model") or self.cfg.llm.model or "default"
-        models: list[dict[str, str]] = []
+        models: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
 
         def add(entry_id: Any, name: Any, description: Any, **extra: Any) -> None:
@@ -899,6 +899,10 @@ class ModelProfileService:
                 model=model_id,
                 provider=provider,
                 base_url=base_url,
+                # The revision a choice of this entry pins now. A session pinned
+                # to an earlier one of the same profile shows the difference
+                # instead of this entry, so choosing it is a change that re-pins.
+                revision=int(profile.get("revision") or 0),
             )
         return {"models": {"default": models}, "default_model_id": default_model_id}
 
