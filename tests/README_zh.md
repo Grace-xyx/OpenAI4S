@@ -432,6 +432,7 @@ OpenAI4S 的离线正确性门禁。`uv run pytest` 用确定性 fake 跑完这�
 | [`test_compute_states.py`](test_compute_states.py) | 一套任务状态词表，写入时强制：终态不可被重新打开，`unknown` 保持存活以免有东西在远端默默计费，迁移把 `done`/`incomplete`/`closed` 折叠过来且不丢失各自的含义。 |
 | [`test_compute_manifest.py`](test_compute_manifest.py) | 任务要对着自己的承诺被检查：每个回收到的文件都带上大小与 sha256，声明了却没出现的产物会被点名，`featured_files` 是声明的子集而不是全部文件。 |
 | [`test_compute_durability.py`](test_compute_durability.py) | 远程任务的寿命超过 daemon。行在提交前写入，receipt 挺过重启，reconcile 只报告不重提。 |
+| [`test_compute_install_id.py`](test_compute_install_id.py) | BYOC 的 owner 标签存放在配置的数据目录里，而不是 `~/.openai4s`。HOME 指向空的临时目录、`OPENAI4S_DATA_DIR` 指向别处时，构造 manager 不会在 HOME 下创建任何东西。旧 home 路径上已有的 id 会被复制过来并沿用：resident helper 拒绝操作标签不符的 sandbox，换了新 id 就会让仍在运行、仍在计费的任务失联。另外覆盖：存储的 id 为空或无法解码、环境变量覆盖、发布竞争中落败的 manager 采用胜者的 id，以及不支持硬链接的文件系统。 |
 | [`test_secret_broker.py`](test_secret_broker.py) | 凭据只以不透明引用出现；`auto` fail closed 而非降级；环境注入只读。 |
 | [`test_secret_canary.py`](test_secret_canary.py) | canary 断言密钥的字节而非字段名——denylist 在有人加字段的那一刻就会 fail open。 |
 | [`test_schema_migrations.py`](test_schema_migrations.py) | 数据库要么完全在版本 N，要么完全在 N-1。任一步失败整组回滚，且 DDL 确实是事务性的。 |

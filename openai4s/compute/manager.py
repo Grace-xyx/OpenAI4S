@@ -821,6 +821,81 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+#: Where the byoc owner tag lives, relative to the data dir.
+_INSTALL_ID_FILE = "install-id"
+
+
+def _legacy_install_id_path() -> Path | None:
+    """Where builds before the data-dir move kept the install id, if anywhere.
+
+    Read only, never written: it was ``~/.openai4s/install-id`` whatever the
+    data dir was, and an install that already tagged sandboxes with it has to
+    keep reading as their owner after the move.
+    """
+    try:
+        return Path.home() / ".openai4s" / _INSTALL_ID_FILE
+    except RuntimeError:  # no resolvable home directory
+        return None
+
+
+def _read_install_id(path: Path | None) -> str | None:
+    """The id stored at ``path``, or None when there is none worth using.
+
+    An empty or undecodable file counts as absent. The old resolver used an
+    empty file's ``""`` as the owner tag, and a non-UTF-8 one raised out of
+    the constructor.
+    """
+    if path is None:
+        return None
+    try:
+        value = path.read_text("utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    return value or None
+
+
+def _publish_install_id(path: Path, install_id: str) -> str:
+    """Store ``install_id`` at ``path``, unless another manager got there first.
+
+    Returns the id this process should use. Each session builds its own
+    manager, so on a fresh data dir two can resolve at once. The old resolver
+    checked for the file, then wrote it. Both racers could mint, and the one
+    whose write lost tagged its sandboxes with an id no later run would read
+    back. A hard link publishes exclusively and atomically: the file appears
+    whole or not at all, and the loser adopts the winner's id.
+
+    Never raises. An id that cannot be persisted still serves this run, as
+    before.
+    """
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, staged = tempfile.mkstemp(prefix=".install-id-", dir=path.parent)
+    except OSError:
+        return install_id
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(install_id)
+        try:
+            os.link(staged, path)
+            return install_id
+        except FileExistsError:
+            winner = _read_install_id(path)
+            if winner:
+                return winner
+            # Present but empty or unreadable: repair it below.
+        except OSError:
+            pass  # a filesystem without hard links: publish non-exclusively
+        os.replace(staged, path)
+        return _read_install_id(path) or install_id
+    except OSError:
+        return install_id
+    finally:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass  # already moved into place by os.replace
+
+
 def _open_store(cfg: Any):
     """The Store this manager records jobs in.
 
@@ -958,7 +1033,7 @@ class ComputeManager:
         # the session that submitted it. None is the CLI / global context.
         self._owner_key = str(workspace) if workspace else None
         self._providers = _discover_providers(Path(cfg.skills_dir))
-        self._install_id = self._resolve_install_id()
+        self._install_id = self._resolve_install_id(cfg.data_dir)
         self._store = store if store is not None else _open_store(cfg)
         # In-memory view of the durable records. The database is the source of
         # truth; this is a cache so the hot path does not re-read on every poll.
@@ -1685,22 +1760,29 @@ class ComputeManager:
         }
 
     @staticmethod
-    def _resolve_install_id() -> str:
+    def _resolve_install_id(data_dir: Any) -> str:
         """A stable per-install id used as the byoc sandbox owner tag. Persist
-        it under the data dir so reconcile can find sandboxes across runs."""
+        it under the data dir so reconcile can find sandboxes across runs.
+
+        Until this took ``data_dir``, the file was always
+        ``~/.openai4s/install-id``. A custom ``OPENAI4S_DATA_DIR`` kept its id
+        outside its data dir, a container whose data dir is the volume minted a
+        new id on every restart, and every test and capture script read or
+        created the developer's real one. An id already stored there is copied
+        into the data dir on first use, so existing installs keep their
+        sandboxes. The legacy file stays: an older build, or another data dir
+        on the same machine, may still read it.
+        """
         env = os.environ.get("OPENAI4S_INSTALL_ID")
         if env:
             return env
-        path = Path.home() / ".openai4s" / "install-id"
-        try:
-            if path.exists():
-                return path.read_text("utf-8").strip()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            iid = uuid.uuid4().hex
-            path.write_text(iid, encoding="utf-8")
-            return iid
-        except OSError:
-            return uuid.uuid4().hex
+        path = Path(data_dir) / _INSTALL_ID_FILE
+        current = _read_install_id(path)
+        if current:
+            return current
+        legacy = _legacy_install_id_path()
+        inherited = _read_install_id(legacy) if legacy != path else None
+        return _publish_install_id(path, inherited or uuid.uuid4().hex)
 
     # --- provider family routing -----------------------------------------
     def _split(self, provider: str) -> tuple[str, str]:

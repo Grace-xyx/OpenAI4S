@@ -223,7 +223,8 @@ Your options, in order of strength:
 One volume at `/data`. It holds `openai4s.db` (every session, the audit ledger,
 settings), `artifacts/` and `artifact-versions/`, `agent-workspaces/`,
 `workspace-cas/` (fork and revert cannot work without it), `compaction-history/`,
-`user-skills/`, `shares/`, and `access-token`.
+`user-skills/`, `shares/`, `access-token`, and `install-id` (the owner tag on
+remote BYOC sandboxes; `reconcile` finds them by it).
 
 The image owns `/data` as uid 1000, so a **named volume** inherits that. A
 **bind mount** does not: `chown -R 1000:1000 ./your-dir` on the host first, or
@@ -277,10 +278,6 @@ than copying a template from elsewhere. Four things break by default:
 - **IPv6 is unsupported.** The server is `AF_INET` only. `OPENAI4S_HOST=::` is
   recognised as a wildcard by the request guards but cannot bind, and fails
   with a raw traceback. IPv6-only clusters cannot run this.
-- **`install-id` is written under `$HOME`, not the data dir**, so it is
-  regenerated on every restart. Only remote BYOC compute cares — losing it
-  orphans sandboxes from `reconcile`. Set `OPENAI4S_INSTALL_ID` to any stable
-  value if you use it.
 - **Remote GPU compute via the bundled NVIDIA provider needs a Docker daemon**
   on the machine running OpenAI4S. Inside a container it has none.
 - **Script-driven use denies every permission prompt.** With no interactive
@@ -507,7 +504,8 @@ secret-read 掩码与网络命名空间是一起消失的。那些掩码正是�
 一个卷，挂在 `/data`。里面是 `openai4s.db`（所有会话、审计账本、设置）、
 `artifacts/` 与 `artifact-versions/`、`agent-workspaces/`、`workspace-cas/`
 （没有它 fork 与 revert 都无法工作）、`compaction-history/`、`user-skills/`、
-`shares/`，以及 `access-token`。
+`shares/`、`access-token`，以及 `install-id`（远程 BYOC sandbox 的属主标签，
+`reconcile` 靠它找回 sandbox）。
 
 镜像里 `/data` 属于 uid 1000，所以**具名卷**会继承这个属主。**bind mount** 不会：
 先在宿主机上 `chown -R 1000:1000 ./your-dir`，否则 daemon 建不了自己的数据库。在
@@ -555,9 +553,6 @@ startup 探针给了 120s：在空卷上首次启动会先跑完 schema 迁移�
   `$HOME` 下的，也就是容器层里，换镜像就没了。
 - **不支持 IPv6。** 服务端只有 `AF_INET`。`OPENAI4S_HOST=::` 虽然会被请求侧的守卫
   识别为通配，却根本 bind 不上，并以一个裸 traceback 失败。纯 IPv6 集群跑不了。
-- **`install-id` 写在 `$HOME` 而不是数据目录下**，因此每次重启都会重新生成。只有
-  远程 BYOC 计算在意它——丢了会让 `reconcile` 找不到自己创建的 sandbox。用得上就
-  把 `OPENAI4S_INSTALL_ID` 设成任意稳定值。
 - **通过随附 NVIDIA provider 使用远程 GPU 计算，需要运行 OpenAI4S 的机器上有
   Docker daemon。** 容器里没有。
 - **脚本驱动的用法会拒绝每一次权限询问。** 没有交互式 WebSocket 挂着时，
