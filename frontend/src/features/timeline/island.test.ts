@@ -939,6 +939,9 @@ describe("delegation evidence panel", () => {
       expect(panel.querySelector(".delegation-evidence-list")?.getAttribute("data-details-key")).toBe(
         "delegation-evidence:c-checked",
       );
+      expect(
+        panel.querySelector(".delegation-evidence-list summary")?.getAttribute("data-focus-key"),
+      ).toBe("summary:delegation-evidence:c-checked");
       expect(text).toContain("证据不可用");
       expect(text).toContain("ok.csv");
       expect(text).toContain("v-ok");

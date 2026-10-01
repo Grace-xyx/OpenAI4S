@@ -862,20 +862,48 @@ def _absolute_path(value: str) -> bool:
     )
 
 
-def project_browser_child(child: Mapping[str, Any]) -> dict[str, Any]:
-    """The one browser projection of a delegation child.
+#: The keys a browser sees on a delegation child. An allowlist, not a list
+#: of keys to drop: a child-shaped value can also be a run envelope
+#: (``final_message``, bullets, ``environment`` with interpreter paths), and
+#: dropping only ``result``/``output`` let all of that through.
+_BROWSER_CHILD_KEYS = (
+    "child_id",
+    "name",
+    "status",
+    "task_status",
+    "error",
+    "depth",
+    "parent_child_id",
+    "parent_frame_id",
+    "frame_id",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "stop_reason",
+    "request_id",
+    "attempt_id",
+    "overrides",
+    "progress",
+    "steering",
+    "artifact_refs",
+    "artifact_evidence",
+)
 
-    ``result`` and ``output`` are omitted, not set to null. Steering message
-    bodies are omitted. ``artifact_refs`` keep identity and a relative name:
-    ``durable_path`` is dropped, and an absolute ``path`` or ``filename`` is
-    dropped. ``artifact_evidence`` is left as stored, including a missing key.
-    ``GET /frames/{id}/delegations`` and the stop/continue responses all use
-    this function.
+
+def project_browser_child(child: Mapping[str, Any]) -> dict[str, Any]:
+    """The REST browser projection of a delegation child.
+
+    Only ``_BROWSER_CHILD_KEYS`` pass; ``result`` and ``output`` are absent,
+    not null. Steering message bodies are omitted. ``artifact_refs`` keep
+    identity and a relative name: ``durable_path`` is dropped, and an
+    absolute ``path`` or ``filename`` is dropped. ``artifact_evidence`` is
+    left as stored, including a missing key. ``GET /frames/{id}/delegations``
+    and the stop/continue responses use this function. The WebSocket
+    ``delegation_child_event`` keeps its own narrower allowlist in
+    ``workbench_state.delegation_event_projection``.
     """
 
-    projected = {
-        key: value for key, value in child.items() if key not in ("result", "output")
-    }
+    projected = {key: child[key] for key in _BROWSER_CHILD_KEYS if key in child}
     refs = projected.get("artifact_refs")
     if isinstance(refs, list):
         safe_refs: list[dict[str, Any]] = []

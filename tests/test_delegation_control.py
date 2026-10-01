@@ -612,3 +612,65 @@ def test_a_live_stop_uses_the_browser_projection(client):
     assert body["artifact_refs"][0]["path"] == "out/plot.png"
     assert body["artifact_refs"][0]["version_id"] == "v-1"
     assert body["artifact_evidence"]["scope"] == "version_and_producer"
+
+
+@pytest.mark.stubbed_backend
+def test_continue_answers_with_the_stored_child_not_the_run_envelope(client):
+    """``continue_child`` returns the attempt's run envelope, not a child.
+
+    That envelope carries the final message, bullets, limitations and the
+    child's environment with interpreter paths. The route answers with the
+    stored child through the GET projection instead, and a child with no
+    stored row is cut down to the allowlisted keys. The runner is a stub.
+    """
+
+    child_id = client.seed_child("child-1", status="stopped")
+    state = client.runner._state(client.frame_id, client.project_id)
+    runner = _LiveRunner(child_id)
+    data_dir = str(client.cfg.data_dir)
+
+    def envelope(target):
+        return {
+            "child_id": target,
+            "status": "done",
+            "output": "OUTPUT-BODY",
+            "final_message": "FINAL-MESSAGE-BODY",
+            "completion_bullets": ["BULLET-BODY"],
+            "limitations": ["LIMITATION-BODY"],
+            "environment": {
+                "python": f"{data_dir}/envs/py/bin/python",
+                "env_root": f"{data_dir}/envs",
+            },
+            "artifacts": [{"path": f"{data_dir}/out.csv"}],
+            "turns": 3,
+            "max_turns": 8,
+        }
+
+    runner.continue_child = envelope
+    state.delegation_runner = runner
+
+    status, body = client.post(
+        f"/frames/{client.frame_id}/delegations/{child_id}/continue"
+    )
+    _status, listed = client.get(f"/frames/{client.frame_id}/delegations")
+    stored = next(item for item in listed["children"] if item["child_id"] == child_id)
+    assert status == 200
+    assert body == stored
+
+    runner.continue_child = lambda target: envelope("child-without-a-row")
+    status, bare = client.post(
+        f"/frames/{client.frame_id}/delegations/{child_id}/continue"
+    )
+    assert status == 200
+    assert bare == {"child_id": "child-without-a-row", "status": "done"}
+
+    for response in (body, bare):
+        rendered = json.dumps(response)
+        for leaked in (
+            "OUTPUT-BODY",
+            "FINAL-MESSAGE-BODY",
+            "BULLET-BODY",
+            "LIMITATION-BODY",
+            data_dir,
+        ):
+            assert leaked not in rendered

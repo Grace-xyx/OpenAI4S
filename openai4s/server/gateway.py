@@ -3201,7 +3201,12 @@ class SessionRunner:
             raise GatewayError(409, str(error), "delegation_error") from error
         from openai4s.storage.delegation import project_browser_child
 
-        return project_browser_child(result)
+        # `continue_child` returns the attempt's run envelope, not a child.
+        # Answer with the stored child, the same shape GET returns.
+        stored = self.store.delegation_child_record(
+            root_frame_id, str(result.get("child_id") or child_id)
+        )
+        return project_browser_child(stored or result)
 
     def refresh_compute_task(self, root_frame_id: str, job_id: str) -> dict:
         """Contact the remote for ONE job, because a person asked.

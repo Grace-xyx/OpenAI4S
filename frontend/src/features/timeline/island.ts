@@ -3564,8 +3564,10 @@ function appendChildEvidence(row: HTMLElement, child: any): void {
   block.appendChild(summary);
   if (items.length) {
     const details = el("details", "delegation-evidence-list");
-    detailsKey(details, "delegation-evidence:" + String((child && child.child_id) || ""));
     details.appendChild(el("summary", "", provenanceT("evidenceDetails")));
+    // After the summary exists, so it gets a focus key and a rebuilt panel
+    // can give keyboard focus back to it.
+    detailsKey(details, "delegation-evidence:" + String((child && child.child_id) || ""));
     items.forEach((item: any) => details.appendChild(evidenceRow(item)));
     block.appendChild(details);
   }

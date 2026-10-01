@@ -474,12 +474,20 @@ def test_encode_result_truncation_is_faster_than_redacting_every_step():
     }
     _encode_result({"ok": True})
     _legacy_encode_result({"ok": True})
-    started = time.perf_counter()
-    legacy = _legacy_encode_result(value)
-    legacy_s = time.perf_counter() - started
-    started = time.perf_counter()
-    current = _encode_result(value)
-    current_s = time.perf_counter() - started
+
+    def fastest(encode):
+        # Best of three: one scheduler stall on a busy runner must not decide
+        # the comparison.
+        timings = []
+        encoded = ""
+        for _attempt in range(3):
+            started = time.perf_counter()
+            encoded = encode(value)
+            timings.append(time.perf_counter() - started)
+        return encoded, min(timings)
+
+    legacy, legacy_s = fastest(_legacy_encode_result)
+    current, current_s = fastest(_encode_result)
     assert len(current) <= 16_000
     decoded = json.loads(current)
     assert decoded["truncated"] is True

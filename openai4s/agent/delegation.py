@@ -73,7 +73,9 @@ _LIMITATION_ALIASES = ("limitations", "caveats", "限制", "局限性")
 
 #: Record-consistency check for one child frame. It never hashes file bytes.
 _EVIDENCE_SCOPE = "version_and_producer"
-_EVIDENCE_ITEM_CAP = 12
+#: Items one evidence envelope keeps. The live socket event reuses it
+#: (``workbench_state._bounded_artifact_evidence``), so both say the same.
+EVIDENCE_ITEM_CAP = 12
 _EVIDENCE_TEXT_LIMIT = 200
 _EVIDENCE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EVIDENCE_CELL_STATUS = frozenset({"ok", "error", "interrupted"})
@@ -1768,7 +1770,7 @@ class DelegationRunner:
         if not callable(reader):
             return _evidence_unavailable()
         try:
-            rows = reader(child_frame_id, limit=_EVIDENCE_ITEM_CAP)
+            rows = reader(child_frame_id, limit=EVIDENCE_ITEM_CAP)
             return _project_artifact_evidence(rows, child_frame_id)
         except Exception:  # noqa: BLE001 - evidence lookup must not fail the child
             return _evidence_unavailable()
@@ -2426,7 +2428,7 @@ def _project_artifact_evidence(rows: Any, child_frame_id: str) -> dict[str, Any]
     if isinstance(reported, bool) or not isinstance(reported, int) or reported < 0:
         reported = len(seen)
     total = max(reported, len(seen))
-    kept = seen[:_EVIDENCE_ITEM_CAP]
+    kept = seen[:EVIDENCE_ITEM_CAP]
     kept_ids = {str(row["version_id"]) for row in kept}
     by_version: dict[str, list[Any]] = {}
     for obs in raw_observations:

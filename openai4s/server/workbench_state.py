@@ -66,20 +66,22 @@ _DELEGATION_EVENT_CHILD_KEYS = (
 
 
 def _bounded_artifact_evidence(value: Any) -> Any:
-    """Copy evidence and keep at most 12 items on the live socket event.
+    """Copy evidence and keep at most ``EVIDENCE_ITEM_CAP`` items on the socket.
 
-    The REST projection already caps at 12. A snapshot that arrives with
-    more must not put the rest on the wire. ``total`` stays the caller's
-    count when it is at least the original length.
+    The REST projection already caps at that same constant. A snapshot that
+    arrives with more must not put the rest on the wire. ``total`` stays the
+    caller's count when it is at least the original length.
     """
+
+    from openai4s.agent.delegation import EVIDENCE_ITEM_CAP
 
     if not isinstance(value, Mapping):
         return value
     items = value.get("items")
-    if not isinstance(items, list) or len(items) <= 12:
+    if not isinstance(items, list) or len(items) <= EVIDENCE_ITEM_CAP:
         return dict(value)
     bounded = dict(value)
-    bounded["items"] = list(items[:12])
+    bounded["items"] = list(items[:EVIDENCE_ITEM_CAP])
     total = value.get("total")
     if isinstance(total, bool) or not isinstance(total, int) or total < len(items):
         total = len(items)
