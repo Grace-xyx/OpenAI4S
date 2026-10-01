@@ -84,10 +84,40 @@ def _deterministic_secret_store():
             os.environ["OPENAI4S_SECRET_STORE"] = previous
 
 
+@contextlib.contextmanager
+def _private_default_data_dir(path: Path):
+    """Point every *default* config lookup at the capture's own data dir.
+
+    The runner is handed an explicit Config, but some paths still resolve the
+    process-wide default: the judgment shadows read their switches through
+    `get_config()` (`judgment/task_mode_shadow.py`, `judgment/shadow.py`), and
+    with OPENAI4S_DATA_DIR unset that default is the developer's real
+    ~/.openai4s. On 2026-10-01 a `--check` run opened that database through
+    `run_message` -> `resolve_task_mode` and migrated it to an unreleased
+    schema. Inside this block the default resolves to the temp dir as well,
+    and both the variable and the cached default are restored on the way out.
+    """
+    import openai4s.config as config_mod
+
+    previous_env = os.environ.get("OPENAI4S_DATA_DIR")
+    previous_config = config_mod._CONFIG
+    os.environ["OPENAI4S_DATA_DIR"] = str(path)
+    config_mod._CONFIG = None
+    try:
+        yield
+    finally:
+        config_mod._CONFIG = previous_config
+        if previous_env is None:
+            os.environ.pop("OPENAI4S_DATA_DIR", None)
+        else:
+            os.environ["OPENAI4S_DATA_DIR"] = previous_env
+
+
 def drive() -> dict[str, dict]:
     with (
         tempfile.TemporaryDirectory(prefix="openai4s-contract-") as temp,
         _deterministic_secret_store(),
+        _private_default_data_dir(Path(temp)),
     ):
         config = Config(
             data_dir=Path(temp),
