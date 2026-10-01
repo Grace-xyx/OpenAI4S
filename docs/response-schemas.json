@@ -22988,17 +22988,125 @@
         "type": "object"
       }
     },
-    "PATCH /frames/([^/]+) [ok]": {
+    "PATCH /frames/([^/]+) [error]": {
       "schema": {
-        "properties": {},
-        "required": [],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "PATCH /frames/([^/]+)(?:/.*)? [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
         "type": "object"
       }
     },
     "PATCH /frames/([^/]+)(?:/.*)? [ok]": {
       "schema": {
-        "properties": {},
-        "required": [],
+        "properties": {
+          "conversation_type": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "folder_id": {
+            "type": "null"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "null"
+          },
+          "message_count": {
+            "type": "integer"
+          },
+          "model": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "null"
+          },
+          "parent_frame_id": {
+            "type": "null"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "root_frame_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "task_summary": {
+            "type": "null"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_type",
+          "created_at",
+          "folder_id",
+          "id",
+          "input_tokens",
+          "message_count",
+          "model",
+          "name",
+          "output_tokens",
+          "parent_frame_id",
+          "project_id",
+          "root_frame_id",
+          "status",
+          "task_summary",
+          "updated_at"
+        ],
         "type": "object"
       }
     },
@@ -45782,6 +45890,31 @@
           "error",
           "method",
           "path",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "PUT /models/default [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
           "request_id",
           "status"
         ],
