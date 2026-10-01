@@ -1220,6 +1220,8 @@ import hashlib, os, sqlite3, sys, time
 frame_id, data_dir = sys.argv[1], sys.argv[2]
 key = "session:revert-recovery:" + hashlib.sha256(frame_id.encode("utf-8")).hexdigest()
 db = os.path.join(data_dir, "openai4s.db")
+if not os.path.isfile(db):
+    sys.exit("no daemon database at " + db + "; OPENAI4S_DATA_DIR must be the daemon's own data dir")
 conn = sqlite3.connect(db, timeout=10)
 conn.execute("PRAGMA busy_timeout=10000")
 conn.execute(
@@ -1319,6 +1321,7 @@ conn.close()
       () => capableBtn.getAttribute("aria-busy").then((value) => value !== "true" ? true : null),
       15000,
     );
+    check("still one fork POST after it settled", forkPosts.length === 1, JSON.stringify(forkPosts));
     await page.unroute(forkPattern, holdFork);
 
     const created = await waitUntil(
@@ -1364,46 +1367,21 @@ conn.close()
     });
     const blockedMessage = await checkpointedUserMessage(blockedId, blockedText);
     setRevertRecoveryMarker(blockedId);
-    let capabilityFixture = "sqlite";
-    try {
-      await waitUntil(
-        "GET /branches to report fork_from_message false",
-        async () => {
-          const projection = await api(`/frames/${encodeURIComponent(blockedId)}/branches`);
-          return projection.capabilities &&
-            projection.capabilities.fork &&
-            projection.capabilities.fork.fork_from_message === false
-            ? true
-            : null;
-        },
-        5000,
-      );
-    } catch (error) {
-      capabilityFixture = "route-rewrite";
-      console.log(
-        `fork capability fixture fell back to rewriting the live branches JSON: ${error.message}`,
-      );
-    }
-    const branchesPattern = new RegExp(`/api/v1/frames/${blockedId}/branches(?:\\?|$)`);
-    const rewriteBranches = async (route) => {
-      if (route.request().method() !== "GET") {
-        await route.continue();
-        return;
-      }
-      const response = await route.fetch();
-      const json = await response.json();
-      if (json && json.capabilities && json.capabilities.fork) {
-        json.capabilities.fork.fork_from_message = false;
-      }
-      await route.fulfill({
-        status: response.status(),
-        contentType: "application/json",
-        body: JSON.stringify(json),
-      });
-    };
-    if (capabilityFixture === "route-rewrite") await page.route(branchesPattern, rewriteBranches);
-    else console.log("fork capability fixture: sqlite revert-recovery marker");
-    try {
+    // No fallback: the marker is written synchronously into the daemon's own
+    // database, so a GET /branches that still says true is a server regression.
+    await waitUntil(
+      "GET /branches to report fork_from_message false",
+      async () => {
+        const projection = await api(`/frames/${encodeURIComponent(blockedId)}/branches`);
+        return projection.capabilities &&
+          projection.capabilities.fork &&
+          projection.capabilities.fork.fork_from_message === false
+          ? true
+          : null;
+      },
+      5000,
+    );
+    {
       await openFrame(blockedId);
       await waitUntil(
         "the blocked session's branch state",
@@ -1431,8 +1409,6 @@ conn.close()
       );
       await forkFlag("on");
       await toBeVisible(forkButton(capableMessageId));
-    } finally {
-      if (capabilityFixture === "route-rewrite") await page.unroute(branchesPattern, rewriteBranches);
     }
   }
 
@@ -1564,9 +1540,25 @@ conn.close()
       );
 
       hold = armIndexHold();
-      const postsBefore = messagePosts.length;
+      // A session of the same project with no local nvw3b-ac rows: the popup
+      // has nothing to pick until the index page lands, so Enter can only be
+      // held by the pending-search guard.
       await composer.fill("");
+      const bare = await api("/frames", { method: "POST", data: { project_id: projectId } });
+      const bareId = bare.id || bare.frame_id;
+      await openFrame(bareId);
+      await composer.click();
+      await composer.fill("");
+      const postsBefore = messagePosts.length;
       await composer.pressSequentially("@nvw3b-ac", { delay: 10 });
+      await Promise.race([
+        hold.seen,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error("the second artifact-index query did not start")),
+          10000,
+        )),
+      ]);
+      check("no completion row exists before the index page lands", (await items.count()) === 0, String(await items.count()));
       await composer.press("Enter");
       await new Promise((resolve) => setTimeout(resolve, 400));
       check(
@@ -1584,6 +1576,16 @@ conn.close()
         "the in-flight Enter completes to filename#version",
         completed.test(accepted),
         accepted,
+      );
+      check(
+        "no message POST anywhere in the completion scene",
+        messagePosts.length === postsBefore,
+        JSON.stringify(messagePosts),
+      );
+      check(
+        "completion never calls the project artifact array",
+        arrayUrls.length === 0,
+        JSON.stringify(arrayUrls),
       );
     } finally {
       releaseIndex();
