@@ -18,7 +18,12 @@ import { artifacts } from "../../stores/artifacts";
 import { currentId, feedback as feedbackSignal } from "../../stores/session";
 import { branchState } from "../../stores/timeline";
 import { copyFailedText, copyText } from "../chrome/clipboard";
-import { forkFromMessage, setMessageForkRefresh, type ForkResult } from "../execution/branch";
+import {
+  forkFromMessage,
+  messageForkPending,
+  setMessageForkRefresh,
+  type ForkResult,
+} from "../execution/branch";
 import { scheduleWorkbenchRefresh } from "../notebook/kernel";
 import { paintIcon } from "../icons/paths";
 import { renderMd } from "../md/render";
@@ -243,7 +248,16 @@ function installForkMessageVisibility(): void {
   });
 }
 
-function clearBusyHint(busy: string): void {
+/**
+ * Which fork owns the busy sentence in `#composer-hint`. Every session shows
+ * the same sentence, so the text alone cannot tell a late settlement from
+ * another session apart from this session's own pending fork.
+ */
+let busyHintOwner = "";
+
+function clearBusyHint(owner: string, busy: string): void {
+  if (busyHintOwner !== owner) return;
+  busyHintOwner = "";
   const doc = globalThis.document as { getElementById?: (id: string) => HTMLElement | null } | undefined;
   if (!doc || typeof doc.getElementById !== "function") return;
   const host = doc.getElementById("composer-hint");
@@ -253,14 +267,16 @@ function clearBusyHint(busy: string): void {
 function settleForkButton(
   button: HTMLButtonElement,
   frameId: string,
+  owner: string,
   busy: string,
   label: string,
   result: ForkResult | null,
 ): void {
   if (currentId.value !== frameId) {
-    clearBusyHint(busy);
+    clearBusyHint(owner, busy);
     return;
   }
+  if (busyHintOwner === owner) busyHintOwner = "";
   if (result && result.ok === false && result.presentation.noCheckpoint) {
     const reason = result.presentation.message || historyT("history.forkMessage.failed");
     button.textContent = reason;
@@ -287,19 +303,23 @@ function forkMessageControl(messageId: string): HTMLElement {
     if (button.getAttribute("aria-disabled") === "true") return;
     const frameId = currentId.value;
     if (typeof frameId !== "string" || !frameId) return;
+    // A repaint while the POST is pending: the first button still owns it.
+    if (messageForkPending(frameId, messageId)) return;
     const busy = historyT("history.forkMessage.busy");
+    const owner = frameId + "\0" + messageId;
     button.setAttribute("aria-disabled", "true");
     button.setAttribute("aria-busy", "true");
     button.textContent = busy;
     button.title = busy;
     hint(busy, false, true);
+    busyHintOwner = owner;
     return forkFromMessage(frameId, messageId).then(
       (result) => {
-        settleForkButton(button, frameId, busy, label, result);
+        settleForkButton(button, frameId, owner, busy, label, result);
         return result;
       },
       (error: unknown) => {
-        settleForkButton(button, frameId, busy, label, null);
+        settleForkButton(button, frameId, owner, busy, label, null);
         throw error;
       },
     );

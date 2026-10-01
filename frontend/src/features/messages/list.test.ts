@@ -809,6 +809,56 @@ describe("stored rows, first page and older page alike", () => {
     expect(button.textContent).not.toBe(historyT("history.forkMessage.label"));
   });
 
+  it("a late fork from another session leaves this session's busy announcement", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    vi.stubGlobal("hint", hint);
+    const releases: Array<(response: Response) => void> = [];
+    vi.stubGlobal("fetch", () => new Promise<Response>((resolve) => {
+      releases.push(resolve);
+    }));
+    currentId.value = "frame-1";
+    const left = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    const pendingLeft = left.onclick!();
+    currentId.value = "frame-2";
+    const here = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    const pendingHere = here.onclick!();
+    expect(releases).toHaveLength(2);
+    releases[0]!(new Response(JSON.stringify({ branch_id: "br-left", name: "left" }), { status: 200 }));
+    await pendingLeft;
+    expect(doc.hint.textContent).toContain(historyT("history.forkMessage.busy"));
+    expect(here.getAttribute("aria-busy")).toBe("true");
+    releases[1]!(new Response(JSON.stringify({ branch_id: "br-here", name: "here" }), { status: 200 }));
+    await pendingHere;
+    expect(doc.hint.textContent).toContain(historyT("history.forkMessage.created", "here"));
+  });
+
+  it("a row repainted while its fork is pending does not start a second busy state", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    currentId.value = "frame-1";
+    vi.stubGlobal("hint", hint);
+    const posts: unknown[] = [];
+    let release: (response: Response) => void = () => undefined;
+    vi.stubGlobal("fetch", (_url: string, init?: RequestInit) => {
+      posts.push(JSON.parse(String(init?.body || "{}")));
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    });
+    const original = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    const pending = original.onclick!();
+    hint("The turn finished.");
+    const repainted = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    await repainted.onclick!();
+    expect(posts).toHaveLength(1);
+    expect(repainted.getAttribute("aria-busy")).toBeNull();
+    expect(repainted.getAttribute("aria-disabled")).toBeNull();
+    expect(repainted.textContent).toBe(historyT("history.forkMessage.label"));
+    expect(doc.hint.textContent).toContain("The turn finished.");
+    release(new Response(JSON.stringify({ branch_id: "br-new", name: "alt" }), { status: 200 }));
+    await pending;
+    expect(posts).toHaveLength(1);
+  });
+
   it("a starter chip fills the composer and grows it to fit", () => {
     renderEmptySession();
     const chip = doc.messages.querySelector(".es-chip")!;

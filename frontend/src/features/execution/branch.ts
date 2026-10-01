@@ -89,6 +89,15 @@ function messageForkKey(frameId: string, messageId: string): string {
   return frameId + "\0" + messageId;
 }
 
+/**
+ * Whether this message's fork is still in flight. A history repaint gives the
+ * row a fresh button while the first POST is pending; that button asks here
+ * before it shows a busy state the first request would never settle.
+ */
+export function messageForkPending(frameId: string, messageId: string): boolean {
+  return messageForkInFlight.has(messageForkKey(frameId, messageId));
+}
+
 function branchLabel(result: unknown): { branch_id: string; name: string } {
   const rec = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
   const branchId = publicText(rec.branch_id, 96);
