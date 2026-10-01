@@ -10,6 +10,7 @@
  *   POST /frames/{id}/recovery/actions/{restore|retry|restart_fresh}
  */
 
+import { currentId } from "../../stores/session";
 import { workbenchErrors } from "../../stores/timeline";
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
@@ -57,6 +58,33 @@ export type ForkResult =
 /** One in-flight fork per message. A second click must not POST again. */
 const messageForkInFlight = new Set<string>();
 
+/**
+ * Panel refresh after a message fork. `list.ts` wires this to the workbench
+ * refresh. `branch_created` also refreshes. There is no dynamic import of the
+ * notebook kernel: that import was static everywhere else, so it never became
+ * its own chunk and only warned at build time.
+ */
+let messageForkRefresh: (() => void) | null = null;
+
+export function setMessageForkRefresh(refresh: (() => void) | null): void {
+  messageForkRefresh = refresh;
+}
+
+function refreshAfterMessageFork(): void {
+  const refresh = messageForkRefresh;
+  if (!refresh) return;
+  try {
+    refresh();
+  } catch {
+    // The branch already exists. A failed panel refresh must not look like
+    // a failed fork, and must not be retried as a second POST.
+  }
+}
+
+function stillOnFrame(frameId: string): boolean {
+  return currentId.value === frameId;
+}
+
 function messageForkKey(frameId: string, messageId: string): string {
   return frameId + "\0" + messageId;
 }
@@ -92,17 +120,13 @@ export async function forkFromMessage(
       const presentation = attempt.presentation.message
         ? attempt.presentation
         : { ...attempt.presentation, message: historyT("history.forkMessage.failed") };
-      applyForkPresentation(presentation);
+      if (stillOnFrame(frameId)) applyForkPresentation(presentation);
       return { ok: false, presentation };
     }
     const created = branchLabel(attempt.result);
-    hint(historyT("history.forkMessage.created", created.name));
-    try {
-      const { scheduleWorkbenchRefresh } = await import("../notebook/kernel");
-      scheduleWorkbenchRefresh();
-    } catch {
-      // The branch already exists. A failed panel refresh must not look like
-      // a failed fork, and must not be retried as a second POST.
+    if (stillOnFrame(frameId)) {
+      hint(historyT("history.forkMessage.created", created.name));
+      refreshAfterMessageFork();
     }
     return { ok: true, ...created };
   } finally {

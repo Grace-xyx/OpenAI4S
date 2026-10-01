@@ -18,7 +18,8 @@ import { artifacts } from "../../stores/artifacts";
 import { currentId, feedback as feedbackSignal } from "../../stores/session";
 import { branchState } from "../../stores/timeline";
 import { copyFailedText, copyText } from "../chrome/clipboard";
-import { forkFromMessage } from "../execution/branch";
+import { forkFromMessage, setMessageForkRefresh, type ForkResult } from "../execution/branch";
+import { scheduleWorkbenchRefresh } from "../notebook/kernel";
 import { paintIcon } from "../icons/paths";
 import { renderMd } from "../md/render";
 import { publicText } from "../scrub/scrub";
@@ -219,44 +220,17 @@ function reviewStatusOf(m: StoredMessage): unknown {
   return review;
 }
 
-function forkMessageIdOf(node: unknown): string {
-  if (!node || typeof node !== "object") return "";
-  const elNode = node as {
-    getAttribute?: (name: string) => string | null;
-    dataset?: { forkMessageId?: string };
-  };
-  if (typeof elNode.getAttribute === "function") {
-    const attr = elNode.getAttribute("data-fork-message-id");
-    if (typeof attr === "string" && attr) return attr;
-  }
-  const fromDataset = elNode.dataset && elNode.dataset.forkMessageId;
-  return typeof fromDataset === "string" ? fromDataset : "";
-}
-
-function setForkControlHidden(node: HTMLElement, hidden: boolean): void {
-  node.hidden = hidden;
-  const row = node.parentElement;
-  if (row && row.classList.contains("msg-fork")) row.hidden = hidden;
-}
-
 /**
- * One subscription for every stored row. History paints before
- * `loadWorkbenchState`, so the first frame often has no branch projection.
+ * One subscription for every stored row, including rows still inside the
+ * off-document fragment `loadHistory` paints before `replaceChildren`.
+ * A per-node scan misses that fragment, so the flag lives on the document
+ * element and the stylesheet shows `.msg-fork` only while it is `"on"`.
  */
-function syncForkMessageButtons(show: boolean): void {
-  const doc = globalThis.document as { querySelectorAll?: (sel: string) => ArrayLike<unknown> } | undefined;
-  if (!doc || typeof doc.querySelectorAll !== "function") return;
-  let nodes: ArrayLike<unknown>;
-  try {
-    nodes = doc.querySelectorAll("[data-fork-message-id]");
-  } catch {
-    return;
-  }
-  const list = nodes ? Array.from(nodes) : [];
-  for (const node of list) {
-    if (!forkMessageIdOf(node)) continue;
-    setForkControlHidden(node as HTMLElement, !show);
-  }
+function syncForkMessageVisibility(show: boolean): void {
+  const doc = globalThis.document as { documentElement?: HTMLElement } | undefined;
+  const root = doc && doc.documentElement;
+  if (!root || !root.dataset) return;
+  root.dataset.forkFromMessage = show ? "on" : "off";
 }
 
 let forkMessageVisibilityInstalled = false;
@@ -265,8 +239,39 @@ function installForkMessageVisibility(): void {
   if (forkMessageVisibilityInstalled) return;
   forkMessageVisibilityInstalled = true;
   effect(() => {
-    syncForkMessageButtons(forkFromMessageCapability());
+    syncForkMessageVisibility(forkFromMessageCapability());
   });
+}
+
+function clearBusyHint(busy: string): void {
+  const doc = globalThis.document as { getElementById?: (id: string) => HTMLElement | null } | undefined;
+  if (!doc || typeof doc.getElementById !== "function") return;
+  const host = doc.getElementById("composer-hint");
+  if (host && (host.textContent || "").includes(busy)) hint();
+}
+
+function settleForkButton(
+  button: HTMLButtonElement,
+  frameId: string,
+  busy: string,
+  label: string,
+  result: ForkResult | null,
+): void {
+  if (currentId.value !== frameId) {
+    clearBusyHint(busy);
+    return;
+  }
+  if (result && result.ok === false && result.presentation.noCheckpoint) {
+    const reason = result.presentation.message || historyT("history.forkMessage.failed");
+    button.textContent = reason;
+    button.title = reason;
+    button.removeAttribute("aria-busy");
+    return;
+  }
+  button.textContent = label;
+  button.title = label;
+  button.removeAttribute("aria-disabled");
+  button.removeAttribute("aria-busy");
 }
 
 function forkMessageControl(messageId: string): HTMLElement {
@@ -276,28 +281,30 @@ function forkMessageControl(messageId: string): HTMLElement {
   const label = historyT("history.forkMessage.label");
   button.textContent = label;
   button.title = label;
-  button.setAttribute("aria-label", label);
   button.setAttribute("data-fork-message-id", messageId);
   button.dataset.forkMessageId = messageId;
   button.onclick = () => {
-    if (button.disabled) return;
+    if (button.getAttribute("aria-disabled") === "true") return;
     const frameId = currentId.value;
     if (typeof frameId !== "string" || !frameId) return;
-    button.disabled = true;
-    button.setAttribute("aria-busy", "true");
     const busy = historyT("history.forkMessage.busy");
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-busy", "true");
+    button.textContent = busy;
     button.title = busy;
-    button.setAttribute("aria-label", busy);
-    return forkFromMessage(frameId, messageId).finally(() => {
-      button.disabled = false;
-      button.removeAttribute("aria-busy");
-      const next = historyT("history.forkMessage.label");
-      button.title = next;
-      button.setAttribute("aria-label", next);
-    });
+    hint(busy, false, true);
+    return forkFromMessage(frameId, messageId).then(
+      (result) => {
+        settleForkButton(button, frameId, busy, label, result);
+        return result;
+      },
+      (error: unknown) => {
+        settleForkButton(button, frameId, busy, label, null);
+        throw error;
+      },
+    );
   };
   row.appendChild(button);
-  setForkControlHidden(button, !forkFromMessageCapability());
   return row;
 }
 
@@ -570,5 +577,9 @@ export function interleaveHistory(
   items.sort((a, b) => a.t - b.t || a.seq - b.seq);
   return items;
 }
+
+setMessageForkRefresh(() => {
+  scheduleWorkbenchRefresh();
+});
 
 installForkMessageVisibility();

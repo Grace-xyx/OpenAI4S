@@ -1,10 +1,10 @@
 import { effect } from "@preact/signals";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { currentId } from "../../stores/session";
 import { workbenchErrors } from "../../stores/timeline";
 import { historyT } from "../messages/copy";
-import { scheduleWorkbenchRefresh } from "../notebook/kernel";
 import { setExecutionFetch } from "./api";
-import { applyForkPresentation, forkFromMessage } from "./branch";
+import { applyForkPresentation, forkFromMessage, setMessageForkRefresh } from "./branch";
 import {
   FORK_NO_CHECKPOINT_MESSAGE,
   forkErrorDisplay,
@@ -14,10 +14,6 @@ import {
   presentForkError,
   shouldRetryFork,
 } from "./conflict";
-
-vi.mock("../notebook/kernel", () => ({
-  scheduleWorkbenchRefresh: vi.fn(),
-}));
 
 function conflict409(message = FORK_NO_CHECKPOINT_MESSAGE): {
   status: number;
@@ -120,7 +116,9 @@ describe("forkFromMessage", () => {
     hints.length = 0;
     vi.unstubAllGlobals();
     setExecutionFetch(null);
-    vi.mocked(scheduleWorkbenchRefresh).mockClear();
+    setMessageForkRefresh(null);
+    currentId.value = null;
+    workbenchErrors.value = Object.create(null);
   });
 
   function jsonResponse(body: unknown, status: number): Response {
@@ -128,6 +126,9 @@ describe("forkFromMessage", () => {
   }
 
   it("posts exactly {from_message_id} once, then refreshes and names the branch", async () => {
+    currentId.value = "frame/1";
+    const refresh = vi.fn();
+    setMessageForkRefresh(refresh);
     const posts: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal("hint", (message: string) => {
       hints.push(message);
@@ -143,10 +144,13 @@ describe("forkFromMessage", () => {
     }]);
     expect(result).toEqual({ ok: true, branch_id: "br-1", name: "from question" });
     expect(hints).toEqual([historyT("history.forkMessage.created", "from question")]);
-    expect(scheduleWorkbenchRefresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("presents a 409 once and does not fork again or fall back to another source", async () => {
+    currentId.value = "frame-1";
+    const refresh = vi.fn();
+    setMessageForkRefresh(refresh);
     const posts: unknown[] = [];
     setExecutionFetch(async (_url, init) => {
       posts.push(JSON.parse(String(init?.body || "{}")));
@@ -165,10 +169,11 @@ describe("forkFromMessage", () => {
       },
     });
     expect(workbenchErrors.value.branchAction).toBe(FORK_NO_CHECKPOINT_MESSAGE);
-    expect(scheduleWorkbenchRefresh).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it("uses the history fallback when the failure has no sentence", async () => {
+    currentId.value = "frame-1";
     setExecutionFetch(async () => {
       throw new Error("");
     });
@@ -181,6 +186,9 @@ describe("forkFromMessage", () => {
   });
 
   it("a second call while the first is in flight does not post", async () => {
+    currentId.value = "frame-1";
+    const refresh = vi.fn();
+    setMessageForkRefresh(refresh);
     const posts: unknown[] = [];
     let release: (response: Response) => void = () => undefined;
     setExecutionFetch((_url, init) => {
@@ -196,7 +204,83 @@ describe("forkFromMessage", () => {
     release(jsonResponse({ branch_id: "br-2" }, 200));
     expect(await first).toMatchObject({ ok: true, branch_id: "br-2", name: "br-2" });
     expect(posts).toHaveLength(1);
-    expect(scheduleWorkbenchRefresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the created branch but does not hint or refresh after the user leaves", async () => {
+    currentId.value = "frame-1";
+    const refresh = vi.fn();
+    setMessageForkRefresh(refresh);
+    const held = { recoveryAction: "keep" };
+    workbenchErrors.value = held;
+    vi.stubGlobal("hint", (message: string) => {
+      hints.push(message);
+    });
+    let release: (response: Response) => void = () => undefined;
+    setExecutionFetch(() => new Promise<Response>((resolve) => {
+      release = resolve;
+    }));
+    const pending = forkFromMessage("frame-1", "msg-9");
+    currentId.value = "frame-2";
+    release(jsonResponse({ branch_id: "br-1", name: "from question" }, 200));
+    await expect(pending).resolves.toEqual({ ok: true, branch_id: "br-1", name: "from question" });
+    expect(hints).toEqual([]);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(workbenchErrors.value).toBe(held);
+    setExecutionFetch(async () => jsonResponse({ branch_id: "br-3", name: "again" }, 200));
+    currentId.value = "frame-1";
+    await expect(forkFromMessage("frame-1", "msg-9")).resolves.toMatchObject({
+      ok: true,
+      branch_id: "br-3",
+    });
+  });
+
+  it("returns a 409 but does not present it after the user leaves", async () => {
+    currentId.value = "frame-1";
+    const refresh = vi.fn();
+    setMessageForkRefresh(refresh);
+    const held = { recoveryAction: "keep" };
+    workbenchErrors.value = held;
+    vi.stubGlobal("hint", (message: string) => {
+      hints.push(message);
+    });
+    let release: (response: Response) => void = () => undefined;
+    setExecutionFetch(() => new Promise<Response>((resolve) => {
+      release = resolve;
+    }));
+    const pending = forkFromMessage("frame-1", "msg-9");
+    currentId.value = "other";
+    release(jsonResponse({ error: FORK_NO_CHECKPOINT_MESSAGE, code: "conflict" }, 409));
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      presentation: { noCheckpoint: true, message: FORK_NO_CHECKPOINT_MESSAGE },
+    });
+    expect(hints).toEqual([]);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(workbenchErrors.value).toBe(held);
+    currentId.value = "frame-1";
+    setExecutionFetch(async () => jsonResponse({ branch_id: "br-4" }, 200));
+    await expect(forkFromMessage("frame-1", "msg-9")).resolves.toMatchObject({ ok: true });
+  });
+
+  it("still returns the created branch when the injected refresh throws", async () => {
+    currentId.value = "frame-1";
+    let calls = 0;
+    setMessageForkRefresh(() => {
+      calls += 1;
+      throw new Error("refresh down");
+    });
+    vi.stubGlobal("hint", (message: string) => {
+      hints.push(message);
+    });
+    setExecutionFetch(async () => jsonResponse({ branch_id: "br-5", name: "kept" }, 200));
+    await expect(forkFromMessage("frame-1", "msg-9")).resolves.toEqual({
+      ok: true,
+      branch_id: "br-5",
+      name: "kept",
+    });
+    expect(calls).toBe(1);
+    expect(hints).toEqual([historyT("history.forkMessage.created", "kept")]);
   });
 });
 

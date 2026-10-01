@@ -78,21 +78,26 @@
   display: none;
 }
 
-/* A stored user question can fork. `.msg.user` is a row, so the control
-   takes the next line and stays out of the way until the capability is on. */
-.msg.user:has(.msg-fork) {
+/* A stored user question can fork. Wrap only while the control is shown,
+   so a checkpointed row does not grow an empty line when the capability is off. */
+:root[data-fork-from-message="on"] .msg.user:has(.msg-fork) {
   flex-wrap: wrap;
 }
 .msg-fork {
   flex: 0 0 100%;
-  display: flex;
+  display: none;
   justify-content: flex-end;
   margin-top: 4px;
 }
-/* Author `display` beats the user-agent `[hidden]` rule, so a capability
-   that is still off would otherwise leave an empty flex line. */
-.msg-fork[hidden],
-.msg-fork:has(.msg-fork-btn[hidden]) {
+:root[data-fork-from-message="on"] .msg-fork {
+  display: flex;
+}
+/* Author `display` beats the user-agent `[hidden]` rule. The row and the
+   button are separate cases, so one selector list does not hide both. */
+:root[data-fork-from-message="on"] .msg-fork[hidden] {
+  display: none;
+}
+:root[data-fork-from-message="on"] .msg-fork:has(.msg-fork-btn[hidden]) {
   display: none;
 }
 .msg-fork-btn {
@@ -106,12 +111,25 @@
   font-size: 12px;
   line-height: 1.4;
   cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .msg-fork-btn:hover {
   color: var(--text-000);
   background: var(--bg-200);
 }
-.msg-fork-btn:disabled {
+.msg-fork-btn:disabled,
+.msg-fork-btn[aria-disabled="true"] {
   cursor: default;
   opacity: 0.7;
+}
+.msg-fork-btn[aria-disabled="true"]:hover {
+  color: var(--text-400);
+  background: transparent;
+}
+@media (max-width: 900px) {
+  .msg-fork-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
 }
