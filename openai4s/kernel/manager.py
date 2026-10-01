@@ -950,16 +950,24 @@ class Kernel:
         {"save_artifact", "materialise_artifact", "prov_record"}
     )
 
-    def _stamp_inflight_execution_cell(self, method: str, args: Any) -> None:
-        """Overwrite ``executionCellId`` with this execute's own id.
+    #: The producing Cell recorded when the worker's own claim and the Cell
+    #: the host is executing disagree. No ``execution_log`` row has this id,
+    #: so the evidence check never verifies such a version.
+    UNATTRIBUTED_EXECUTION_CELL = "unattributed"
 
-        The worker copies a process-global cell id into the three calls that
-        write a version. Cell code can replace that global with an earlier
-        successful cell's id, and the evidence panel then treats the write as
-        checked. The id on the execute frame, recorded for this read loop, is
-        the one that counts. With no execute in flight the worker's value is
-        dropped. ``producingCellId`` is the caller's claim and is left alone;
-        the host prefers the execution id.
+    def _stamp_inflight_execution_cell(self, method: str, args: Any) -> None:
+        """Decide ``executionCellId`` on the three version-writing calls.
+
+        The worker copies a process-global cell id into the call. Cell code
+        can rewrite that global, or add a snake-case ``execution_cell_id``
+        that wins when the dispatcher decodes the keys; and a thread can
+        send a call after its Cell returned, which this read loop then
+        services during the next execute. So every spelling of the key is
+        removed, and the host writes the id of the execute it is reading
+        for -- only when the worker's own claim, if it made one, is that same
+        id. Any disagreement, or no execute in flight, records
+        ``UNATTRIBUTED_EXECUTION_CELL``. ``producingCellId`` is the caller's
+        claim and is left alone; the host prefers the execution id.
         """
 
         if method not in self._EXECUTION_CELL_STAMP_METHODS:
@@ -967,11 +975,20 @@ class Kernel:
         if not isinstance(args, list) or not args or not isinstance(args[0], dict):
             return
         spec = args[0]
+        claimed: set[str] = set()
+        for key in [
+            key
+            for key in spec
+            if str(key).replace("_", "").lower() == "executioncellid"
+        ]:
+            value = spec.pop(key)
+            if value is not None and value != "":
+                claimed.add(str(value))
         cell_id = getattr(self, "_inflight_execute_cell_id", None)
-        if isinstance(cell_id, str) and cell_id:
+        if isinstance(cell_id, str) and cell_id and claimed <= {cell_id}:
             spec["executionCellId"] = cell_id
         else:
-            spec.pop("executionCellId", None)
+            spec["executionCellId"] = self.UNATTRIBUTED_EXECUTION_CELL
 
     def _service_host_call(self, frame: dict) -> None:
         call_id = frame.get("id")
@@ -986,8 +1003,9 @@ class Kernel:
                 }
             )
             return
-        self._stamp_inflight_execution_cell(method, args)
         try:
+            # Inside the try: a malformed frame still gets its one response.
+            self._stamp_inflight_execution_cell(method, args)
             bind_generation = getattr(self.dispatcher, "bind_bash_generation", None)
             bind_action = getattr(self.dispatcher, "bind_action_context", None)
             bind_sandbox = getattr(self.dispatcher, "bind_sandbox_status", None)

@@ -712,80 +712,108 @@ def test_save_artifact_host_call_carries_canonical_and_declared_cell_ids():
 _STAMP_METHODS = ("save_artifact", "materialise_artifact", "prov_record")
 
 
-def test_execution_cell_stamp_uses_the_host_id_and_drops_it_when_idle():
-    """The three version-writing calls are stamped before dispatch.
+def test_execution_cell_stamp_trusts_only_an_agreeing_claim():
+    """The three version-writing calls carry the host's Cell, or none.
 
-    With no execute in flight the worker's ``executionCellId`` is removed.
-    ``producingCellId`` stays the caller's claim. Other methods are untouched.
+    The host writes the id of the execute in flight when the worker's own
+    claim is absent or the same id. A different claim (a rewritten global, a
+    late call), a snake-case spelling smuggled beside it, or no execute in
+    flight records ``unattributed``. ``producingCellId`` stays the caller's
+    claim; other methods are untouched; a malformed frame still gets exactly
+    one response.
     """
 
     seen: list[tuple[str, list]] = []
+    sent: list[dict] = []
 
     def dispatcher(method, args):
         seen.append((method, args))
         return {"ok": True}
 
-    with Kernel(dispatcher=dispatcher) as kernel:
-        for method in _STAMP_METHODS:
-            kernel._service_host_call(
-                {
-                    "id": f"hc-{method}",
-                    "method": method,
-                    "args": [
-                        {
-                            "path": "x",
-                            "executionCellId": "forged",
-                            "producingCellId": "caller-says",
-                        }
-                    ],
-                }
-            )
-        kernel._service_host_call(
-            {
-                "id": "hc-other",
-                "method": "llm",
-                "args": [{"executionCellId": "leave-me"}],
-            }
-        )
-        assert [call[0] for call in seen] == [*_STAMP_METHODS, "llm"]
-        for method, args in seen[:3]:
-            assert "executionCellId" not in args[0], method
-            assert args[0]["producingCellId"] == "caller-says"
-        assert seen[3][1][0]["executionCellId"] == "leave-me"
-
+    def stamped(kernel, spec, method="save_artifact"):
         seen.clear()
+        kernel._service_host_call(
+            {"id": "hc-1", "method": method, "args": [dict(spec)]}
+        )
+        assert len(seen) == 1
+        return seen[0][1][0]
+
+    with Kernel(dispatcher=dispatcher) as kernel:
+        kernel._send = sent.append
+        for method in _STAMP_METHODS:
+            idle = stamped(
+                kernel,
+                {"path": "x", "executionCellId": "forged", "producingCellId": "caller"},
+                method,
+            )
+            assert idle["executionCellId"] == "unattributed", method
+            assert idle["producingCellId"] == "caller"
+        other = stamped(kernel, {"executionCellId": "leave-me"}, "llm")
+        assert other["executionCellId"] == "leave-me"
+
         kernel._inflight_execute_cell_id = "cell-live"
         try:
-            for method in _STAMP_METHODS:
-                kernel._service_host_call(
-                    {
-                        "id": f"live-{method}",
-                        "method": method,
-                        "args": [
-                            {
-                                "path": "x",
-                                "executionCellId": "forged",
-                                "producingCellId": "caller-says",
-                            }
-                        ],
-                    }
-                )
+            assert (
+                stamped(kernel, {"executionCellId": "cell-live"})["executionCellId"]
+                == "cell-live"
+            )
+            assert stamped(kernel, {"path": "x"})["executionCellId"] == "cell-live"
+            assert (
+                stamped(kernel, {"executionCellId": "forged"})["executionCellId"]
+                == "unattributed"
+            )
+            smuggled = stamped(
+                kernel,
+                {"executionCellId": "cell-live", "execution_cell_id": "cell-ok"},
+            )
+            assert smuggled == {"executionCellId": "unattributed"}
+
+            sent.clear()
+            kernel._service_host_call({"id": "hc-bad", "method": ["x"], "args": []})
+            assert [frame["id"] for frame in sent] == ["hc-bad"]
+            assert sent[0]["type"] == "host_response" and sent[0]["error"]
         finally:
             kernel._inflight_execute_cell_id = None
 
-    assert [call[0] for call in seen] == list(_STAMP_METHODS)
-    for method, args in seen:
-        assert args[0]["executionCellId"] == "cell-live", method
-        assert args[0]["producingCellId"] == "caller-says"
+
+def _evidence_kernel_setup(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-only"),
+    )
+    dispatcher = build_dispatcher(cfg, workspace=workspace)
+    frame_id = dispatcher.store.new_frame(kind="delegate")
+    dispatcher.frame_id = frame_id
+    dispatcher.store.set_permission_rule(
+        scope="conversation",
+        scope_id=frame_id,
+        tool="save_artifact",
+        pattern="*",
+        decision="allow",
+    )
+    return workspace, dispatcher, dispatcher.store, frame_id
+
+
+def _evidence_for(store, frame_id, filename):
+    from openai4s.agent.delegation import _project_artifact_evidence
+
+    rows = store.artifact_evidence_rows_for_frame(frame_id, limit=12)
+    evidence = _project_artifact_evidence(rows, frame_id)
+    version = next(row for row in rows["versions"] if row["filename"] == filename)
+    item = next(item for item in evidence["items"] if item["filename"] == filename)
+    return version, item
 
 
 def test_a_failed_cell_cannot_borrow_an_earlier_cells_id(tmp_path):
-    """A real kernel stamps the failing cell, not the global it rewrote.
+    """A real kernel does not let a Cell borrow an earlier Cell's id.
 
     The cell sets ``sys.modules['__main__']._ACTIVE_CELL_ID`` to the earlier
-    successful cell, then writes a version. The stored producer is the failing
-    cell, and that version's evidence verdict is not verified. The successful
-    cell's own version stays verified.
+    successful cell, then writes a version. That claim disagrees with the
+    Cell the host is executing, so the stored producer is ``unattributed``
+    and the version is not verified. The successful cell's own version stays
+    verified.
     """
 
     from openai4s.agent.delegation import _project_artifact_evidence
@@ -843,15 +871,116 @@ def test_a_failed_cell_cannot_borrow_an_earlier_cells_id(tmp_path):
     evidence = _project_artifact_evidence(rows, frame_id)
     bad_version = next(row for row in rows["versions"] if row["filename"] == "bad.txt")
     ok_version = next(row for row in rows["versions"] if row["filename"] == "ok.txt")
-    assert bad_version["producing_cell_id"] == "cell-bad"
+    assert bad_version["producing_cell_id"] == "unattributed"
     assert ok_version["producing_cell_id"] == "cell-ok"
     bad_item = next(item for item in evidence["items"] if item["filename"] == "bad.txt")
     ok_item = next(item for item in evidence["items"] if item["filename"] == "ok.txt")
-    assert bad_item["producing_cell_id"] == "cell-bad"
+    assert bad_item["producing_cell_id"] == "unattributed"
     assert bad_item["verdict"] != "verified_version_and_producer"
-    assert "cell_failed" in bad_item["reasons"]
+    assert "cell_not_recorded" in bad_item["reasons"]
     assert ok_item["producing_cell_id"] == "cell-ok"
     assert ok_item["verdict"] == "verified_version_and_producer"
+
+
+def test_a_snake_case_cell_id_cannot_override_the_host_stamp(tmp_path):
+    """``decode_args`` keeps the last spelling of a key, so a smuggled
+    ``execution_cell_id`` used to win over the stamped ``executionCellId``."""
+
+    workspace, dispatcher, store, frame_id = _evidence_kernel_setup(tmp_path)
+    smuggle = (
+        "import sys\n"
+        "open('snake.txt', 'w', encoding='utf-8').write('stolen')\n"
+        "sys.modules['__main__'].host_call('save_artifact', [{\n"
+        "    'path': 'snake.txt', 'executionCellId': 'x',\n"
+        "    'execution_cell_id': 'cell-ok'}])\n"
+        "raise RuntimeError('cell failed after the write')\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        ok = kernel.execute("x = 1\n", cell_id="cell-ok")
+        store.log_cell(frame_id=frame_id, code="x = 1\n", result=ok, origin="delegate")
+        bad = kernel.execute(smuggle, cell_id="cell-snake")
+        assert bad["error"]
+        store.log_cell(frame_id=frame_id, code=smuggle, result=bad, origin="delegate")
+
+    version, item = _evidence_for(store, frame_id, "snake.txt")
+    assert version["producing_cell_id"] == "unattributed"
+    assert item["verdict"] != "verified_version_and_producer"
+
+
+def test_a_call_a_thread_sends_after_its_cell_is_not_given_the_next_cell(tmp_path):
+    """A failed Cell's thread writes after the Cell returned.
+
+    The frame waits in the pipe and is read during the next execute. The
+    worker's claim is still the failed Cell, the host is executing the next
+    one, so the version is ``unattributed`` -- not the next Cell, whose
+    verified evidence it would otherwise borrow.
+    """
+
+    import time
+
+    workspace, dispatcher, store, frame_id = _evidence_kernel_setup(tmp_path)
+    late = (
+        "import threading, time\n"
+        "def later():\n"
+        "    time.sleep(0.3)\n"
+        "    open('late.txt', 'w', encoding='utf-8').write('late')\n"
+        "    open('late-called.flag', 'w').write('1')\n"
+        "    host.save_artifact('late.txt')\n"
+        "    open('late-done.flag', 'w').write('1')\n"
+        "threading.Thread(target=later, daemon=True).start()\n"
+        "raise RuntimeError('this cell fails before its thread writes')\n"
+    )
+    wait_for_late_call = (
+        "import os, time\n"
+        "deadline = time.time() + 20\n"
+        "while not os.path.exists('late-done.flag') and time.time() < deadline:\n"
+        "    time.sleep(0.05)\n"
+        "print(os.path.exists('late-done.flag'))\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        bad = kernel.execute(late, cell_id="cell-bad-thread")
+        assert bad["error"]
+        store.log_cell(frame_id=frame_id, code=late, result=bad, origin="delegate")
+        deadline = time.monotonic() + 20
+        while not (workspace / "late-called.flag").exists():
+            assert time.monotonic() < deadline, "the thread never sent its call"
+            time.sleep(0.05)
+        nxt = kernel.execute(wait_for_late_call, cell_id="cell-next")
+        assert nxt["error"] is None, nxt.get("error")
+        assert nxt["stdout"].strip() == "True"
+        store.log_cell(
+            frame_id=frame_id, code=wait_for_late_call, result=nxt, origin="delegate"
+        )
+
+    version, item = _evidence_for(store, frame_id, "late.txt")
+    assert version["producing_cell_id"] == "unattributed"
+    assert item["verdict"] != "verified_version_and_producer"
+
+
+def test_a_cleared_cell_global_cannot_name_another_cell(tmp_path):
+    """With the worker's global cleared there is no claim, and the host
+    stamps the Cell it is executing; the caller's ``producing_cell_id`` is
+    not used."""
+
+    workspace, dispatcher, store, frame_id = _evidence_kernel_setup(tmp_path)
+    cleared = (
+        "import sys\n"
+        "sys.modules['__main__']._ACTIVE_CELL_ID[0] = None\n"
+        "open('cleared.txt', 'w', encoding='utf-8').write('stolen')\n"
+        "host.save_artifact('cleared.txt', producing_cell_id='cell-ok')\n"
+        "raise RuntimeError('cell failed after the write')\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        ok = kernel.execute("x = 1\n", cell_id="cell-ok")
+        store.log_cell(frame_id=frame_id, code="x = 1\n", result=ok, origin="delegate")
+        bad = kernel.execute(cleared, cell_id="cell-bad-cleared")
+        assert bad["error"]
+        store.log_cell(frame_id=frame_id, code=cleared, result=bad, origin="delegate")
+
+    version, item = _evidence_for(store, frame_id, "cleared.txt")
+    assert version["producing_cell_id"] == "cell-bad-cleared"
+    assert item["verdict"] != "verified_version_and_producer"
+    assert "cell_failed" in item["reasons"]
 
 
 def _require_matplotlib_in_the_kernel() -> None:
