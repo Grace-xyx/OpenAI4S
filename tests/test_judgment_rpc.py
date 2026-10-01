@@ -205,7 +205,13 @@ def test_kernel_judge_audit_omits_state_on_every_path(tmp_path: Any) -> None:
     assert lines[1] == PROBE_TEMPLATE_ID
     assert lines[2] == "ok"
     rows = _judge_rows(dispatcher.store.db_path)
-    _assert_previews_hide(rows, near, far, param)
+    assert len(rows) == 3
+    _assert_previews_hide(rows[:2], near, far, param)
+    # The unknown-template soft failure repeats the caller's id in its error
+    # text, so that row records no digest of it.
+    assert rows[2][2] is None
+    for secret in (near, far, param):
+        assert secret not in (rows[2][0] or "")
     assert [row[1] for row in rows] == [1, 1, 0]
     assert rows[0][0] == json.dumps(
         [{"template": "system.probe", "state": "<redacted judge state>"}],

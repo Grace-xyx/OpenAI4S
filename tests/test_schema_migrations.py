@@ -1972,12 +1972,16 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path, monke
     stay byte for byte across that forced re-run, and a ``judge`` row whose
     ``call_id`` is NULL is rewritten. ``PRAGMA secure_delete`` after the
     upgrade equals the value the connection had before it, including FAST.
+    A charset-safe id that is no template -- complete, cut at 500
+    characters, or already in the projection's shape -- is stored as
+    ``<unknown template>`` and leaves no byte of itself on disk.
     """
 
     near = f"SENTINEL-02-{uuid.uuid4()}"
     far = f"SENTINEL-02-{uuid.uuid4()}"
     param = f"SENTINEL-02-{uuid.uuid4()}"
-    secrets = (near, far, param)
+    mrn = f"MRN-{uuid.uuid4().hex[:12]}-HIV"
+    secrets = (near, far, param, mrn)
 
     complete = json.dumps(
         [
@@ -2052,6 +2056,22 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path, monke
         [{"url": "https://example.test/keep"}],
         ensure_ascii=False,
     )
+    mrn_raw = json.dumps(
+        [{"template": mrn, "state": {"secret": near}}],
+        ensure_ascii=False,
+    )
+    mrn_truncated = json.dumps(
+        [{"template": mrn, "state": {"secret": near, "pad": "q" * 800}}],
+        ensure_ascii=False,
+    )[:500]
+    mrn_shaped = json.dumps(
+        [{"template": mrn, "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    unknown_template = json.dumps(
+        [{"template": "<unknown template>", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
     for secret in secrets:
         assert secret not in control
         assert secret not in kept
@@ -2080,6 +2100,9 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path, monke
             [{"template": "system.probe", "state": "<redacted judge state>"}],
             ensure_ascii=False,
         ),
+        "mrn_raw": unknown_template,
+        "mrn_truncated": unknown_template,
+        "mrn_shaped": unknown_template,
         "control": control,
     }
     methods = {key: "judge" for key in expected}
@@ -2093,6 +2116,9 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path, monke
         "projected_params": projected_params,
         "projected_invalid": projected_invalid,
         "null_call": null_raw,
+        "mrn_raw": mrn_raw,
+        "mrn_truncated": mrn_truncated,
+        "mrn_shaped": mrn_shaped,
         "control": control,
     }
 

@@ -214,14 +214,16 @@ State is always `<redacted judge state>`. When the call carried params,
 those are `<redacted judge params>`. A call whose arguments are not a
 one-element list of an object stores only the state marker. Schema
 migration 33 does not write new rows. It rewrites `judge` rows already on
-disk. A preview that is already one of those projections is left byte for
-byte, including the params marker and `<invalid template>` or
+disk. A preview that is byte for byte one of those projections is left
+alone, including the params marker and `<invalid template>` or
 `<unknown template>`. A raw preview that still begins with a registered
 template id keeps that id and the state marker, and drops params. A raw
 prefix the registry does not resolve becomes `<unknown template>`. Every
 other raw preview becomes the state-only marker `[{"state": "<redacted judge state>"}]`,
 which is not the same shape as a new write of an invalid template.
-`result_preview`, `result_digest`, and the replay tape are unchanged.
+`result_preview` and the replay tape are unchanged. `result_digest` is
+unchanged except for a soft-fail error result, which is stored without a
+digest because its text can repeat the caller's template id or params.
 Copies that can still hold the original state are listed in
 [security.md](security.md#outbound-data-flow-semantic-judgment-experimental).
 This remains a separate audit surface from the named `judgment` event.
@@ -412,7 +414,9 @@ New `host_call_log` rows for `method="judge"` are projected by
 `HostCallRepository.log` (`AUDIT_ARG_PROJECTIONS["judge"]`). Schema
 migration 33 only rewrites rows already stored: a preview that is already
 the projection is unchanged, and a raw preview keeps a registered template
-id from its prefix plus the state marker, or becomes the state-only marker.
+id from its prefix plus the state marker, records an unregistered
+charset-safe prefix as `<unknown template>`, or becomes the state-only
+marker.
 The named `judgment` event includes raw state only when
 `experimental.judgment.audit_raw_state` is on.
 

@@ -417,7 +417,7 @@ it:
   still trips it.
 - Because the denylist is a table-name match, a query that reads the unrelated `agents.connectors` *column* is also refused; no bundled skill relies on that read.
 
-Credential values passed to `host.credentials.set(name, value)` are held only in an in-memory vault (never persisted). To keep that true end to end, the **RPC audit log** redacts them: `credentials_get` / `credentials_list` are not logged at all, and `credentials_set` is logged for audit **with its args redacted** — the plaintext value never enters `host_call_log`. The replay tape recorder likewise skips `credentials_set`, so an exported notebook cannot carry a plaintext credential. `host.judge` is a different projection on the same log: `args_preview` keeps a safe template id and replaces state and params with fixed markers (`<redacted judge state>`, `<redacted judge params>`). The call stays on the replay tape, and `result_preview` / `result_digest` stay.
+Credential values passed to `host.credentials.set(name, value)` are held only in an in-memory vault (never persisted). To keep that true end to end, the **RPC audit log** redacts them: `credentials_get` / `credentials_list` are not logged at all, and `credentials_set` is logged for audit **with its args redacted** — the plaintext value never enters `host_call_log`. The replay tape recorder likewise skips `credentials_set`, so an exported notebook cannot carry a plaintext credential. `host.judge` is a different projection on the same log: `args_preview` keeps a template id only when the judgment registry resolves it and replaces state and params with fixed markers (`<redacted judge state>`, `<redacted judge params>`). The call stays on the replay tape, and `result_preview` stays. `result_digest` stays too, except for a soft-fail error, which is stored without one.
 
 ### Correlation IDs and structured logs
 
@@ -861,18 +861,23 @@ judgment registry resolves it. A string that matches
 `<invalid template>`. State is always `<redacted judge state>`. When the
 call carried params, those are `<redacted judge params>`. A call whose
 arguments are not a one-element list of an object stores only the state
-marker. `result_preview` and `result_digest` are unchanged, and the call
-stays on the replay tape.
+marker. `result_preview` is unchanged. `result_digest` is unchanged
+except for a soft-fail error result, which is stored without a digest: the
+error text can repeat the caller's template id or params, and a short id
+can be recovered from its SHA-256 by trying candidates. The call stays on
+the replay tape.
 
 Schema migration 33 does not project new rows. It rewrites `judge` rows
 already stored. For that rewrite the migration sets `PRAGMA secure_delete = ON`
 and restores the connection's previous mode by name (`OFF` / `ON` / `FAST`)
 before the migration transaction commits, so the bytes that `UPDATE` replaced
-are zeroed in those pages. A preview that is already the projection is left
-unchanged, including a params marker and `<invalid template>` or
-`<unknown template>`. A raw preview that still begins with a registered
-template id keeps that id and the state marker and drops params. Every
-other raw preview becomes the state-only marker.
+are zeroed in those pages. A preview that is byte for byte what a new write
+stores is left unchanged, including a params marker and `<invalid template>`
+or `<unknown template>`. A raw preview that still begins with a registered
+template id keeps that id and the state marker and drops params. A raw
+preview that begins with a charset-safe id the registry does not resolve
+becomes `<unknown template>`. Every other raw preview becomes the
+state-only marker.
 
 Stop the daemon before upgrading. A process still running the previous
 release keeps writing raw `judge` rows, and migration 33 does not run again

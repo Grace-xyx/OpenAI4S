@@ -1871,10 +1871,11 @@ class Store:
         ``host_call_log.args_preview`` for ``method='judge'`` is rewritten
         with :func:`openai4s.storage.metadata.redact_stored_judge_args_preview`.
         New rows are projected by ``HostCallRepository.log``; this step only
-        rewrites rows already stored. A preview that is already that
-        projection is left byte for byte. A raw preview keeps a registered
-        template id taken from its prefix and replaces the state with the
-        marker; every other raw preview becomes the state-only marker.
+        rewrites rows already stored. A preview that is byte for byte what
+        that projection stores is left alone. A raw preview that begins with
+        a charset-safe template id keeps it only when the registry resolves
+        it (``<unknown template>`` otherwise) and gets the state marker;
+        every other raw preview becomes the state-only marker.
 
         Rows are updated by ``rowid``. ``call_id`` is nullable, and
         ``WHERE call_id = NULL`` matches nothing.

@@ -176,12 +176,13 @@ dispatcher 信封 `log_host_call(method="judge")` 写入的 `args_preview` 由
 `<unknown template>`；其余模板字符串记为 `<invalid template>`。state 换成
 `<redacted judge state>`；调用带了 params 时换成 `<redacted judge params>`。
 参数不是「单元素对象列表」的调用只存 state 标记。schema 迁移 33 不写新行，
-只改写已经落盘的 `judge` 行。已经是上述投影的预览逐字节保留，包括 params
+只改写已经落盘的 `judge` 行。与上述投影逐字节相同的预览保持不变，包括 params
 标记以及 `<invalid template>` / `<unknown template>`。仍是原文、且仍以已注册
 模板 id 开头的预览保留该 id 和 state 标记，并丢掉 params。注册表解析不到的
 前缀记为 `<unknown template>`。其余原文变成只含 state 的
 `[{"state": "<redacted judge state>"}]`，和新写入的非法模板不是同一种形状。
-`result_preview`、`result_digest` 和回放 tape 不变。仍可能留有原文的副本列在
+`result_preview` 和回放 tape 不变。`result_digest` 也不变，只有 soft-fail
+错误结果不记 digest，因为错误文本可能复述调用方的模板 id 或 params。仍可能留有原文的副本列在
 [security.md](security.md#outbound-data-flow-semantic-judgment-experimental)。
 这仍是和命名事件 `judgment` 分开的另一处审计面。
 
@@ -317,7 +318,8 @@ W2 待办：`tests/conftest.py` 仍不清除 `OPENAI4S_*JUDGMENT*`，而现在�
 和 `_m_capabilities()` 里。`method="judge"` 的新 `host_call_log` 行由
 `HostCallRepository.log`（`AUDIT_ARG_PROJECTIONS["judge"]`）投影。schema
 迁移 33 只改写已经落盘的行：已经是投影的预览保持不变；原文预览若前缀是已注册
-模板 id，则保留该 id 和 state 标记，否则变成只含 state 的标记。命名事件
+模板 id，则保留该 id 和 state 标记；前缀是字符集合法但未注册的 id 时记为
+`<unknown template>`；其余变成只含 state 的标记。命名事件
 `judgment` 只有在 `experimental.judgment.audit_raw_state` 打开时才带原始 state。
 
 ### W2 — 2026-09-20

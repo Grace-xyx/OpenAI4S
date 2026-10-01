@@ -563,3 +563,114 @@ def test_registered_template_ids_are_kept_and_unknown_ids_are_not():
         {"template": "<unknown template>", "state": "<redacted judge state>"}
     ]
     assert "MRN-0012345-HIV" not in json.dumps(unknown)
+
+
+def test_raw_previews_shaped_like_a_projection_are_still_projected():
+    """Only the exact text a new write stores is left alone.
+
+    Each sample parses into the projection's shape but was not written by
+    ``judge_audit_args``: an id that is no template, another key order,
+    other separators, an escaped character, a duplicated ``state`` key that
+    hid a raw value. None of them may survive the stored rewrite as it is.
+    """
+
+    mrn = "MRN-0012345-HIV"
+    marker = "<redacted judge state>"
+    unknown = json.dumps(
+        [{"template": "<unknown template>", "state": marker}], ensure_ascii=False
+    )
+    samples = {
+        json.dumps([{"template": mrn, "state": marker}]): unknown,
+        json.dumps(
+            [{"template": mrn, "state": marker, "params": "<redacted judge params>"}]
+        ): unknown,
+        json.dumps([{"template": mrn, "state": marker}], separators=(",", ":")): None,
+        json.dumps([{"state": marker, "template": "system.probe"}]): None,
+        '[{"template": "system.probe", "state": "\\u003credacted judge state>"}]': None,
+        '[{"state": "SECRET-02-dup", "state": "<redacted judge state>"}]': None,
+        json.dumps([{"state": marker, "params": "<redacted judge params>"}]): None,
+    }
+    for raw, expected in samples.items():
+        rewritten = redact_stored_judge_args_preview(raw)
+        assert rewritten != raw, raw
+        assert mrn not in rewritten
+        assert "SECRET-02-dup" not in rewritten
+        if expected is not None:
+            assert rewritten == expected
+        # The rewrite is itself a fixed point.
+        assert redact_stored_judge_args_preview(rewritten) == rewritten
+
+
+def test_a_failing_template_registry_keeps_no_caller_text(monkeypatch):
+    """The registry is experimental. Its failure must not reach migration 33.
+
+    Any exception while the bundled templates load is the same answer as an
+    unknown id: the caller's text is not kept, and the stored rewrite still
+    returns a projection instead of raising.
+    """
+
+    import openai4s.judgment.registry as registry
+
+    def broken(_template_id):
+        raise ValueError("template registered twice")
+
+    monkeypatch.setattr(registry, "get_template", broken)
+    projected = judge_audit_args([{"template": "system.probe", "state": {"s": "x"}}])
+    assert projected == [
+        {"template": "<unknown template>", "state": "<redacted judge state>"}
+    ]
+    raw = json.dumps([{"template": "system.probe", "state": {"s": "x"}}])
+    assert json.loads(redact_stored_judge_args_preview(raw)) == projected
+
+
+def test_judge_error_results_are_stored_without_a_digest(tmp_path):
+    """A judge soft-fail can repeat the caller's id; its hash would too.
+
+    ``unknown template: MRN-…`` hashed with SHA-256 is recoverable by trying
+    candidate ids. The row still says an error happened. A successful judge
+    result and other methods' errors keep their digests.
+    """
+
+    import hashlib
+
+    store = _store(tmp_path)
+    now, _calls = _clock(9000)
+    repository = HostCallRepository(store._conn, store._lock, clock_ms=now)
+    mrn = "MRN-0012345-HIV"
+    echoed = {"error": f"unknown template: {mrn}"}
+    repository.log(
+        method="judge",
+        args=[{"template": mrn, "state": {"p": "x"}}],
+        ok=False,
+        result=echoed,
+    )
+    repository.log(
+        method="judge",
+        args=[{"template": "system.probe", "state": {"p": "x"}}],
+        ok=True,
+        result={"verdict": "yes"},
+    )
+    repository.log(
+        method="web_fetch",
+        args=["https://example.test/"],
+        ok=False,
+        result={"error": "fetch failed"},
+    )
+    rows = store._conn.execute(
+        "SELECT method,ok,result_preview,result_digest FROM host_call_log "
+        "ORDER BY created_at"
+    ).fetchall()
+    judge_error, judge_ok, fetch_error = (dict(row) for row in rows)
+    assert judge_error["result_digest"] is None
+    assert json.loads(judge_error["result_preview"])["error"] is True
+    assert isinstance(judge_ok["result_digest"], str)
+    assert len(judge_ok["result_digest"]) == 64
+    assert isinstance(fetch_error["result_digest"], str)
+    echoed_digest = hashlib.sha256(
+        json.dumps(
+            echoed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    stored = json.dumps([dict(row) for row in rows])
+    assert echoed_digest not in stored
+    assert mrn not in stored

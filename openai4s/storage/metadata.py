@@ -33,8 +33,9 @@ SECRET_ARG_HOST_CALLS = frozenset(
     }
 )
 
-# ``host.judge`` keeps its replay-tape recording and its result digest.
-# The argument preview is replaced before the generic json.dumps, so every
+# ``host.judge`` keeps its replay-tape recording, and its result digest
+# unless the result is a soft-fail error (see ``_result_audit``). The
+# argument preview is replaced before the generic json.dumps, so every
 # writer of host_call_log is covered. Schema v33 only rewrites rows already
 # stored; new rows are projected here.
 REDACTED_JUDGE_STATE = "<redacted judge state>"
@@ -61,16 +62,16 @@ def _registered_judge_template(template_id: str) -> bool:
 
     Imported lazily so opening the store does not import the judgment
     package, and so a build that has removed that package still redacts.
-    A failed import stores no caller text.
+    Any failure -- a missing package, an unknown id, or an error while the
+    bundled templates load -- answers False. The projection then keeps no
+    caller text, and migration 33 cannot fail on the experimental package.
     """
 
     try:
         from openai4s.judgment.registry import get_template
-    except ImportError:
-        return False
-    try:
+
         get_template(template_id)
-    except KeyError:
+    except Exception:  # noqa: BLE001 - an unreadable registry keeps nothing
         return False
     return True
 
@@ -112,11 +113,13 @@ def judge_audit_args(args: Any) -> list:
 
 
 def _is_projected_judge_preview(text: str) -> bool:
-    """Whether ``text`` is already a :func:`judge_audit_args` projection.
+    """Whether ``text`` is exactly what :func:`judge_audit_args` stores.
 
-    The charset-safe template id is accepted here without a registry lookup.
-    Migration 33 used to keep every such id, and a row it already rewrote
-    must stay byte for byte on a forced re-run.
+    The text has to be the projection's own serialization, byte for byte,
+    and a template it names has to be one of the two markers or an id the
+    registry resolves. A raw preview that only parses into the same shape
+    -- a charset-safe id that is no template, another key order, other
+    separators, a duplicated key -- is still raw and gets projected.
     """
 
     try:
@@ -134,31 +137,35 @@ def _is_projected_judge_preview(text: str) -> bool:
         return False
     if item.get("state") != REDACTED_JUDGE_STATE:
         return False
-    if "params" in item and item.get("params") != REDACTED_JUDGE_PARAMS:
+    if "params" in item and (
+        item.get("params") != REDACTED_JUDGE_PARAMS or "template" not in item
+    ):
         return False
-    if "template" not in item:
-        return True
-    template = item.get("template")
-    if template in (_INVALID_JUDGE_TEMPLATE, _UNKNOWN_JUDGE_TEMPLATE):
-        return True
-    if not isinstance(template, str):
-        return False
-    return _JUDGE_TEMPLATE_ID.fullmatch(template) is not None
+    if "template" in item:
+        template = item.get("template")
+        if template not in (_INVALID_JUDGE_TEMPLATE, _UNKNOWN_JUDGE_TEMPLATE) and not (
+            isinstance(template, str)
+            and _JUDGE_TEMPLATE_ID.fullmatch(template)
+            and _registered_judge_template(template)
+        ):
+            return False
+    canonical = {
+        key: item[key] for key in ("template", "state", "params") if key in item
+    }
+    return text == _bounded_audit_json([canonical])
 
 
 def redact_stored_judge_args_preview(preview: Any) -> str:
     """Rewrite one stored ``args_preview``.
 
-    A preview that already parses as one object, with keys limited to
-    ``template``, ``state`` and ``params``, ``state`` equal to the marker,
-    ``params`` absent or the marker, and ``template`` absent, a charset-safe
-    id, ``<invalid template>`` or ``<unknown template>``, is returned
-    unchanged. Every output of :func:`judge_audit_args` is such a preview.
+    A preview that is byte for byte what :func:`judge_audit_args` stores
+    (see :func:`_is_projected_judge_preview`) is returned unchanged.
 
     Anything else is still raw. A charset-safe template id is read from the
-    prefix and passed through :func:`judge_audit_args`, so only an id the
-    registry resolves is kept, and params from the raw preview are not
-    copied. Every other raw preview becomes the state-only projection.
+    prefix and passed through :func:`judge_audit_args`: an id the registry
+    resolves is kept, any other becomes ``<unknown template>``, and params
+    from the raw preview are not copied. A raw preview that does not begin
+    with such an id becomes the state-only projection.
     """
 
     text = preview if isinstance(preview, str) else ""
@@ -678,6 +685,15 @@ class HostCallRepository:
 
         if method in SECRET_ARG_HOST_CALLS:
             return "<redacted secret-bearing result>", None
+        # A soft-fail error from a method whose arguments are projected can
+        # repeat those arguments ("unknown template: <id>"), and a short id
+        # is recoverable from a SHA-256 by trying candidates. Such a row
+        # records that an error happened, not a digest of its text.
+        error_echoes_arguments = (
+            method in AUDIT_ARG_PROJECTIONS
+            and isinstance(result, dict)
+            and bool(result.get("error"))
+        )
         try:
             encoded = json.dumps(
                 result,
@@ -705,6 +721,8 @@ class HostCallRepository:
             shape = {"type": "null"}
         else:
             shape = {"type": type(result).__name__}
+        if error_echoes_arguments:
+            return json.dumps(shape, separators=(",", ":")), None
         return json.dumps(shape, separators=(",", ":")), digest
 
     def _execute(self, sql: str, params: tuple = ()) -> None:
