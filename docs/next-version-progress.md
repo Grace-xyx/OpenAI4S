@@ -837,7 +837,8 @@ manual end-to-end run named in the row where one applies.
   failure output is redacted.
 - **Not covered:** the Windows launcher warns that the URL carries no token for
   team mode's `/login`; `openai4s serve` still opens a token URL in the local
-  browser when `OPENAI4S_NO_OPEN` is unset (by design).
+  browser unless `OPENAI4S_NO_OPEN` is set or `--no-open` is passed (by
+  design).
 
 ### 04 — durable receipts for Web background Cells (P1)
 
@@ -1020,21 +1021,22 @@ also says it.
 
 Run on this machine (macOS, Python 3.13 venv with the `science` extra, Node 22)
 against the commit that adds this section, with the developer's real data
-directory checked before and after (unchanged). The results are filled in by
-the commit that follows, which changes only this table.
+directory checked before and after (unchanged). The commit that fills in this
+table also corrects the `--no-open` sentence in 03; it changes no code, and the
+documentation checks were run again on it.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Offline suite | `uv run pytest -n auto --maxprocesses=4 --dist loadfile` | GATE_PYTEST |
-| Format, lint, strict types | `uv run pre-commit run --all-files` · `uv run mypy` | GATE_LINT |
-| Directory READMEs | `uv run python scripts/check_directory_readmes.py` | GATE_READMES |
-| Scenario contracts | `uv run python3 -m harness.cli run --tier pr --offline` | GATE_HARNESS |
-| Response shapes and route contracts | `scripts/capture_response_schemas.py --check` · `scripts/capture_response_contract.py --check` | GATE_CAPTURE |
-| Source secret scan | `uv run python scripts/source_secret_scan.py` | GATE_SECRETS |
-| Plan crosswalk | `uv run python scripts/reaudit_crosswalk.py --check` | GATE_XWALK |
-| Workbench | `npm test --prefix frontend` · `npm run build --prefix frontend` · no diff under `openai4s/server/webui/dist` | GATE_FRONTEND |
-| macOS sandbox boundary | `OPENAI4S_KERNEL_SANDBOX=enforce uv run python -m harness.smoke.macos_sandbox` | GATE_SANDBOX |
-| Browser | `node tests/browser_smoke.mjs` · `node tests/browser_p1_controls.mjs` (three runs) on a fresh credential-less daemon | GATE_BROWSER |
+| Offline suite | `uv run pytest -n auto --maxprocesses=4 --dist loadfile` | 10953 passed, 34 skipped (8 min 33 s) |
+| Format, lint, strict types | `uv run pre-commit run --all-files` · `uv run mypy` | every hook passed; mypy: no issues in 25 source files |
+| Directory READMEs | `uv run python scripts/check_directory_readmes.py` | 171 maintained directories, complete bilingual coverage |
+| Scenario contracts | `uv run python3 -m harness.cli run --tier pr --offline` | 38 of 38 passed (26 contract-only, 12 production-backed) |
+| Response shapes and route contracts | `scripts/capture_response_schemas.py --check` · `scripts/capture_response_contract.py --check` | no breaking change to the frozen shapes; 215 of 215 routes have a contract. The shape check also lists two differences that come from this machine, not this branch (`PUT /models/default [error]` newly covered, `GET /compute/remote` additive); they were not recaptured |
+| Source secret scan | `uv run python scripts/source_secret_scan.py` | passed (4080 files) |
+| Plan crosswalk | `uv run python scripts/reaudit_crosswalk.py --check` | up to date, 47 closed rows |
+| Workbench | `npm test --prefix frontend` · `npm run build --prefix frontend` · no diff under `openai4s/server/webui/dist` | Vitest 1343 passed in 135 files; build passed; no diff |
+| macOS sandbox boundary | `OPENAI4S_KERNEL_SANDBOX=enforce uv run python -m harness.smoke.macos_sandbox` | seatbelt `enforced`, self-test passed; `network_blocked`, `outside_write_blocked`, `subprocess_secret_absent`, `allowlist_agent_cell` and `degraded_refused` all true |
+| Browser | `node tests/browser_smoke.mjs` · `node tests/browser_p1_controls.mjs` (three runs) on a fresh credential-less daemon | smoke passed; P1 controls passed 3 of 3 (15, 16 and 15 s); the access token appeared 0 times in the daemon log and `logs/` |
 
 Not run here: the container smoke, both Linux bubblewrap smokes, the
 Firefox/WebKit browser matrix, the admission-fault and sandbox-preview browser
