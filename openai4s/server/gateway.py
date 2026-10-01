@@ -2769,6 +2769,9 @@ class SessionRunner:
                 artifact_excerpt=lambda artifact: self._review_artifact_excerpt(
                     artifact
                 ),
+                profile_credential=lambda profile: self._profile_credential(
+                    dict(profile)
+                ),
             ),
         )
         self._review_ops = self.reviews.operations
@@ -9054,6 +9057,15 @@ class SessionRunner:
         install and a team member with no key of their own are the same code
         path as before (INV-1).
 
+        Per provider *and only at that provider's own endpoint*. The row names
+        a provider and nothing else, and it used to be swapped in on that name
+        alone -- after `ModelProfileService.credential` had carefully refused
+        to send a profile or environment key anywhere it was not entered for.
+        So whatever `base_url` the session was pinned to received the member's
+        key: plain http to a keyless LAN server, an admin's third-party proxy.
+        `user_key_applies` is the rule; withheld, the configuration's own
+        credential goes as it would for a member with no key.
+
         A configured-but-unreadable key is a refusal, not a silent fallback:
         the user asked for their own credential to be used, and quietly
         charging the group instead is a decision they did not make. A
@@ -9064,6 +9076,13 @@ class SessionRunner:
             return cfg
         provider = getattr(cfg, "provider", "") or ""
         if not provider:
+            return cfg
+        # Before the row or the secret is read: a key that may not go to this
+        # endpoint is not consulted at all, so an unreadable one cannot refuse
+        # a turn it would never have been used for.
+        if not ModelProfileService(
+            self.store, self.cfg, providers=lambda: PROVIDERS
+        ).user_key_applies(cfg):
             return cfg
         try:
             owner = self.store.team.session_owner(st.root_frame_id)

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, MutableMapping, Protocol
 
+from openai4s.endpoint_identity import normalize_endpoint
+
 
 class ReviewStore(Protocol):
     def get_setting(self, key: str, default: str | None = None) -> str | None: ...
@@ -92,6 +94,18 @@ ReviewStoreProvider = Callable[[], ReviewStore]
 _LEGACY_TRUE = frozenset({"1", "true", "yes", "on"})
 
 
+def _destination(config: Any) -> tuple[str, str]:
+    """`(provider, endpoint)`: where a request under `config` is sent.
+
+    Read after `dataclasses.replace`, so `LLMConfig.__post_init__` has already
+    filled an empty `base_url` the way dispatch would.
+    """
+    return (
+        str(getattr(config, "provider", "") or "").strip().lower(),
+        normalize_endpoint(str(getattr(config, "base_url", "") or "")),
+    )
+
+
 def legacy_auto_mode_selection(
     store: ReviewStore,
     root_frame_id: str,
@@ -142,6 +156,10 @@ class ReviewPorts:
     thread_factory: Callable[..., Any] | None = None
     event_factory: Callable[[], threading.Event] | None = None
     now: Callable[[], float] | None = None
+    # `ModelProfileService.credential`: the one rule for what a profile is
+    # dispatched under (`.usable`, `.api_key`). Without it a profile the
+    # Reviewer moves to is dispatched under its own key or none.
+    profile_credential: Callable[[Mapping[str, Any]], Any] | None = None
 
 
 class ReviewService:
@@ -200,6 +218,7 @@ class ReviewService:
             model = self.store.get_setting("reviewer_model")
         overrides: dict = {"timeout_s": min(float(config.timeout_s), 45.0)}
         model = (model or "").strip()
+        profile: Mapping[str, Any] | None = None
         if model:
             profile = next(
                 (
@@ -231,9 +250,26 @@ class ReviewService:
             if profile and self.ports.resolve_profile_key(profile):
                 overrides["api_key"] = self.ports.resolve_profile_key(profile)
         try:
-            return dataclasses.replace(config, **overrides)
+            reviewer = dataclasses.replace(config, **overrides)
         except Exception:  # noqa: BLE001 - preserve the agent config fallback
             return config
+        if profile and _destination(reviewer) != _destination(config):
+            # `config.api_key` is what the gateway chose for the AGENT's
+            # endpoint -- the active profile's key, or the session owner's own
+            # (M4-1) when that endpoint is their provider's. A same-provider
+            # profile with no key of its own used to inherit it on the way to
+            # that profile's endpoint: a member's cloud key over plain http to
+            # a LAN server, one session setting away. The profile's endpoint
+            # gets the profile's credential, assigned after `replace` so
+            # `LLMConfig.__post_init__` cannot refill it from the environment.
+            reviewer.api_key = self._profile_api_key(profile)
+        return reviewer
+
+    def _profile_api_key(self, profile: Mapping[str, Any]) -> str:
+        if self.ports.profile_credential is None:
+            return self.ports.resolve_profile_key(profile)
+        credential = self.ports.profile_credential(profile)
+        return str(credential.api_key or "") if credential.usable else ""
 
     @staticmethod
     def artifact_excerpt(artifact: dict) -> str | None:
