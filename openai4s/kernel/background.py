@@ -438,29 +438,34 @@ class BackgroundExecutor:
         }
 
     def _record_launch_failed(self, exec_id: str, error: str) -> None:
-        _forget_live(exec_id)
         receipts = self.receipts
-        if receipts is None:
-            return
         try:
-            receipts.finish(
-                exec_id,
-                status="launch_failed",
-                error=error,
-                interrupted=False,
-                ended_at=int(self._clock_ms()),
-                output="",
-                truncated=False,
-            )
-        except Exception:
-            return
-        self._prune_after_terminal(None)
+            if receipts is None:
+                return
+            try:
+                receipts.finish(
+                    exec_id,
+                    status="launch_failed",
+                    error=error,
+                    interrupted=False,
+                    ended_at=int(self._clock_ms()),
+                    output="",
+                    truncated=False,
+                )
+            except Exception:
+                return
+        finally:
+            # After the terminal write, as in `_finish_receipt`: a reader that
+            # finds the job gone from the live set must find the terminal row.
+            _forget_live(exec_id)
+        self._prune_after_terminal()
 
-    def _prune_after_terminal(self, job: _BackgroundJob | None) -> None:
+    def _prune_after_terminal(self) -> None:
         """Clean receipts after a terminal write, at most once per interval.
 
-        The job's terminal state is already recorded. A prune failure only
-        marks in-memory degradation and is not raised to the caller.
+        The job's terminal state is already recorded, so a cleanup failure
+        says nothing about that receipt: it is swallowed, never raised to the
+        caller, and never marks the job `receipt_degraded`.
         """
 
         receipts = self.receipts
@@ -471,9 +476,8 @@ class BackgroundExecutor:
             return
         try:
             receipts.prune(now)
-        except Exception:
-            if job is not None:
-                job.receipt_degraded = True
+        except Exception:  # noqa: BLE001 - cleanup is best effort
+            return
 
     def _mark_running(self, job: _BackgroundJob) -> None:
         receipts = self.receipts
@@ -605,7 +609,7 @@ class BackgroundExecutor:
         finally:
             _forget_live(job.exec_id)
         if wrote:
-            self._prune_after_terminal(job)
+            self._prune_after_terminal()
 
     def _get(self, exec_id: str) -> _BackgroundJob:
         with self._lock:

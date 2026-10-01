@@ -3377,22 +3377,29 @@ class HostDispatcher:
             row = receipts.get(str(exec_id))
             if row is None:
                 raise
-            from openai4s.process_instance import PROCESS_INSTANCE_ID
-            from openai4s.storage.background_execs import project_receipt
+            from openai4s.storage.background_execs import (
+                NON_TERMINAL_STATUSES,
+                project_receipt,
+            )
 
             report = project_receipt(row)
             # The same string type the live path reports; `reason` repeats it
-            # for callers written against the first receipt release.
-            configured = getattr(self, "daemon_instance", None)
-            current = str(configured or PROCESS_INSTANCE_ID)
+            # for callers written against the first receipt release. The
+            # instance is the one the receipts are bound to, not recomputed.
+            current = str(getattr(receipts, "daemon_instance", "") or "")
             stored = str(row.get("daemon_instance") or "")
-            if stored == current:
+            if stored != current:
+                reason = "the daemon has restarted; delivery cannot be confirmed"
+            elif str(report.get("status") or "") in NON_TERMINAL_STATUSES:
+                reason = (
+                    "another session runtime in this process holds this job; "
+                    "this session cannot deliver the stop"
+                )
+            else:
                 reason = (
                     "this process no longer has a handle for this job; "
                     "delivery cannot be confirmed"
                 )
-            else:
-                reason = "the daemon has restarted; delivery cannot be confirmed"
             report["interrupt_undelivered"] = reason
             report["reason"] = reason
             return report

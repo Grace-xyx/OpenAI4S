@@ -1936,3 +1936,232 @@ def test_receipt_daemon_instance_is_the_shared_process_id_when_unset(tmp_path):
     finally:
         dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
         store.close()
+
+
+def test_a_job_finished_between_the_select_and_the_live_check_reads_terminal(
+    tmp_path, monkeypatch
+):
+    """The reader's row said running; the owner then finished and left.
+
+    The owner leaves the live set only after its terminal write commits, so
+    a reader that misses it in the live set re-reads the row and reports
+    what was written instead of deriving `outcome_unknown`.
+    """
+
+    _cfg, store = _cfg_store(tmp_path)
+    repo = store.background_exec_receipts
+    repo.begin(
+        exec_id="exec-race",
+        root_frame_id="root-a",
+        frame_id="root-a",
+        owner_user_id=None,
+        daemon_instance="daemon-a",
+        origin="agent",
+        code_sha256="ab" * 32,
+        code_chars=1,
+    )
+    repo.mark_running("exec-race", 1_000)
+    background_mod._claim_live("exec-race")
+
+    def owner_finishes_then_checks(exec_id: str) -> bool:
+        repo.finish(
+            exec_id,
+            status="done",
+            error=None,
+            interrupted=False,
+            ended_at=2_000,
+            output="finished",
+            truncated=False,
+        )
+        background_mod._forget_live(exec_id)
+        return False
+
+    monkeypatch.setattr(
+        background_mod, "background_job_is_live", owner_finishes_then_checks
+    )
+    try:
+        row = repo.get("exec-race", root_frame_id="root-a", current_instance="daemon-a")
+        assert row is not None
+        assert row["status"] == "done"
+        assert row["output"] == "finished"
+    finally:
+        background_mod._forget_live("exec-race")
+        store.close()
+
+
+def test_a_receipt_interrupt_from_another_runtime_names_the_holder(tmp_path):
+    """Same process, another session runtime: the job is alive elsewhere.
+
+    The receipt reads `running`, so "no longer has a handle" would contradict
+    it. The reason says this session cannot deliver the stop.
+    """
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    kernel = _WaitKernel()
+    owner = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    try:
+        launched = owner._m_exec_background({"code": "hold"})
+        assert kernel.entered.wait(2)
+        other = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel())
+        report = other._m_exec_interrupt(launched["exec_id"])
+        assert report["status"] == "running"
+        assert report["interrupt_undelivered"] == report["reason"]
+        assert report["reason"] == (
+            "another session runtime in this process holds this job; "
+            "this session cannot deliver the stop"
+        )
+    finally:
+        kernel.release.set()
+        owner._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_quota_trim_stops_at_exactly_the_excess(tmp_path):
+    """Five 30-byte terminal rows against a 90-byte quota: excess is 60.
+
+    Clearing the two oldest frees exactly 60, so the third keeps its output.
+    A trim that only stops once it has freed *more* than the excess clears a
+    third row it did not have to.
+    """
+
+    from openai4s.storage.background_execs import BackgroundExecReceiptRepository
+
+    _cfg, store = _cfg_store(tmp_path)
+    repo = BackgroundExecReceiptRepository(
+        store._conn,
+        store._lock,
+        clock_ms=lambda: 10_000,
+        max_output_bytes=80,
+        max_total_output_bytes=90,
+        terminal_ttl_ms=10**12,
+    )
+    try:
+        for index, body in enumerate(("A", "B", "C", "D", "E"), start=1):
+            exec_id = f"exec-b{index}"
+            repo.begin(
+                exec_id=exec_id,
+                root_frame_id="root-a",
+                frame_id="root-a",
+                owner_user_id=None,
+                daemon_instance="daemon-a",
+                origin="agent",
+                code_sha256="ab" * 32,
+                code_chars=1,
+            )
+            repo.finish(
+                exec_id,
+                status="done",
+                error=None,
+                interrupted=False,
+                ended_at=1_000 * index,
+                output=body * 30,
+                truncated=False,
+            )
+        report = repo.prune(10_000, current_instance="daemon-a")
+        assert report["cleared"] == 2
+        outputs = dict(
+            store._conn.execute(
+                "SELECT exec_id, output FROM background_exec_receipts"
+            ).fetchall()
+        )
+        assert outputs["exec-b1"] == "" and outputs["exec-b2"] == ""
+        assert outputs["exec-b3"] == "C" * 30
+    finally:
+        store.close()
+
+
+def test_a_failed_launch_whose_receipt_write_fails_reads_unknown(tmp_path):
+    """The spawn fails and so does the `launch_failed` write.
+
+    The row stays `launching`. The job must still leave the live set, so a
+    reader in this process sees `outcome_unknown` rather than a launch that
+    looks like it is still starting.
+    """
+
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+
+    class _BoomFinish(BoundBackgroundReceipts):
+        def finish(self, *args, **kwargs):
+            raise RuntimeError("receipt finish failed")
+
+    def spawn_fails():
+        raise RuntimeError("spawn failed")
+
+    dispatcher = _dispatcher(cfg, root, "daemon-a", spawn_fails)
+    try:
+        dispatcher._bg()
+        inner = dispatcher._bg_executor.receipts
+        dispatcher._bg_executor.receipts = _BoomFinish(
+            inner._repository,
+            root_frame_id=inner._root_frame_id,
+            frame_id=inner._frame_id,
+            daemon_instance=inner._daemon_instance,
+            owner_user_id=inner._owner_user_id,
+        )
+        with pytest.raises(RuntimeError, match="spawn failed"):
+            dispatcher._m_exec_background({"code": "never"})
+        exec_id = store._conn.execute(
+            "SELECT exec_id FROM background_exec_receipts"
+        ).fetchone()[0]
+        assert _raw(store, exec_id)["status"] == "launching"
+        reader = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel())
+        assert reader._m_exec_peek(exec_id)["status"] == "outcome_unknown"
+    finally:
+        store.close()
+
+
+def test_a_failing_cleanup_neither_masks_the_launch_error_nor_degrades_a_job(
+    tmp_path,
+):
+    """Cleanup after a terminal write is best effort.
+
+    When it raises after a failed spawn, the caller still sees the spawn's
+    own error. When it raises after a job finished, the job's receipt is
+    complete, so `exec_peek` does not report `receipt_degraded`.
+    """
+
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+
+    class _BoomPrune(BoundBackgroundReceipts):
+        def prune(self, now):
+            raise RuntimeError("prune exploded")
+
+    def wrap(dispatcher):
+        dispatcher._bg()
+        inner = dispatcher._bg_executor.receipts
+        dispatcher._bg_executor.receipts = _BoomPrune(
+            inner._repository,
+            root_frame_id=inner._root_frame_id,
+            frame_id=inner._frame_id,
+            daemon_instance=inner._daemon_instance,
+            owner_user_id=inner._owner_user_id,
+        )
+
+    def spawn_fails():
+        raise RuntimeError("spawn failed")
+
+    failing = _dispatcher(cfg, root, "daemon-a", spawn_fails)
+    ok = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel(chunks=("done",)))
+    try:
+        wrap(failing)
+        background_mod._receipt_prune_last_ms = None
+        with pytest.raises(RuntimeError, match="spawn failed"):
+            failing._m_exec_background({"code": "never"})
+        wrap(ok)
+        background_mod._receipt_prune_last_ms = None
+        launched = ok._m_exec_background({"code": "print('done')"})
+        _join(ok, launched["exec_id"])
+        peeked = ok._m_exec_peek(launched["exec_id"])
+        assert peeked["status"] == "done"
+        assert "receipt_degraded" not in peeked
+    finally:
+        background_mod._receipt_prune_last_ms = None
+        ok._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()

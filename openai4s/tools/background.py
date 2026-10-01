@@ -60,8 +60,9 @@ class ListBackgroundExecsTool(Tool):
     description = (
         "List background execution jobs and their current states. A Web "
         "session merges in-memory jobs with this session's persistent "
-        "receipts. outcome_unknown means a restart left the job unfinished "
-        "and it was not re-run."
+        "receipts. outcome_unknown means no live job holds an unfinished "
+        "receipt: the daemon restarted, or this process no longer holds the "
+        "job. It was not re-run."
     )
     parameters = {"properties": {}, "required": []}
     requires_approval = False
@@ -81,8 +82,8 @@ class PeekBackgroundExecTool(Tool):
     description = (
         "Read accumulated stdout and status for one background job. "
         "persistent true is the session receipt, including outcome_unknown "
-        "after a restart. persistent false is an in-process job (CLI or "
-        "sub-agent)."
+        "when no live job holds it. persistent false is an in-process job (CLI "
+        "or sub-agent)."
     )
     parameters = {
         "properties": {"exec_id": {"type": "string", "minLength": 1, "maxLength": 256}},

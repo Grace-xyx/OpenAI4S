@@ -457,7 +457,26 @@ class BackgroundExecReceiptRepository:
         if row is None:
             return None
         item = {key: row[key] for key in _COLUMNS}
-        item["status"] = effective_status(item, current_instance)
+        status = effective_status(item, current_instance)
+        if (
+            status == OUTCOME_UNKNOWN
+            and str(item.get("status") or "") in NON_TERMINAL_STATUSES
+            and str(item.get("daemon_instance") or "") == str(current_instance)
+        ):
+            # The owner can write its terminal state and leave the live set
+            # between the SELECT that produced this row and the live check.
+            # It leaves only after that write commits, so one re-read finds
+            # the terminal row when there is one.
+            with self._lock:
+                fresh = self._conn.execute(
+                    f"SELECT {', '.join(_COLUMNS)} FROM background_exec_receipts "
+                    "WHERE exec_id=?",
+                    (str(item["exec_id"]),),
+                ).fetchone()
+            if fresh is not None:
+                item = {key: fresh[key] for key in _COLUMNS}
+                status = effective_status(item, current_instance)
+        item["status"] = status
         item["interrupted"] = int(item["interrupted"] or 0)
         item["output_bytes"] = int(item["output_bytes"] or 0)
         item["output_truncated"] = int(item["output_truncated"] or 0)
@@ -530,6 +549,12 @@ class BoundBackgroundReceipts:
             output=output,
             truncated=truncated,
         )
+
+    @property
+    def daemon_instance(self) -> str:
+        """The process id these receipts are written and read under."""
+
+        return self._daemon_instance
 
     def get(self, exec_id: str) -> dict[str, Any] | None:
         return self._repository.get(
