@@ -8,12 +8,12 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `CapabilityBadges-BQp4Ht4y.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
+| `CapabilityBadges-CcsZ-G5x.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
 | `en-BiWYNluY.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
-| `index-D4HMb_hG.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
-| `index-DjpwAMyT.css` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
+| `index-BYobCGis.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
+| `index-Mx2ydfRs.css` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
 | `mount-3qhvSlgL.css` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
-| `mount-BXOUpDum.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
 | `mount-CGn0fciA.css` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
-| `mount-x1AVKdQt.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
+| `mount-DMAour6M.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
+| `mount-DNyDMAAk.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
 | `zh-DZtw8kA9.js` | Vite 构建产物。不要手改；在 `frontend/` 里重新 build。 |
