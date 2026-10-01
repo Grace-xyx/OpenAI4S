@@ -22,10 +22,10 @@ class SubmitBackgroundExecTool(Tool):
     description = (
         "Submit a long-running Python cell to an independent background job. "
         "A Web session writes a persistent receipt (code SHA-256, not the "
-        "source) before the worker starts and reports persistent true. A CLI "
-        "job reports persistent false and stays in memory. After a daemon "
-        "restart an unfinished Web job reads as outcome_unknown and is not "
-        "replayed."
+        "source) before the worker starts and reports persistent true. A CLI or "
+        "sub-agent job reports persistent false and stays in memory. After a "
+        "daemon restart an unfinished Web job reads as outcome_unknown and is "
+        "not replayed."
     )
     parameters = {
         "properties": {
@@ -81,7 +81,8 @@ class PeekBackgroundExecTool(Tool):
     description = (
         "Read accumulated stdout and status for one background job. "
         "persistent true is the session receipt, including outcome_unknown "
-        "after a restart. persistent false is the in-process CLI job."
+        "after a restart. persistent false is an in-process job (CLI or "
+        "sub-agent)."
     )
     parameters = {
         "properties": {"exec_id": {"type": "string", "minLength": 1, "maxLength": 256}},

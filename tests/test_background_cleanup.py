@@ -1027,6 +1027,12 @@ def test_another_session_cannot_read_the_receipt(tmp_path):
     try:
         launched = original._m_exec_background({"code": "print('mine')"})
         _join(original, launched["exec_id"])
+        # Positive control: a fresh dispatcher for the same session reads the
+        # receipt, so the refusal below is scope, not a missing row.
+        same = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel())
+        owned = same._m_exec_peek(launched["exec_id"])
+        assert owned["source"] == "receipt"
+        assert owned["stdout"] == "mine"
         stranger = _dispatcher(cfg, other, "daemon-a", lambda: _OkKernel())
         with pytest.raises(KeyError):
             stranger._m_exec_peek(launched["exec_id"])
@@ -1088,6 +1094,100 @@ def test_flush_writes_a_bounded_head_while_the_job_is_still_running(tmp_path):
         assert receipt["status"] == "running"
         assert receipt["output"] == "z" * 64
         assert receipt["output_truncated"] == 0
+    finally:
+        kernel.release.set()
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+class _QuietKernel(_WaitKernel):
+    """Prints its chunks, then stays silent until released."""
+
+    def execute(self, code, origin="agent", on_chunk=None):
+        del code, origin
+        if on_chunk is not None:
+            for chunk in self.chunks:
+                on_chunk(chunk)
+        self.entered.set()
+        self.release.wait(30)
+        return {"stdout": "", "error": None}
+
+
+def test_a_quiet_tail_reaches_the_receipt_without_a_later_chunk(tmp_path):
+    """The interval flush used to run only when the next chunk arrived.
+
+    A burst followed by silence left its tail in memory only, and a crash
+    during the silence lost it. A deferred flush now writes it while the
+    job is still running.
+    """
+
+    import time
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    kernel = _QuietKernel()
+    kernel.chunks = ("Loading data...\n", "epoch 1: loss=0.9\n")
+    dispatcher = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    dispatcher._bg()
+    dispatcher._bg_executor.FLUSH_BYTES = 1 << 20
+    dispatcher._bg_executor.FLUSH_INTERVAL_MS = 50
+    expected = "Loading data...\nepoch 1: loss=0.9\n"
+    try:
+        launched = dispatcher._m_exec_background({"code": "stream"})
+        assert kernel.entered.wait(2)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if _raw(store, launched["exec_id"])["output"] == expected:
+                break
+            time.sleep(0.02)
+        receipt = _raw(store, launched["exec_id"])
+        assert receipt["output"] == expected
+        assert receipt["status"] == "running"
+    finally:
+        kernel.release.set()
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_a_failing_output_write_backs_off_and_says_so(tmp_path):
+    """A full disk used to be retried on every chunk, silently.
+
+    After one failed write the flush waits a whole interval before trying
+    again, and ``exec_peek`` reports that the receipt may be behind.
+    """
+
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    attempts: list[str] = []
+
+    class _FullDisk(BoundBackgroundReceipts):
+        def save_output(self, exec_id, text, truncated):
+            attempts.append(exec_id)
+            raise sqlite3.OperationalError("database or disk is full")
+
+    kernel = _QuietKernel()
+    kernel.chunks = tuple("x" * 64 for _ in range(200))
+    dispatcher = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    dispatcher._bg()
+    inner = dispatcher._bg_executor.receipts
+    dispatcher._bg_executor.receipts = _FullDisk(
+        inner._repository,
+        root_frame_id=inner._root_frame_id,
+        frame_id=inner._frame_id,
+        daemon_instance=inner._daemon_instance,
+        owner_user_id=inner._owner_user_id,
+    )
+    dispatcher._bg_executor.FLUSH_BYTES = 16
+    dispatcher._bg_executor.FLUSH_INTERVAL_MS = 60_000
+    try:
+        launched = dispatcher._m_exec_background({"code": "stream"})
+        assert kernel.entered.wait(2)
+        assert len(attempts) == 1
+        peeked = dispatcher._m_exec_peek(launched["exec_id"])
+        assert peeked["status"] == "running"
+        assert peeked["receipt_degraded"] is True
     finally:
         kernel.release.set()
         dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
@@ -1249,9 +1349,10 @@ def test_interrupt_of_a_receipt_without_a_process_does_not_change_the_row(tmp_pa
         before = dict(_raw(store, launched["exec_id"]))
         restarted = _dispatcher(cfg, root, "daemon-b", lambda: _OkKernel())
         report = restarted._m_exec_interrupt(launched["exec_id"])
-        assert report["interrupt_undelivered"] is True
+        assert isinstance(report["interrupt_undelivered"], str)
+        assert report["interrupt_undelivered"] == report["reason"]
         assert report["reason"] == (
-            "no live process handle for this exec (daemon restarted); "
+            "no live process handle for this exec in this daemon; "
             "delivery cannot be confirmed"
         )
         assert report["status"] == "done"

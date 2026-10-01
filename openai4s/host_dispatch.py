@@ -3287,11 +3287,14 @@ class HostDispatcher:
             from openai4s.storage.background_execs import project_receipt
 
             report = project_receipt(row)
-            report["interrupt_undelivered"] = True
-            report["reason"] = (
-                "no live process handle for this exec (daemon restarted); "
+            # The same string type the live path reports; `reason` repeats it
+            # for callers written against the first receipt release.
+            reason = (
+                "no live process handle for this exec in this daemon; "
                 "delivery cannot be confirmed"
             )
+            report["interrupt_undelivered"] = reason
+            report["reason"] = reason
             return report
 
     def _m_exec_list(self, *_a: Any) -> list:

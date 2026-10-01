@@ -61,6 +61,8 @@ class _BackgroundJob:
         "_buf_bytes",
         "_flushed_bytes",
         "_last_flush_ms",
+        "_flush_lock",
+        "_flush_timer",
     )
 
     def __init__(self, exec_id: str, code: str, *, persistent: bool = False):
@@ -79,6 +81,9 @@ class _BackgroundJob:
         self.error: str | None = None
         self.started_at = int(time.time() * 1000)
         self._last_flush_ms = self.started_at
+        # Orders the chunk thread and the flush timer; see `_maybe_flush`.
+        self._flush_lock = threading.Lock()
+        self._flush_timer: threading.Timer | None = None
         self.ended_at: int | None = None
         self.interrupted = False
         self._lifetime: Any = None
@@ -111,7 +116,7 @@ class _BackgroundJob:
             stdout = "".join(self._buf)
             if self._buf_truncated:
                 stdout += _TRUNCATION_MARKER
-            return {
+            snapshot = {
                 "exec_id": self.exec_id,
                 "status": self.status,
                 "done": self.status != "running",
@@ -122,6 +127,11 @@ class _BackgroundJob:
                 "ended_at": self.ended_at,
                 "persistent": self.persistent,
             }
+            if self.receipt_degraded:
+                # A receipt write failed: after a restart the durable copy
+                # may be older than what this peek shows.
+                snapshot["receipt_degraded"] = True
+            return snapshot
 
 
 class BackgroundExecutor:
@@ -423,41 +433,86 @@ class BackgroundExecutor:
             job.receipt_degraded = True
 
     def _maybe_flush(self, job: _BackgroundJob) -> None:
+        """Persist the stdout head once it is due.
+
+        Due is ``FLUSH_BYTES`` unwritten bytes, or ``FLUSH_INTERVAL_MS``
+        since the last write with anything unwritten. Output that goes quiet
+        before either arms a one-shot timer for the rest of the interval:
+        otherwise the tail of a burst waited for a later chunk that may never
+        come, and a crash in that silence lost it. After a failed write,
+        attempts back off to one per interval. ``_flush_lock`` orders the
+        chunk thread and the timer; ``save_output`` only touches a row that
+        is still non-terminal, so a timer that fires after ``finish`` is a
+        no-op.
+        """
+
         receipts = self.receipts
         if receipts is None:
             return
-        with job._lock:
-            pending = job._buf_bytes - job._flushed_bytes
-            now = int(time.time() * 1000)
-            due = pending >= self.FLUSH_BYTES or (
-                pending > 0 and now - job._last_flush_ms >= self.FLUSH_INTERVAL_MS
-            )
-            if not due:
+        with job._flush_lock:
+            with job._lock:
+                if job.status != "running":
+                    return
+                pending = job._buf_bytes - job._flushed_bytes
+                if pending <= 0:
+                    return
+                now = int(time.time() * 1000)
+                waited = now - job._last_flush_ms
+                due = waited >= self.FLUSH_INTERVAL_MS or (
+                    pending >= self.FLUSH_BYTES and not job.receipt_degraded
+                )
+                if not due:
+                    self._arm_flush_timer(job, self.FLUSH_INTERVAL_MS - waited)
+                    return
+                text = "".join(job._buf)
+                truncated = job._buf_truncated
+                flushed = job._buf_bytes
+            try:
+                receipts.save_output(job.exec_id, text, truncated)
+            except Exception:
+                with job._lock:
+                    job.receipt_degraded = True
+                    job._last_flush_ms = now
                 return
-            text = "".join(job._buf)
-            truncated = job._buf_truncated
-            flushed = job._buf_bytes
-        try:
-            receipts.save_output(job.exec_id, text, truncated)
-        except Exception:
-            job.receipt_degraded = True
+            with job._lock:
+                job._last_flush_ms = now
+                if flushed >= job._flushed_bytes:
+                    job._flushed_bytes = flushed
+
+    def _arm_flush_timer(self, job: _BackgroundJob, delay_ms: int) -> None:
+        """Schedule one deferred flush for ``job``. Caller holds ``job._lock``."""
+
+        timer = job._flush_timer
+        if timer is not None and timer.is_alive():
             return
+        timer = threading.Timer(
+            max(int(delay_ms), 1) / 1000.0, self._flush_on_timer, args=(job,)
+        )
+        timer.daemon = True
+        job._flush_timer = timer
+        timer.start()
+
+    def _flush_on_timer(self, job: _BackgroundJob) -> None:
         with job._lock:
-            job._last_flush_ms = now
-            if flushed >= job._flushed_bytes:
-                job._flushed_bytes = flushed
+            if job._flush_timer is threading.current_thread():
+                job._flush_timer = None
+        self._maybe_flush(job)
 
     def _finish_receipt(self, job: _BackgroundJob) -> None:
         receipts = self.receipts
         if receipts is None:
             return
         with job._lock:
+            timer = job._flush_timer
+            job._flush_timer = None
             status = job.status
             error = job.error
             interrupted = job.interrupted
             ended = job.ended_at
             text = "".join(job._buf)
             truncated = job._buf_truncated
+        if timer is not None:
+            timer.cancel()
         if status not in ("done", "failed", "interrupted"):
             status = "failed"
         try:
