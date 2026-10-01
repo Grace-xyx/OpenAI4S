@@ -16,7 +16,7 @@ from openai4s.agent.delegation import (
 )
 from openai4s.agent.models import RunState
 from openai4s.config import get_config
-from openai4s.storage.delegation import _encode_result
+from openai4s.storage.delegation import _encode_result, _public, _text
 from openai4s.store import get_store
 
 
@@ -386,6 +386,25 @@ def test_encode_result_keeps_artifact_evidence_past_the_public_cap():
     assert decoded["truncated"] is True
     assert decoded["task_status"] == "completed"
     assert decoded["artifact_evidence"] == evidence
+    assert "v-kept" not in decoded["preview"]
+
+    leaky = {
+        "task_status": "completed",
+        "artifact_evidence": {
+            "scope": "version_and_producer",
+            "items": [{"version_id": "v-secret", "note": "Bearer sk-secretvalue"}],
+            "total": 1,
+            "truncated": False,
+        },
+        "output": {f"k{index:02d}": "y" * 500 for index in range(60)},
+    }
+    packed_leaky = _encode_result(leaky)
+    assert "sk-secretvalue" not in packed_leaky
+    decoded_leaky = json.loads(packed_leaky)
+    assert "v-secret" not in decoded_leaky["preview"]
+    assert decoded_leaky["artifact_evidence"]["items"][0]["note"] != (
+        "Bearer sk-secretvalue"
+    )
 
     bare = _encode_result(["y" * 2000] * 60)
     assert len(bare) <= 16_000
@@ -393,3 +412,78 @@ def test_encode_result_keeps_artifact_evidence_past_the_public_cap():
     assert decoded_bare["truncated"] is True
     assert decoded_bare["artifact_evidence"] is None
     assert decoded_bare["task_status"] is None
+
+
+def _legacy_encode_result(value):
+    """The pre-fix truncation: every binary-search step re-redacts the whole string."""
+
+    limit = 16_000
+    public = _public(value)
+    encoded = json.dumps(
+        public, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(encoded) <= limit:
+        return encoded
+    evidence = value.get("artifact_evidence") if isinstance(value, dict) else None
+    task_status = value.get("task_status") if isinstance(value, dict) else None
+
+    def pack(preview: str) -> str:
+        return json.dumps(
+            {
+                "artifact_evidence": evidence,
+                "preview": preview,
+                "task_status": task_status,
+                "truncated": True,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    if len(pack("")) > limit:
+        return pack("")
+    lo = 0
+    hi = len(encoded)
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        preview = "" if mid == 0 else (_text(encoded, mid) or "")
+        if len(pack(preview)) <= limit:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    preview = "" if best == 0 else (_text(encoded, best) or "")
+    return pack(preview)
+
+
+def test_encode_result_truncation_is_faster_than_redacting_every_step():
+    """Relative to the old per-step rescan, on this machine. No fixed budget."""
+
+    chunk = "Bearer sk-abcdefghij " + ("y" * 1800)
+    value = {
+        "task_status": "completed",
+        "artifact_evidence": {
+            "scope": "version_and_producer",
+            "note": "EVIDENCE-MARKER-9f3a",
+            "items": [],
+            "total": 0,
+            "truncated": False,
+        },
+        "output": {f"k{index:02d}": [chunk] * 8 for index in range(40)},
+    }
+    _encode_result({"ok": True})
+    _legacy_encode_result({"ok": True})
+    started = time.perf_counter()
+    legacy = _legacy_encode_result(value)
+    legacy_s = time.perf_counter() - started
+    started = time.perf_counter()
+    current = _encode_result(value)
+    current_s = time.perf_counter() - started
+    assert len(current) <= 16_000
+    decoded = json.loads(current)
+    assert decoded["truncated"] is True
+    assert "EVIDENCE-MARKER-9f3a" not in decoded["preview"]
+    assert "EVIDENCE-MARKER-9f3a" in json.dumps(decoded["artifact_evidence"])
+    assert current_s < legacy_s * 0.5
+    assert len(legacy) <= 16_000

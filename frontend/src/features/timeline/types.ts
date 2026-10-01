@@ -300,6 +300,8 @@ export type ArtifactEvidence = {
   total: number;
   truncated: boolean;
   unavailable?: boolean;
+  /** Unix seconds. Recorded when the sub-agent finished, not on each read. */
+  checked_at?: number;
 };
 
 export type DelegationChild = {

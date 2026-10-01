@@ -65,6 +65,29 @@ _DELEGATION_EVENT_CHILD_KEYS = (
 )
 
 
+def _bounded_artifact_evidence(value: Any) -> Any:
+    """Copy evidence and keep at most 12 items on the live socket event.
+
+    The REST projection already caps at 12. A snapshot that arrives with
+    more must not put the rest on the wire. ``total`` stays the caller's
+    count when it is at least the original length.
+    """
+
+    if not isinstance(value, Mapping):
+        return value
+    items = value.get("items")
+    if not isinstance(items, list) or len(items) <= 12:
+        return dict(value)
+    bounded = dict(value)
+    bounded["items"] = list(items[:12])
+    total = value.get("total")
+    if isinstance(total, bool) or not isinstance(total, int) or total < len(items):
+        total = len(items)
+    bounded["total"] = total
+    bounded["truncated"] = True
+    return bounded
+
+
 def delegation_event_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     """The browser-safe shape of one live ``delegation_child_event``.
 
@@ -82,7 +105,11 @@ def delegation_event_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     projected: dict[str, Any] = {}
     if isinstance(child, Mapping):
         for key in _DELEGATION_EVENT_CHILD_KEYS:
-            if key in child:
+            if key not in child:
+                continue
+            if key == "artifact_evidence":
+                projected[key] = _bounded_artifact_evidence(child[key])
+            else:
                 projected[key] = child[key]
         progress = child.get("progress")
         if isinstance(progress, Mapping):

@@ -571,6 +571,19 @@ class DelegationProjectionRepository:
         with self._lock:
             return self._project_locked(root, include_text=False)
 
+    def read_child(self, root_frame_id: str, child_id: str) -> dict[str, Any] | None:
+        """One child with its stored result, for in-process restore.
+
+        ``project`` is the browser read and drops result bodies. A runner
+        that has to rebuild a child which is not already in memory needs
+        the text this returns.
+        """
+
+        root = _required("root_frame_id", root_frame_id)
+        target = _required("child_id", child_id)
+        with self._lock:
+            return self._child_locked(root, target, include_text=True)
+
     def budget(self, root_frame_id: str) -> dict[str, Any] | None:
         root = _required("root_frame_id", root_frame_id)
         with self._lock:
@@ -689,7 +702,9 @@ class DelegationProjectionRepository:
             evidence = result.get("artifact_evidence")
             if evidence is not None:
                 normalized["artifact_evidence"] = evidence
-        return normalized
+        if include_text:
+            return normalized
+        return project_browser_child(normalized)
 
     def _persist_message_locked(
         self,
@@ -830,15 +845,87 @@ def _encode(value: Any, limit: int) -> str:
     )
 
 
+_BROWSER_REF_KEYS = frozenset(
+    {"artifact_id", "version_id", "filename", "checksum", "frame_id", "path"}
+)
+_STEERING_TEXT_KEYS = frozenset({"text", "text_preview", "message"})
+_TRUNCATION_MARK = "...[host truncated]"
+
+
+def _absolute_path(value: str) -> bool:
+    """True for a POSIX absolute path or a Windows drive path."""
+
+    if value.startswith(("/", "\\")):
+        return True
+    return (
+        len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in "/\\"
+    )
+
+
+def project_browser_child(child: Mapping[str, Any]) -> dict[str, Any]:
+    """The one browser projection of a delegation child.
+
+    ``result`` and ``output`` are omitted, not set to null. Steering message
+    bodies are omitted. ``artifact_refs`` keep identity and a relative name:
+    ``durable_path`` is dropped, and an absolute ``path`` or ``filename`` is
+    dropped. ``artifact_evidence`` is left as stored, including a missing key.
+    ``GET /frames/{id}/delegations`` and the stop/continue responses all use
+    this function.
+    """
+
+    projected = {
+        key: value for key, value in child.items() if key not in ("result", "output")
+    }
+    refs = projected.get("artifact_refs")
+    if isinstance(refs, list):
+        safe_refs: list[dict[str, Any]] = []
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                continue
+            item: dict[str, Any] = {}
+            for key, value in ref.items():
+                if key not in _BROWSER_REF_KEYS:
+                    continue
+                if (
+                    key in ("filename", "path")
+                    and isinstance(value, str)
+                    and _absolute_path(value)
+                ):
+                    continue
+                item[str(key)] = value
+            safe_refs.append(item)
+        projected["artifact_refs"] = safe_refs
+    steering = projected.get("steering")
+    if isinstance(steering, Mapping):
+        safe_steering = dict(steering)
+        messages = steering.get("messages")
+        if isinstance(messages, list):
+            safe_messages: list[dict[str, Any]] = []
+            for message in messages:
+                if not isinstance(message, Mapping):
+                    continue
+                safe_messages.append(
+                    {
+                        key: value
+                        for key, value in message.items()
+                        if key not in _STEERING_TEXT_KEYS
+                    }
+                )
+            safe_steering["messages"] = safe_messages
+        projected["steering"] = safe_steering
+    return projected
+
+
 def _encode_result(value: Any) -> str:
     """Encode a child result, keeping evidence when the public JSON is too long.
 
     Under the cap this is ``_encode(value, 16_000)``. Over the cap the stored
     object is ``{truncated, preview, artifact_evidence, task_status}``.
-    ``artifact_evidence`` and ``task_status`` are the caller's values, not a
-    second pass through ``_public``. The preview shrinks so a normal evidence
-    object still fits in 16_000 characters; evidence is kept even when it
-    alone exceeds that cap.
+    Evidence and ``task_status`` come from the single ``_public`` pass, so a
+    secret inside evidence is redacted the same way as on the short path.
+    The preview is that public value with those two keys removed, then sliced.
+    The slice does not re-run the redaction patterns. Evidence is kept even
+    when it alone exceeds the cap.
     """
     limit = 16_000
     public = _public(value)
@@ -847,8 +934,20 @@ def _encode_result(value: Any) -> str:
     )
     if len(encoded) <= limit:
         return encoded
-    evidence = value.get("artifact_evidence") if isinstance(value, Mapping) else None
-    task_status = value.get("task_status") if isinstance(value, Mapping) else None
+    evidence = None
+    task_status = None
+    preview_source: Any = public
+    if isinstance(public, Mapping):
+        evidence = public.get("artifact_evidence")
+        task_status = public.get("task_status")
+        preview_source = {
+            key: item
+            for key, item in public.items()
+            if key not in ("artifact_evidence", "task_status")
+        }
+    redacted = json.dumps(
+        preview_source, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
     def pack(preview: str) -> str:
         return json.dumps(
@@ -865,18 +964,20 @@ def _encode_result(value: Any) -> str:
 
     if len(pack("")) > limit:
         return pack("")
+    if len(pack(redacted)) <= limit:
+        return pack(redacted)
     lo = 0
-    hi = len(encoded)
+    hi = len(redacted)
     best = 0
     while lo <= hi:
         mid = (lo + hi) // 2
-        preview = "" if mid == 0 else (_text(encoded, mid) or "")
+        preview = "" if mid == 0 else redacted[:mid] + _TRUNCATION_MARK
         if len(pack(preview)) <= limit:
             best = mid
             lo = mid + 1
         else:
             hi = mid - 1
-    preview = "" if best == 0 else (_text(encoded, best) or "")
+    preview = "" if best == 0 else redacted[:best] + _TRUNCATION_MARK
     return pack(preview)
 
 

@@ -3120,12 +3120,15 @@ class SessionRunner:
         """
         runner, _record = self._live_delegation_child(root_frame_id, child_id)
         try:
-            return runner._stop_subtree(child_id, "stopped by user")  # noqa: SLF001
+            snapshot = runner._stop_subtree(child_id, "stopped by user")  # noqa: SLF001
         except KeyError as error:
             # Lost the race with its own completion between the check and here.
             raise GatewayError(
                 409, f"sub-agent {child_id} finished first", "delegation_record_stale"
             ) from error
+        from openai4s.storage.delegation import project_browser_child
+
+        return project_browser_child(snapshot)
 
     def steer_delegation_child(
         self, root_frame_id: str, child_id: str, message: str
@@ -3185,7 +3188,7 @@ class SessionRunner:
                 "delegation_record_stale",
             )
         try:
-            return runner.continue_child(child_id)
+            result = runner.continue_child(child_id)
         except DelegationConflictError as error:
             raise GatewayError(
                 getattr(error, "http_status", 409),
@@ -3196,6 +3199,9 @@ class SessionRunner:
             raise GatewayError(404, str(error), "not_found") from error
         except DelegationError as error:
             raise GatewayError(409, str(error), "delegation_error") from error
+        from openai4s.storage.delegation import project_browser_child
+
+        return project_browser_child(result)
 
     def refresh_compute_task(self, root_frame_id: str, job_id: str) -> dict:
         """Contact the remote for ONE job, because a person asked.

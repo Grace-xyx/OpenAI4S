@@ -364,10 +364,10 @@ def test_delegation_event_projection_forwards_bounded_artifact_evidence():
                 "verdict": "verified_version_and_producer",
                 "reasons": ["no_cell_receipt"],
             }
-            for index in range(12)
+            for index in range(13)
         ],
         "total": 13,
-        "truncated": True,
+        "truncated": False,
     }
     projected = delegation_event_projection(
         {
@@ -385,10 +385,13 @@ def test_delegation_event_projection_forwards_bounded_artifact_evidence():
 
     child = projected["child"]
     assert "output" not in child
-    assert child["artifact_evidence"] == evidence
     assert len(child["artifact_evidence"]["items"]) == 12
+    assert child["artifact_evidence"]["items"][-1]["version_id"] == "v-11"
     assert child["artifact_evidence"]["truncated"] is True
     assert child["artifact_evidence"]["total"] == 13
+    assert "v-12" not in {
+        item["version_id"] for item in child["artifact_evidence"]["items"]
+    }
 
 
 def test_delegation_event_projection_tolerates_a_missing_child():

@@ -1428,21 +1428,37 @@ class DelegationRunner:
     def _restore_one_child(self, child_id: str) -> _Child | None:
         if self.store is None or not self.parent_frame_id:
             return None
-        tree = self.store.delegation_tree(self.parent_frame_id)
-        for item in tree.get("children") or ():
-            if str(item.get("child_id") or "") != child_id:
-                continue
-            child = _Child.from_persisted(
-                item,
-                store=self.store,
-                budget=self.budget,
-                clock=self._tree.clock,
+        # The browser tree omits result bodies. Restore needs the stored
+        # result, which the full-text read returns. A store that only
+        # exposes the browser tree still resolves the child identity.
+        reader = getattr(self.store, "delegation_child_record", None)
+        item: Mapping[str, Any] | None
+        if callable(reader):
+            loaded = reader(self.parent_frame_id, child_id)
+            item = loaded if isinstance(loaded, Mapping) else None
+        else:
+            tree = self.store.delegation_tree(self.parent_frame_id)
+            item = next(
+                (
+                    candidate
+                    for candidate in tree.get("children") or ()
+                    if isinstance(candidate, Mapping)
+                    and str(candidate.get("child_id") or "") == child_id
+                ),
+                None,
             )
-            self._tree.children[child.child_id] = child
-            if child.parent_child_id == self.parent_child_id:
-                self._children[child.child_id] = child
-            return child
-        return None
+        if item is None:
+            return None
+        child = _Child.from_persisted(
+            item,
+            store=self.store,
+            budget=self.budget,
+            clock=self._tree.clock,
+        )
+        self._tree.children[child.child_id] = child
+        if child.parent_child_id == self.parent_child_id:
+            self._children[child.child_id] = child
+        return child
 
     def _reuse_child(self, child: _Child, *, wait: bool, is_list: bool) -> Any:
         """Return an existing child without spawning and without charging budget."""
@@ -2302,6 +2318,7 @@ def _evidence_unavailable() -> dict[str, Any]:
         "total": 0,
         "truncated": False,
         "unavailable": True,
+        "checked_at": time.time(),
     }
 
 
@@ -2430,12 +2447,13 @@ def _project_artifact_evidence(rows: Any, child_frame_id: str) -> dict[str, Any]
         ]
         owned = version.get("frame_id") == child_frame_id
         latest = _latest_observation(frame_observations)
-        if owned:
-            cell_id = version.get("producing_cell_id")
-        elif latest is not None:
-            cell_id = latest.get("producing_cell_id")
-        else:
-            cell_id = None
+        # An owned version that already names a Cell keeps that Cell. One
+        # that does not adopts the latest same-frame observation, so a later
+        # failed or interrupted producer cannot stay "verified" on an empty
+        # producing_cell_id. A version with neither stays cell-less.
+        cell_id = version.get("producing_cell_id") if owned else None
+        if not isinstance(cell_id, str) or not cell_id:
+            cell_id = latest.get("producing_cell_id") if latest is not None else None
         kind = latest.get("capture_kind") if latest is not None else None
         capture_kind = kind if kind in _EVIDENCE_CAPTURE_KINDS else None
         checksum = _evidence_checksum(version.get("checksum"))
@@ -2481,6 +2499,8 @@ def _project_artifact_evidence(rows: Any, child_frame_id: str) -> dict[str, Any]
         "items": items,
         "total": total,
         "truncated": total > len(items),
+        # Frozen when the child finishes. A later panel read does not re-check.
+        "checked_at": time.time(),
     }
 
 

@@ -1445,6 +1445,7 @@ def test_artifact_evidence_rows_order_by_capture_time_and_honor_limit(tmp_path):
 
     limited = repository.artifact_evidence_rows_for_frame(frame, limit=2)
     assert limited["total"] == 3
+    assert len(limited["versions"]) == 2
     assert [row["version_id"] for row in limited["versions"]][0] == saved[2][
         "version_id"
     ]

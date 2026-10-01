@@ -3476,6 +3476,20 @@ function evidenceReason(code: string): string | null {
   }
 }
 
+function evidenceCellLabel(status: string): string {
+  if (status === "ok") return provenanceT("evidenceCellOk");
+  if (status === "error") return provenanceT("evidenceCellError");
+  if (status === "interrupted") return provenanceT("evidenceCellInterrupted");
+  return provenanceT("evidenceCell", status);
+}
+
+function evidenceCaptureLabel(kind: string): string | null {
+  if (kind === "version_created") return provenanceT("evidenceCaptureVersionCreated");
+  if (kind === "same_cell_merge") return provenanceT("evidenceCaptureSameCell");
+  if (kind === "head_checksum_reused") return provenanceT("evidenceCaptureReused");
+  return null;
+}
+
 function evidenceRow(item: any): HTMLElement {
   const row = el("div", "delegation-evidence-row");
   const verified = item && item.verdict === "verified_version_and_producer";
@@ -3490,12 +3504,13 @@ function evidenceRow(item: any): HTMLElement {
       "span",
       "timeline-pill",
       item && item.cell_status
-        ? provenanceT("evidenceCell", item.cell_status)
+        ? evidenceCellLabel(String(item.cell_status))
         : provenanceT("evidenceNoCell"),
     ),
   );
   if (item && item.capture_kind) {
-    row.appendChild(el("span", "timeline-pill", String(item.capture_kind)));
+    const capture = evidenceCaptureLabel(String(item.capture_kind));
+    if (capture) row.appendChild(el("span", "timeline-pill", capture));
   }
   row.appendChild(
     el(
@@ -3538,13 +3553,18 @@ function appendChildEvidence(row: HTMLElement, child: any): void {
       el(
         "span",
         "timeline-pill",
-        provenanceT("evidenceTruncated", evidence.total == null ? items.length : evidence.total),
+        provenanceT(
+          "evidenceTruncated",
+          items.length,
+          evidence.total == null ? items.length : evidence.total,
+        ),
       ),
     );
   }
   block.appendChild(summary);
   if (items.length) {
     const details = el("details", "delegation-evidence-list");
+    detailsKey(details, "delegation-evidence:" + String((child && child.child_id) || ""));
     details.appendChild(el("summary", "", provenanceT("evidenceDetails")));
     items.forEach((item: any) => details.appendChild(evidenceRow(item)));
     block.appendChild(details);

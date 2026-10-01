@@ -901,16 +901,26 @@ function sanitizeEvidenceItem(raw: unknown): ArtifactEvidenceItem | null {
     typeof item.capture_kind === "string" && EVIDENCE_CAPTURE_KIND.has(item.capture_kind)
       ? (item.capture_kind as ArtifactEvidenceItem["capture_kind"])
       : null;
+  const versionId = typeof item.version_id === "string" ? item.version_id.trim() : "";
+  if (!versionId) return null;
   const size =
     typeof item.size_bytes === "number" &&
     Number.isInteger(item.size_bytes) &&
     item.size_bytes >= 0
       ? item.size_bytes
       : null;
+  let verdict = item.verdict as ArtifactEvidenceItem["verdict"];
+  let keptReasons = reasons;
+  if (verdict === "verified_version_and_producer" && checksum === null) {
+    verdict = "insufficient_evidence";
+    if (!keptReasons.includes("no_checksum")) {
+      keptReasons = ["no_checksum", ...keptReasons].slice(0, 4);
+    }
+  }
   return {
     filename: publicText(item.filename, 200),
     artifact_id: publicText(item.artifact_id, 200),
-    version_id: publicText(item.version_id, 200),
+    version_id: publicText(versionId, 200),
     checksum,
     size_bytes: size,
     capture_kind: captureKind,
@@ -919,8 +929,8 @@ function sanitizeEvidenceItem(raw: unknown): ArtifactEvidenceItem | null {
         ? publicText(item.producing_cell_id, 200)
         : null,
     cell_status: cellStatus,
-    verdict: item.verdict as ArtifactEvidenceItem["verdict"],
-    reasons,
+    verdict,
+    reasons: keptReasons,
   };
 }
 
@@ -939,6 +949,9 @@ export function sanitizeArtifactEvidence(raw: unknown): ArtifactEvidence | undef
     truncated: record.truncated === true,
   };
   if (record.unavailable === true) evidence.unavailable = true;
+  if (typeof record.checked_at === "number" && Number.isFinite(record.checked_at)) {
+    evidence.checked_at = record.checked_at;
+  }
   return evidence;
 }
 

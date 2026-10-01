@@ -1057,13 +1057,12 @@ def test_evidence_read_failure_does_not_fail_the_child(monkeypatch):
         runner.close()
 
     assert result["task_status"] == "completed"
-    assert result["artifact_evidence"] == {
-        "scope": "version_and_producer",
-        "items": [],
-        "total": 0,
-        "truncated": False,
-        "unavailable": True,
-    }
+    evidence = result["artifact_evidence"]
+    assert evidence["unavailable"] is True
+    assert evidence["items"] == []
+    assert evidence["total"] == 0
+    assert evidence["truncated"] is False
+    assert isinstance(evidence["checked_at"], float)
 
 
 def test_output_schema_failure_still_carries_evidence(monkeypatch, tmp_path):
@@ -1113,3 +1112,222 @@ def test_exception_path_still_carries_evidence(monkeypatch, tmp_path):
     assert _item(result, planted["version_id"])["verdict"] == (
         "verified_version_and_producer"
     )
+
+
+def _cell_less_version_with_observation(tmp_path, *, cell_result: dict):
+    """An owned version whose producing_cell_id stays empty, plus one observation."""
+
+    store = get_store(get_config().db_path)
+    parent = store.new_frame(kind="turn", project_id="science")
+    child = store.new_frame(parent_id=parent, kind="delegate", project_id="science")
+    payload = b"evidence-bytes"
+    path = tmp_path / "reused.txt"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    first = store.record_cell_artifact(
+        path=str(path),
+        filename="reused.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id=None,
+        frame_id=child,
+        snapshot_path=str(path),
+        reuse_matching_head=True,
+    )
+    cell_id = store.log_cell(
+        frame_id=child,
+        code="value = 1\n",
+        result=cell_result,
+        origin="delegate",
+    )
+    second = store.record_cell_artifact(
+        path=str(path),
+        filename="reused.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id=cell_id,
+        frame_id=child,
+        snapshot_path=str(path),
+        reuse_matching_head=True,
+    )
+    assert second["version_id"] == first["version_id"]
+    assert second["capture_kind"] == "head_checksum_reused"
+    rows = store.artifact_evidence_rows_for_frame(child, limit=12)
+    version = next(
+        row for row in rows["versions"] if row["version_id"] == first["version_id"]
+    )
+    assert not version["producing_cell_id"]
+    return rows, child, first["version_id"]
+
+
+@pytest.mark.parametrize(
+    ("cell_result", "status"),
+    [({"error": "failed"}, "error"), ({"interrupted": True}, "interrupted")],
+)
+def test_owned_version_without_a_cell_adopts_a_failed_observation(
+    tmp_path, cell_result, status
+):
+    """A cell-less owned version used to ignore the observation and verify.
+
+    The latest same-frame observation is the producer. A Cell that is not ok
+    blocks the verdict.
+    """
+
+    rows, child, version_id = _cell_less_version_with_observation(
+        tmp_path, cell_result=cell_result
+    )
+    evidence = _project_artifact_evidence(rows, child)
+    item = next(row for row in evidence["items"] if row["version_id"] == version_id)
+    assert item["verdict"] == "insufficient_evidence"
+    assert item["cell_status"] == status
+    assert "cell_failed" in item["reasons"]
+    assert isinstance(evidence["checked_at"], float)
+
+
+def test_a_parent_cell_on_a_child_version_is_other_frame(tmp_path):
+    store = get_store(get_config().db_path)
+    parent = store.new_frame(kind="turn", project_id="science")
+    child = store.new_frame(parent_id=parent, kind="delegate", project_id="science")
+    parent_cell = store.log_cell(
+        frame_id=parent,
+        code="value = 1\n",
+        result={},
+        origin="agent",
+    )
+    payload = b"evidence-bytes"
+    path = tmp_path / "owned.txt"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    saved = store.record_cell_artifact(
+        path=str(path),
+        filename="owned.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id=parent_cell,
+        frame_id=child,
+        snapshot_path=str(path),
+    )
+    rows = store.artifact_evidence_rows_for_frame(child, limit=12)
+    evidence = _project_artifact_evidence(rows, child)
+    item = next(
+        row for row in evidence["items"] if row["version_id"] == saved["version_id"]
+    )
+    assert item["verdict"] == "insufficient_evidence"
+    assert "cell_other_frame" in item["reasons"]
+
+
+def test_an_unknown_cell_id_is_not_recorded(tmp_path):
+    store = get_store(get_config().db_path)
+    parent = store.new_frame(kind="turn", project_id="science")
+    child = store.new_frame(parent_id=parent, kind="delegate", project_id="science")
+    payload = b"evidence-bytes"
+    path = tmp_path / "unknown.txt"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    saved = store.record_cell_artifact(
+        path=str(path),
+        filename="unknown.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id="cell-does-not-exist",
+        frame_id=child,
+        snapshot_path=str(path),
+    )
+    rows = store.artifact_evidence_rows_for_frame(child, limit=12)
+    evidence = _project_artifact_evidence(rows, child)
+    item = next(
+        row for row in evidence["items"] if row["version_id"] == saved["version_id"]
+    )
+    assert item["verdict"] == "insufficient_evidence"
+    assert "cell_not_recorded" in item["reasons"]
+
+
+def test_the_worker_injects_the_running_cell_into_prov_record():
+    import openai4s.kernel.worker as worker_mod
+
+    previous = worker_mod._ACTIVE_CELL_ID[0]
+    worker_mod._ACTIVE_CELL_ID[0] = "cell-from-worker"
+    try:
+        enriched = worker_mod._attach_cell_context(
+            "prov_record",
+            [{"path": "out.txt", "producing_cell_id": "cell-forged"}],
+        )
+        assert enriched[0]["executionCellId"] == "cell-from-worker"
+        assert enriched[0]["producing_cell_id"] == "cell-forged"
+        untouched = worker_mod._attach_cell_context("query", [{"sql": "select 1"}])
+        assert untouched == [{"sql": "select 1"}]
+        worker_mod._ACTIVE_CELL_ID[0] = ""
+        plain = worker_mod._attach_cell_context(
+            "prov_record",
+            [{"path": "out.txt", "producing_cell_id": "cell-forged"}],
+        )
+        assert plain == [{"path": "out.txt", "producing_cell_id": "cell-forged"}]
+    finally:
+        worker_mod._ACTIVE_CELL_ID[0] = previous
+
+
+def test_provenance_record_prefers_the_injected_cell_and_keeps_a_direct_claim(tmp_path):
+    from types import SimpleNamespace
+
+    from openai4s.host.data import HostDataService
+
+    class _Store:
+        def __init__(self) -> None:
+            self.fields = None
+
+        def record_cell_artifact(self, **fields):
+            self.fields = fields
+            return {"version_id": "v-1", "artifact_id": "a-1"}
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "out.bin").write_bytes(b"bytes")
+    store = _Store()
+    config = SimpleNamespace(
+        data_dir=tmp_path / "data",
+        artifacts_dir=tmp_path / "artifacts",
+        roadmap_features=SimpleNamespace(stage1_trusted_delivery=False),
+    )
+
+    def resolve(path, *, must_exist=False):
+        result = (workspace / path).resolve()
+        if must_exist and not result.exists():
+            raise FileNotFoundError(result)
+        return result
+
+    service = HostDataService(
+        store=store,
+        config=config,
+        frame_id="frame-1",
+        resolve_path=resolve,
+    )
+    service.provenance_record(
+        {
+            "path": "out.bin",
+            "filename": "out.bin",
+            "producing_cell_id": "cell-forged",
+            "execution_cell_id": "cell-injected",
+        }
+    )
+    assert store.fields["producing_cell_id"] == "cell-injected"
+    service.provenance_record(
+        {
+            "path": "out.bin",
+            "filename": "out.bin",
+            "producing_cell_id": "cell-legacy",
+        }
+    )
+    assert store.fields["producing_cell_id"] == "cell-legacy"
+    service.provenance_record(
+        {
+            "path": "out.bin",
+            "filename": "out.bin",
+            "producing_cell_id": "cell-legacy",
+            "execution_cell_id": "",
+        }
+    )
+    assert store.fields["producing_cell_id"] == "cell-legacy"

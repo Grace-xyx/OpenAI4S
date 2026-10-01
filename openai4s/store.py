@@ -4035,6 +4035,11 @@ class Store:
     def delegation_tree(self, root_frame_id: str) -> dict:
         return self._delegations.project(root_frame_id)
 
+    def delegation_child_record(self, root_frame_id: str, child_id: str) -> dict | None:
+        """Full child row for in-process restore. Not the browser projection."""
+
+        return self._delegations.read_child(root_frame_id, child_id)
+
     def delegation_budget(self, root_frame_id: str) -> dict | None:
         return self._delegations.budget(root_frame_id)
 

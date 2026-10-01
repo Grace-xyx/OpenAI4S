@@ -659,6 +659,40 @@ describe("sanitizeArtifactEvidence", () => {
     expect(clean?.items[0]?.filename.endsWith("…")).toBe(true);
   });
 
+  it("drops an empty version id and downgrades a verified item with a bad checksum", () => {
+    const clean = sanitizeArtifactEvidence({
+      scope: "version_and_producer",
+      items: [
+        evidenceItem({ version_id: "  ", verdict: "verified_version_and_producer" }),
+        evidenceItem({ version_id: "", verdict: "insufficient_evidence" }),
+        evidenceItem({
+          version_id: "v-forged",
+          verdict: "verified_version_and_producer",
+          checksum: "not-a-sha",
+          reasons: [],
+        }),
+      ],
+      total: 3,
+      truncated: false,
+      checked_at: "yesterday",
+    });
+    expect(clean?.items.map((item) => item.version_id)).toEqual(["v-forged"]);
+    expect(clean?.items[0]).toMatchObject({
+      checksum: null,
+      verdict: "insufficient_evidence",
+      reasons: ["no_checksum"],
+    });
+    expect(clean && "checked_at" in clean).toBe(false);
+    const stamped = sanitizeArtifactEvidence({
+      scope: "version_and_producer",
+      items: [evidenceItem()],
+      total: 1,
+      truncated: false,
+      checked_at: 1_700_000_000.5,
+    });
+    expect(stamped?.checked_at).toBe(1_700_000_000.5);
+  });
+
   it("rejects a record whose scope is not the version-and-producer literal", () => {
     expect(sanitizeArtifactEvidence({ scope: "bytes", items: [evidenceItem()] })).toBeUndefined();
     expect(sanitizeArtifactEvidence(null)).toBeUndefined();
