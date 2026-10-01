@@ -1,9 +1,12 @@
 """Pytest fixtures + path setup for the openai4s test suite."""
 
+import atexit
 import copy
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -171,6 +174,21 @@ for _name in (
     "OPENAI4S_BUNDLE_ID",
 ):
     os.environ.pop(_name, None)
+
+# The autouse fixture below gives every test its own data directory, but code
+# that runs before a test's function-scoped fixtures never sees it: module- and
+# session-scoped fixtures, collection-time imports, and any cache built there.
+# `harness/evals/judgment_skills.py` cached a SkillLoader built from `Config()`
+# inside a module-scoped fixture, a later search opened the store at that
+# loader's db_path, and on 2026-09-30 a branch carrying schema 33 migrated the
+# developer's real ~/.openai4s/openai4s.db in place -- after which every
+# schema-32 checkout refused that database with FutureSchemaError. Point the
+# whole session at a private directory before any test module is imported, so
+# nothing outside a test can reach the real one. Each xdist worker imports this
+# file, so each gets its own directory.
+_SESSION_DATA_DIR = tempfile.mkdtemp(prefix="openai4s-pytest-session-")
+os.environ["OPENAI4S_DATA_DIR"] = _SESSION_DATA_DIR
+atexit.register(shutil.rmtree, _SESSION_DATA_DIR, True)
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:

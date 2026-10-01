@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,39 @@ def cases() -> list[dict]:
 @pytest.fixture(scope="module")
 def skill_names() -> set[str]:
     return ev.known_skill_names()
+
+
+@pytest.fixture(scope="module")
+def module_scope_data_dir() -> Path:
+    """The data directory a module-scoped fixture resolves, which is set up
+    before the per-test fixture redirects OPENAI4S_DATA_DIR."""
+    from openai4s.config import Config
+
+    return Path(Config().data_dir).resolve()
+
+
+def test_module_scope_never_resolves_the_real_data_dir(
+    module_scope_data_dir: Path,
+) -> None:
+    """`skill_names` builds the evaluation's SkillLoader at module scope. That
+    loader once captured the developer's real ~/.openai4s, and a later search
+    migrated the real database to an unreleased schema (see tests/conftest.py).
+    """
+    real = (Path.home() / ".openai4s").resolve()
+    assert module_scope_data_dir != real
+    assert real not in module_scope_data_dir.parents
+
+
+def test_skill_loader_is_rebuilt_when_the_data_dir_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path / "a"))
+    first = ev._skill_loader()
+    assert ev._skill_loader() is first
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path / "b"))
+    second = ev._skill_loader()
+    assert second is not first
+    assert Path(second.cfg.data_dir) == tmp_path / "b"
 
 
 def test_dataset_schema_and_counts(cases: list[dict]) -> None:

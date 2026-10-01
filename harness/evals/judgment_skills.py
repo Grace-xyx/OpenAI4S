@@ -401,15 +401,23 @@ def score_predictions(
 
 
 def _skill_loader():
-    global _LOADER
-    if _LOADER is None:
-        from openai4s.config import Config
-        from openai4s.skills_loader import SkillLoader
+    """The process-wide loader for the data directory in effect right now.
 
-        loader = SkillLoader(cfg=Config())
+    Keyed by that directory: a loader built under one (say, a test module's
+    setup, before per-test isolation applies) must never answer a search made
+    under another, because search opens the store at the loader's db_path.
+    """
+    global _LOADER
+    from openai4s.config import Config
+    from openai4s.skills_loader import SkillLoader
+
+    cfg = Config()
+    key = str(cfg.data_dir)
+    if _LOADER is None or _LOADER[0] != key:
+        loader = SkillLoader(cfg=cfg)
         loader.discover()
-        _LOADER = loader
-    return _LOADER
+        _LOADER = (key, loader)
+    return _LOADER[1]
 
 
 def known_skill_names() -> set[str]:
