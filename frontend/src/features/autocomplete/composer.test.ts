@@ -193,9 +193,15 @@ function fakeKey(key: string): FakeKey {
   return e;
 }
 
-function bindKeys(): { dispatch: ReturnType<typeof vi.fn>; fire: (e: FakeKey) => void } {
+type RootListeners = Record<string, Array<(e: FakeKey) => void>>;
+
+function bindKeys(): {
+  dispatch: ReturnType<typeof vi.fn>;
+  fire: (e: FakeKey) => void;
+  listeners: RootListeners;
+} {
   const dispatch = vi.fn(() => Promise.resolve());
-  const listeners: Record<string, Array<(e: FakeKey) => void>> = {};
+  const listeners: RootListeners = {};
   const root = {
     dataset: {} as Record<string, string>,
     addEventListener(type: string, fn: (e: FakeKey) => void) {
@@ -207,6 +213,7 @@ function bindKeys(): { dispatch: ReturnType<typeof vi.fn>; fire: (e: FakeKey) =>
   bindComposer(dispatch);
   return {
     dispatch,
+    listeners,
     fire(e: FakeKey) {
       composer.emit(e);
       if (!e.stopped) {
@@ -870,5 +877,189 @@ describe("an index request that times out", () => {
     await next;
     expect(ac.open).toBe(false);
     expect(hintText()).toBe("");
+  });
+});
+
+describe("a pending @ search across entry points and engines", () => {
+  const sendTarget = { closest: (selector: string) => (selector === "#send-btn" ? {} : null) };
+
+  function pointer(listeners: RootListeners, type: string, onPrevent = () => {}): void {
+    for (const fn of listeners[type] || []) {
+      fn({
+        type,
+        target: sendTarget,
+        preventDefault: onPrevent,
+        stopImmediatePropagation: () => {},
+      });
+    }
+  }
+
+  /** Chrome 111-115, Firefox 121-123 and Safari 16.2-17.3 have no AbortSignal.any. */
+  function withoutAbortSignalAny(run: () => Promise<void>): Promise<void> {
+    const box = AbortSignal as unknown as { any?: unknown };
+    const original = box.any;
+    box.any = undefined;
+    return run().finally(() => {
+      box.any = original;
+    });
+  }
+
+  it("without AbortSignal.any the request still goes out and Enter waits for it", () =>
+    withoutAbortSignalAny(async () => {
+      project.value = "proj";
+      currentId.value = "sess";
+      artifacts.value = [];
+      const pending = pendingIndex(true);
+      const { dispatch, fire } = bindKeys();
+      type("@plot");
+      const update = acUpdate();
+      await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+      expect(pending).toHaveLength(1);
+      expect(acPending()).toBe(true);
+      fire(fakeKey("Enter"));
+      expect(dispatch).not.toHaveBeenCalled();
+      pending[0]!.resolve(page([art({ id: "plot", filename: "plot.png", version_id: "v1" })]));
+      await update;
+      expect(composer.value).toBe("@plot.png#v1 ");
+    }));
+
+  it("without AbortSignal.any a timeout still shows the failure hint", () =>
+    withoutAbortSignalAny(async () => {
+      project.value = "proj";
+      currentId.value = "sess";
+      artifacts.value = [art({ id: "local", filename: "plot-local.txt", version_id: "v-local" })];
+      pendingIndex(true);
+      type("@plot");
+      const update = acUpdate();
+      await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+      expectHint("searching");
+      await vi.advanceTimersByTimeAsync(AC_INDEX_TIMEOUT_MS);
+      await update;
+      expectHint("failed");
+    }));
+
+  it("the send button keeps composer focus, waits for the search, then sends the completed text", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    const { dispatch, listeners } = bindKeys();
+    type("@plot");
+    const update = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    let prevented = false;
+    pointer(listeners, "mousedown", () => {
+      prevented = true;
+    });
+    // mousedown -> blur -> click: a blur would cancel the search first.
+    expect(prevented).toBe(true);
+    pointer(listeners, "click");
+    expect(dispatch).not.toHaveBeenCalled();
+    pending[0]!.resolve(page([art({ id: "plot", filename: "plot.png", version_id: "v1" })]));
+    await update;
+    expect(composer.value).toBe("@plot.png#v1 ");
+    pointer(listeners, "click");
+    expect(dispatch).toHaveBeenCalledWith("@plot.png#v1 ");
+  });
+
+  it("an armed Enter only completes the @ token it was pressed on", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    const { fire } = bindKeys();
+    type("a @res b @res");
+    const update = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    fire(fakeKey("Enter"));
+    // A click moves the caret to the first token without an input event.
+    composer.selectionStart = 6;
+    pending[0]!.resolve(page([art({ id: "r", filename: "results.csv", version_id: "v1" })]));
+    await update;
+    expect(composer.value).toBe("a @res b @res");
+  });
+
+  it("Shift+Enter with no rows keeps its newline and arms nothing", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    const { dispatch, fire } = bindKeys();
+    type("@plot");
+    const update = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    let prevented = false;
+    const shiftEnter = { ...fakeKey("Enter"), shiftKey: true };
+    shiftEnter.preventDefault = () => {
+      prevented = true;
+    };
+    fire(shiftEnter);
+    expect(prevented).toBe(false);
+    pending[0]!.resolve(page([art({ id: "plot", filename: "plot.png", version_id: "v1" })]));
+    await update;
+    expect(composer.value).toBe("@plot");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("Enter in the debounce window, before any request, is held and completes", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    const { dispatch, fire } = bindKeys();
+    type("@plot");
+    const update = acUpdate();
+    expect(pending).toHaveLength(0);
+    fire(fakeKey("Enter"));
+    expect(dispatch).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    pending[0]!.resolve(page([art({ id: "plot", filename: "plot.png", version_id: "v1" })]));
+    await update;
+    expect(composer.value).toBe("@plot.png#v1 ");
+  });
+
+  it("the highlighted file stays highlighted when the index returns a newer version", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [
+      art({ id: "plot", filename: "plot.png", version_id: "v-plot" }),
+      art({ id: "plan", filename: "plan.md", version_id: "v-plan-old" }),
+    ];
+    const pending = pendingIndex();
+    const { fire } = bindKeys();
+    type("@p");
+    const update = acUpdate();
+    fire(fakeKey("ArrowDown"));
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    fire(fakeKey("Enter"));
+    pending[0]!.resolve(
+      page([
+        art({ id: "plot", filename: "plot.png", version_id: "v-plot" }),
+        art({ id: "plan", filename: "plan.md", version_id: "v-plan-new" }),
+      ]),
+    );
+    await update;
+    expect(composer.value).toBe("@plan.md#v-plan-new ");
+  });
+
+  it("typing after an armed Enter disarms it", async () => {
+    project.value = "proj";
+    currentId.value = "sess";
+    artifacts.value = [];
+    const pending = pendingIndex();
+    const { fire } = bindKeys();
+    type("@plo");
+    const first = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    fire(fakeKey("Enter"));
+    type("@plot");
+    const second = acUpdate();
+    await vi.advanceTimersByTimeAsync(AC_DEBOUNCE_MS);
+    pending[1]!.resolve(page([art({ id: "plot", filename: "plot.png", version_id: "v1" })]));
+    await second;
+    pending[0]!.resolve(page([art({ id: "plo", filename: "plot.png", version_id: "v0" })]));
+    await first;
+    expect(composer.value).toBe("@plot");
+    expect(ac.open).toBe(true);
   });
 });

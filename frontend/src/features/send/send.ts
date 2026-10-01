@@ -46,7 +46,7 @@ import {
   type UploadResult,
 } from "../chrome/upload";
 import { loadSkillsCatalog } from "../autocomplete/catalog";
-import { acPending } from "../autocomplete/composer";
+import { acHoldSend, acPending } from "../autocomplete/composer";
 import { effProject } from "../customize/host";
 import { $, el } from "../messages/dom";
 import { down } from "../messages/scroll";
@@ -782,6 +782,12 @@ export function bindComposer(dispatch: ComposerDispatch = send): void {
       e.preventDefault();
       dispatchComposer(c.value);
     });
+    // Keep focus in the composer on a send-button press. Its blur cancels an
+    // in-flight @ search, and blur runs before click (mousedown -> blur -> click).
+    root.addEventListener("mousedown", (e) => {
+      const target = e.target as { closest?: (selector: string) => unknown } | null;
+      if (target && typeof target.closest === "function" && target.closest("#send-btn")) e.preventDefault();
+    });
     // The round send button beside the model picker (Shell.tsx #send-btn).
     root.addEventListener("click", (e) => {
       const target = e.target as { closest?: (selector: string) => unknown } | null;
@@ -789,6 +795,7 @@ export function bindComposer(dispatch: ComposerDispatch = send): void {
       const c = document.getElementById("composer") as HTMLTextAreaElement | null;
       if (!c) return;
       e.preventDefault();
+      if (acHoldSend()) return;
       dispatchComposer(c.value);
       if (typeof c.focus === "function") c.focus();
     });

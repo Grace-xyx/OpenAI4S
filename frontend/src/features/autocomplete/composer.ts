@@ -95,6 +95,8 @@ let appliedPid = "";
 let appliedSession = "";
 /** Enter/Tab landed while a search was in flight. Completed when that page settles, if the token is still there. */
 let acAcceptArmed = false;
+/** Token start Enter/Tab armed on; the accept only lands there. */
+let acArmedStart = -1;
 
 function projectId(): string {
   return effProject() || "";
@@ -119,8 +121,15 @@ function sessionCandidates(): ArtifactLike[] {
   return ((artifacts.value || []) as ArtifactLike[]).filter(isShownArtifact);
 }
 
+/** Artifact identity per row: a newer version of the same file is still the highlighted row. */
+const itemKey = new WeakMap<AcItem, string>();
+
 function toItems(rows: ArtifactLike[]): AcItem[] {
-  return rows.map((a) => artifactToAcItem(a, currentId.value, t("ac.fromOtherSession")));
+  return rows.map((a) => {
+    const item = artifactToAcItem(a, currentId.value, t("ac.fromOtherSession"));
+    itemKey.set(item, String(a.artifact_id || a.id || a.filename));
+    return item;
+  });
 }
 
 function clearDebounce(): void {
@@ -182,8 +191,10 @@ function canRefine(d: ComposerDetect): boolean {
 
 function nextIndex(items: AcItem[], keep: boolean): number {
   if (!keep || items.length === 0) return 0;
-  const prev = ac.items[ac.idx]?.insert;
-  return Math.max(0, items.findIndex((item) => item.insert === prev));
+  const prev = ac.items[ac.idx];
+  if (!prev) return 0;
+  const key = itemKey.get(prev) ?? prev.insert;
+  return Math.max(0, items.findIndex((item) => (itemKey.get(item) ?? item.insert) === key));
 }
 
 function sameItemList(a: AcItem[], b: AcItem[]): boolean {
@@ -370,6 +381,9 @@ export function acRender(): void {
   box.appendChild(list);
   if (acNotice) box.appendChild(el("div", "ac-hint", filesT(NOTICE_KEY[acNotice])));
   box.classList.remove("hidden");
+  // The list is rebuilt each render; keep the highlighted row in view.
+  const on = list.children[ac.idx] as HTMLElement | undefined;
+  if (on && typeof on.scrollIntoView === "function") on.scrollIntoView({ block: "nearest" });
 }
 
 export function acPick(i: number): void {
@@ -394,8 +408,41 @@ function finishArmedAccept(): void {
   acAcceptArmed = false;
   if (!ac.open || ac.items.length === 0) return;
   const now = acDetect();
-  if (!now || now.trigger !== "@" || now.start !== ac.start) return;
+  if (!now || now.trigger !== "@" || now.start !== acArmedStart) return;
   acPick(ac.idx);
+}
+
+function armAccept(): void {
+  const d = acDetect();
+  acAcceptArmed = !!d && d.trigger === "@";
+  acArmedStart = d ? d.start : -1;
+}
+
+/** The send button while an `@` search is pending: wait like Enter does. */
+export function acHoldSend(): boolean {
+  if (!acPending()) return false;
+  armAccept();
+  return true;
+}
+
+/** `AbortSignal.any` is Chrome 116 / Firefox 124 / Safari 17.4; older engines get a child controller. */
+function requestSignal(user: AbortSignal, ms: number): { signal: AbortSignal; done: () => void } {
+  const any = (AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof any === "function" && typeof AbortSignal.timeout === "function") {
+    return { signal: any.call(AbortSignal, [user, AbortSignal.timeout(ms)]), done: () => {} };
+  }
+  const child = new AbortController();
+  const onUser = (): void => child.abort(user.reason);
+  if (user.aborted) onUser();
+  else user.addEventListener("abort", onUser, { once: true });
+  const timer = setTimeout(() => child.abort(new DOMException("timed out", "TimeoutError")), ms);
+  return {
+    signal: child.signal,
+    done: () => {
+      clearTimeout(timer);
+      user.removeEventListener("abort", onUser);
+    },
+  };
 }
 
 async function runFileSearch(seq: number): Promise<void> {
@@ -418,15 +465,16 @@ async function runFileSearch(seq: number): Promise<void> {
   if (canRefine(d)) refineApplied(d, "loading");
   else showFilePopup(sessionCandidates(), d, "loading");
   const ctrl = new AbortController();
-  const signal = AbortSignal.any([ctrl.signal, AbortSignal.timeout(AC_INDEX_TIMEOUT_MS)]);
+  const req = requestSignal(ctrl.signal, AC_INDEX_TIMEOUT_MS);
   acAbort = ctrl;
   try {
-    const merged = await acProjectFiles(token.query, signal);
+    const merged = await acProjectFiles(token.query, req.signal);
     settle(token, merged, token.query ? null : "recent");
   } catch {
     if (ctrl.signal.aborted) return;
     settle(token, sessionCandidates(), "error");
   } finally {
+    req.done();
     if (acAbort === ctrl) acAbort = null;
   }
 }
@@ -511,12 +559,14 @@ function onComposerKeydown(e: KeyboardEvent): void {
     acClose();
     return;
   }
+  // Shift+Enter is a newline, never a send: with no rows showing it stays one.
+  if (e.key === "Enter" && e.shiftKey && !ac.open) return;
   if (e.key === "Enter" || e.key === "Tab") {
     if (ac.open || pending) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (pending) {
-        acAcceptArmed = true;
+        armAccept();
         return;
       }
       if (ac.items.length > 0) acPick(ac.idx);
