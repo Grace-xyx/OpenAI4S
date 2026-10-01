@@ -76,6 +76,10 @@ from openai4s.storage.auto_mode import (
     create_auto_mode_schema,
     install_auto_mode_action_guards,
 )
+from openai4s.storage.background_execs import (
+    BackgroundExecReceiptRepository,
+    create_background_exec_receipts_schema,
+)
 from openai4s.storage.branch_projection import count_cursor, project_branch_records
 from openai4s.storage.capabilities import CapabilityStateRepository
 from openai4s.storage.checkpoint_state import CheckpointStateRepository
@@ -763,6 +767,9 @@ QUERY_DENYLIST = frozenset(
         # Exact probe receipts.  Not agent-working-data; they name a profile
         # revision and an endpoint digest, and they gate native completion.
         "model_capability_receipts",
+        # Background-cell stdout. The peek projection is the read path; agent
+        # SQL must not select the receipt table.
+        "background_exec_receipts",
         "skill_blobs",
         "skill_versions",
         "skill_version_files",
@@ -1370,6 +1377,11 @@ class Store:
             self._lock,
             clock_ms=lambda: _now_ms(),
         )
+        self._background_exec_receipts = BackgroundExecReceiptRepository(
+            self._conn,
+            self._lock,
+            clock_ms=lambda: _now_ms(),
+        )
         self._shares = SharesRepository(
             self._conn,
             self._lock,
@@ -1655,6 +1667,10 @@ class Store:
                         "redact_judge_host_call_args",
                         self._apply_redact_judge_host_call_args,
                     ),
+                    34: (
+                        "background_exec_receipts",
+                        self._apply_background_exec_receipts,
+                    ),
                 },
             )
             if report["migrated"]:
@@ -1880,6 +1896,15 @@ class Store:
                     )
         finally:
             conn.execute(f"PRAGMA secure_delete = {previous}").fetchall()
+
+    def _apply_background_exec_receipts(self, conn: sqlite3.Connection) -> None:
+        """Version 34: bounded receipts for Web background cells.
+
+        Additive. The row is written before the worker starts and stores a
+        code digest, not the source. A later daemon does not replay it.
+        """
+
+        create_background_exec_receipts_schema(conn)
 
     def _apply_team_governance(self, conn: sqlite3.Connection) -> None:
         """Version 20: membership, invites, usage ledger, quotas (M2).
@@ -2574,6 +2599,11 @@ class Store:
     def model_capability_receipts(self) -> ModelCapabilityReceiptRepository:
         """Exact probe receipts bound to profile revision + endpoint."""
         return self._model_capability_receipts
+
+    @property
+    def background_exec_receipts(self) -> BackgroundExecReceiptRepository:
+        """Bounded Web background-cell receipts. CLI sessions do not write them."""
+        return self._background_exec_receipts
 
     @property
     def leases(self) -> LeaseRepository:

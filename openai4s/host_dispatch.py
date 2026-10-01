@@ -3192,8 +3192,32 @@ class HostDispatcher:
         host_calls still resolve against the same store/session.
         """
         if self._bg_executor is None:
-            from openai4s.kernel.background import BackgroundExecutor
+            from openai4s.kernel.background import DAEMON_INSTANCE, BackgroundExecutor
 
+            receipts = None
+            if getattr(self, "durable_background", False):
+                from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+                store = get_store(self.cfg.db_path)
+                root = str(self.frame_id or "")
+                owner: str | None = None
+                try:
+                    record = store.team.session_owner(root)
+                except Exception:
+                    record = None
+                if isinstance(record, dict):
+                    user = record.get("user_id")
+                    if isinstance(user, str) and user.strip():
+                        owner = user.strip()
+                configured = getattr(self, "daemon_instance", None)
+                instance = str(configured or DAEMON_INSTANCE)
+                receipts = BoundBackgroundReceipts(
+                    store.background_exec_receipts,
+                    root_frame_id=root,
+                    frame_id=root or None,
+                    daemon_instance=instance,
+                    owner_user_id=owner,
+                )
             self._bg_executor = BackgroundExecutor(
                 kernel_factory=self._new_background_kernel,
                 dispatcher=self,
@@ -3202,7 +3226,15 @@ class HostDispatcher:
                     if self.background_execution_lease is not None
                     else nullcontext()
                 ),
+                receipts=receipts,
             )
+            if receipts is not None:
+                try:
+                    receipts.prune(int(time.time() * 1000))
+                except Exception:
+                    # A prune failure leaves the raw row non-terminal. Reads
+                    # still derive outcome_unknown, and the launch can proceed.
+                    pass
         return self._bg_executor
 
     def _m_exec_background(self, spec: dict) -> dict:
@@ -3227,13 +3259,64 @@ class HostDispatcher:
         return self._bg().launch(code, origin=origin)
 
     def _m_exec_peek(self, exec_id: str) -> dict:
-        return self._bg().peek(exec_id)
+        executor = self._bg()
+        try:
+            return executor.peek(exec_id)
+        except KeyError:
+            receipts = getattr(executor, "receipts", None)
+            if receipts is None:
+                raise
+            row = receipts.get(str(exec_id))
+            if row is None:
+                raise
+            from openai4s.storage.background_execs import project_receipt
+
+            return project_receipt(row)
 
     def _m_exec_interrupt(self, exec_id: str) -> dict:
-        return self._bg().interrupt(exec_id)
+        executor = self._bg()
+        try:
+            return executor.interrupt(exec_id)
+        except KeyError:
+            receipts = getattr(executor, "receipts", None)
+            if receipts is None:
+                raise
+            row = receipts.get(str(exec_id))
+            if row is None:
+                raise
+            from openai4s.storage.background_execs import project_receipt
+
+            report = project_receipt(row)
+            report["interrupt_undelivered"] = True
+            report["reason"] = (
+                "no live process handle for this exec (daemon restarted); "
+                "delivery cannot be confirmed"
+            )
+            return report
 
     def _m_exec_list(self, *_a: Any) -> list:
-        return self._bg().list_jobs()
+        executor = self._bg()
+        live = list(executor.list_jobs())
+        receipts = getattr(executor, "receipts", None)
+        if receipts is None:
+            return live
+        from openai4s.storage.background_execs import project_receipt
+
+        merged: dict[str, dict[str, Any]] = {}
+        for row in receipts.list(limit=50):
+            item = project_receipt(row)
+            merged[str(item.get("exec_id") or "")] = item
+        for item in live:
+            merged[str(item.get("exec_id") or "")] = item
+
+        def _when(item: Mapping[str, Any]) -> int:
+            created = item.get("created_at")
+            if isinstance(created, int):
+                return created
+            started = item.get("started_at")
+            return started if isinstance(started, int) else 0
+
+        return sorted(merged.values(), key=_when, reverse=True)[:50]
 
     # --- app tiles ------------------------------------------------
     #: Most recent tiles kept per session. A tile is a scratch surface a cell

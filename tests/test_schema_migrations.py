@@ -165,6 +165,9 @@ def test_a_new_store_is_stamped_and_recorded(tmp_path):
         # Historical host.judge previews kept the raw state. New writes
         # project it; this step rewrites the rows already on disk.
         "redact_judge_host_call_args",
+        # Bounded Web background-cell receipts. Written before the worker
+        # starts; a later daemon does not replay an unfinished row.
+        "background_exec_receipts",
     ]
     assert state["applied"][0]["checksum"]
     assert state["applied"][0]["applied_at"] > 0
@@ -2099,7 +2102,7 @@ def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path):
     upgraded = get_store(db)
     try:
         rows = read_rows(upgraded)
-        assert upgraded.schema_state()["version"] == SCHEMA_VERSION == 33
+        assert upgraded.schema_state()["version"] == SCHEMA_VERSION == 34
         assert version_33_names(upgraded) == ["redact_judge_host_call_args"]
     finally:
         upgraded.close()

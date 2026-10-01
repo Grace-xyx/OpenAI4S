@@ -5960,6 +5960,7 @@ class SessionRunner:
         as a side effect of spawning that foreground worker.
         """
 
+        dispatcher.durable_background = True
         if self.store.leases.workload_for_session(st.root_frame_id):
 
             def refuse_cluster_background() -> Kernel:

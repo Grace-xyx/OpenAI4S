@@ -34,6 +34,10 @@ from typing import Any
 MAX_PEEK_CHARS = 1_000_000
 _TRUNCATION_MARKER = f"\n...(truncated at {MAX_PEEK_CHARS} characters)"
 
+#: One id for this process. Web receipts and a restarted daemon compare it;
+#: a different value means the worker that owned the row is gone.
+DAEMON_INSTANCE = uuid.uuid4().hex
+
 
 class _BackgroundJob:
     __slots__ = (
@@ -52,24 +56,34 @@ class _BackgroundJob:
         "ended_at",
         "interrupted",
         "_lifetime",
+        "persistent",
+        "receipt_degraded",
+        "_buf_bytes",
+        "_flushed_bytes",
+        "_last_flush_ms",
     )
 
-    def __init__(self, exec_id: str, code: str):
+    def __init__(self, exec_id: str, code: str, *, persistent: bool = False):
         self.exec_id = exec_id
         self.code = code
         self.status = "running"  # running|done|failed|interrupted
         self._buf: list[str] = []
         self._buf_len = 0
         self._buf_truncated = False
+        self._buf_bytes = 0
+        self._flushed_bytes = 0
         self._lock = threading.Lock()
         self._kernel: Any = None
         self._thread: threading.Thread | None = None
         self.result: dict | None = None
         self.error: str | None = None
         self.started_at = int(time.time() * 1000)
+        self._last_flush_ms = self.started_at
         self.ended_at: int | None = None
         self.interrupted = False
         self._lifetime: Any = None
+        self.persistent = persistent
+        self.receipt_degraded = False
 
     def _on_chunk(self, text: str) -> None:
         if not text:
@@ -82,6 +96,7 @@ class _BackgroundJob:
             kept = text[:room]
             self._buf.append(kept)
             self._buf_len += len(kept)
+            self._buf_bytes += len(kept.encode("utf-8"))
             if len(kept) < len(text):
                 self._buf_truncated = True
 
@@ -105,6 +120,7 @@ class _BackgroundJob:
                 "error": self.error,
                 "started_at": self.started_at,
                 "ended_at": self.ended_at,
+                "persistent": self.persistent,
             }
 
 
@@ -117,6 +133,7 @@ class BackgroundExecutor:
         dispatcher: Any,
         *,
         lifetime_factory: Any = None,
+        receipts: Any = None,
     ):
         # kernel_factory -> a fresh Kernel bound to `dispatcher`.
         self._kernel_factory = kernel_factory
@@ -125,6 +142,8 @@ class BackgroundExecutor:
         # worker thread's final shutdown.  Web Stage 1 uses it to make a
         # background launch atomic against foreground Artifact capture.
         self._lifetime_factory = lifetime_factory
+        # Bound Web receipt adapter. None keeps the job in process memory.
+        self.receipts = receipts
         self._jobs: dict[str, _BackgroundJob] = {}
         self._lock = threading.Lock()
         self._closed = False
@@ -136,6 +155,11 @@ class BackgroundExecutor:
     #: `host.exec_background` forked a worker per iteration until the machine
     #: ran out of pids or memory, and nothing on the path said no.
     MAX_ACTIVE_JOBS = 16
+    #: Persist the stdout head once this many new UTF-8 bytes have arrived,
+    #: or once this long has passed with anything still unflushed. The first
+    #: byte waits for one of those; ``started_at`` is the initial mark.
+    FLUSH_BYTES = 16 * 1024
+    FLUSH_INTERVAL_MS = 1000
 
     def _enter_lifetime(self) -> Any:
         if self._lifetime_factory is None:
@@ -161,7 +185,8 @@ class BackgroundExecutor:
 
     def launch(self, code: str, origin: str = "agent") -> dict:
         exec_id = f"exec-{uuid.uuid4().hex[:12]}"
-        job = _BackgroundJob(exec_id, code)
+        persistent = self.receipts is not None
+        job = _BackgroundJob(exec_id, code, persistent=persistent)
         # Enter before claiming a process slot.  Foreground capture and this
         # increment are decided under the coordinator's one short lock, so a
         # background worker can never appear in the check/start gap.
@@ -185,6 +210,21 @@ class BackgroundExecutor:
                     f"host.exec_interrupt or wait for it to finish"
                 )
             self._jobs[exec_id] = job
+        if self.receipts is not None:
+            try:
+                self.receipts.begin(exec_id=exec_id, code=code, origin=origin)
+            except Exception:
+                with self._lock:
+                    self._jobs.pop(exec_id, None)
+                self._exit_lifetime(job)
+                raise RuntimeError(
+                    "background receipt could not be recorded; refusing to start"
+                ) from None
+            except BaseException:
+                with self._lock:
+                    self._jobs.pop(exec_id, None)
+                self._exit_lifetime(job)
+                raise
         try:
             job._kernel = self._kernel_factory()
         except BaseException:
@@ -193,8 +233,14 @@ class BackgroundExecutor:
             # that is now perfectly able to serve them.
             with self._lock:
                 self._jobs.pop(exec_id, None)
-            self._exit_lifetime(job)
+            try:
+                self._exit_lifetime(job)
+            finally:
+                self._record_launch_failed(
+                    exec_id, "background kernel could not be created"
+                )
             raise
+        self._note_env_generation(job)
         with self._lock:
             if self._closed:
                 # `shutdown()` ran while we were spawning. It walked a job whose
@@ -205,6 +251,7 @@ class BackgroundExecutor:
                     job._kernel.shutdown()
                 finally:
                     self._exit_lifetime(job)
+                    self._record_launch_failed(exec_id, "background executor is closed")
                     raise RuntimeError("background executor is closed")
 
         from openai4s.egress import (
@@ -220,21 +267,31 @@ class BackgroundExecutor:
                 posture = None
             decision = cell_admission_refusal(posture)
             if decision is not None:
+                code_name = str(decision.get("code") or "egress_boundary_unavailable")
+                reason = str(decision.get("reason") or "")
                 with self._lock:
                     self._jobs.pop(exec_id, None)
                 try:
-                    job._kernel.shutdown()
+                    try:
+                        job._kernel.shutdown()
+                    finally:
+                        self._exit_lifetime(job)
                 finally:
-                    self._exit_lifetime(job)
-                raise EgressBoundaryUnavailable(decision)
+                    self._record_launch_failed(exec_id, f"{code_name}: {reason}")
+                    raise EgressBoundaryUnavailable(decision)
 
         def _run() -> None:
             terminal_status = "failed"
             terminal_error: str | None = None
             terminal_interrupted = False
             terminal_result: dict | None = None
+
+            def _chunk(text: str) -> None:
+                job._on_chunk(text)
+                self._maybe_flush(job)
+
             try:
-                res = job._kernel.execute(code, origin=origin, on_chunk=job._on_chunk)
+                res = job._kernel.execute(code, origin=origin, on_chunk=_chunk)
                 terminal_result = res
                 if res.get("interrupted"):
                     terminal_status = "interrupted"
@@ -288,6 +345,7 @@ class BackgroundExecutor:
                     job.interrupted = terminal_interrupted
                     job.ended_at = int(time.time() * 1000)
                     job.status = terminal_status
+                self._finish_receipt(job)
 
         try:
             thread = threading.Thread(target=_run, daemon=True)
@@ -306,8 +364,114 @@ class BackgroundExecutor:
                 job._kernel.shutdown()
             finally:
                 self._exit_lifetime(job)
+                self._record_launch_failed(
+                    exec_id, "background worker thread could not be started"
+                )
             raise
-        return {"exec_id": exec_id, "status": "running"}
+        self._mark_running(job)
+        return {
+            "exec_id": exec_id,
+            "status": "running",
+            "persistent": persistent,
+        }
+
+    def _record_launch_failed(self, exec_id: str, error: str) -> None:
+        receipts = self.receipts
+        if receipts is None:
+            return
+        try:
+            receipts.finish(
+                exec_id,
+                status="launch_failed",
+                error=error,
+                interrupted=False,
+                ended_at=int(time.time() * 1000),
+                output="",
+                truncated=False,
+            )
+        except Exception:
+            return
+
+    def _mark_running(self, job: _BackgroundJob) -> None:
+        receipts = self.receipts
+        if receipts is None:
+            return
+        try:
+            receipts.mark_running(job.exec_id, job.started_at)
+        except Exception:
+            job.receipt_degraded = True
+
+    def _note_env_generation(self, job: _BackgroundJob) -> None:
+        receipts = self.receipts
+        kernel = job._kernel
+        if receipts is None or kernel is None:
+            return
+        generation: str | None = None
+        for name in ("authorization_generation", "generation_id", "env_generation"):
+            value = getattr(kernel, name, None)
+            if isinstance(value, str) and value.strip():
+                generation = value.strip()
+                break
+        if generation is None:
+            return
+        note = getattr(receipts, "note_env_generation", None)
+        if not callable(note):
+            return
+        try:
+            note(job.exec_id, generation)
+        except Exception:
+            job.receipt_degraded = True
+
+    def _maybe_flush(self, job: _BackgroundJob) -> None:
+        receipts = self.receipts
+        if receipts is None:
+            return
+        with job._lock:
+            pending = job._buf_bytes - job._flushed_bytes
+            now = int(time.time() * 1000)
+            due = pending >= self.FLUSH_BYTES or (
+                pending > 0 and now - job._last_flush_ms >= self.FLUSH_INTERVAL_MS
+            )
+            if not due:
+                return
+            text = "".join(job._buf)
+            truncated = job._buf_truncated
+            flushed = job._buf_bytes
+        try:
+            receipts.save_output(job.exec_id, text, truncated)
+        except Exception:
+            job.receipt_degraded = True
+            return
+        with job._lock:
+            job._last_flush_ms = now
+            if flushed >= job._flushed_bytes:
+                job._flushed_bytes = flushed
+
+    def _finish_receipt(self, job: _BackgroundJob) -> None:
+        receipts = self.receipts
+        if receipts is None:
+            return
+        with job._lock:
+            status = job.status
+            error = job.error
+            interrupted = job.interrupted
+            ended = job.ended_at
+            text = "".join(job._buf)
+            truncated = job._buf_truncated
+        if status not in ("done", "failed", "interrupted"):
+            status = "failed"
+        try:
+            receipts.finish(
+                job.exec_id,
+                status=status,
+                error=error,
+                interrupted=interrupted,
+                ended_at=int(ended or time.time() * 1000),
+                output=text,
+                truncated=truncated,
+            )
+        except Exception:
+            job.receipt_degraded = True
 
     def _get(self, exec_id: str) -> _BackgroundJob:
         with self._lock:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from types import SimpleNamespace
 
@@ -210,6 +211,7 @@ def test_background_base_exception_has_terminal_public_state_and_reuses_slot():
         "error": "background execution failed",
         "started_at": first.started_at,
         "ended_at": first.ended_at,
+        "persistent": False,
     }
     assert interrupted.shutdown_calls == 1
     # The lifetime is released and the status no longer consumes the only
@@ -730,3 +732,793 @@ def test_host_exec_background_raises_the_boundary_code(tmp_path, monkeypatch):
         assert dispatcher._bg_executor._jobs == {}
     finally:
         dispatcher.store.close()
+
+
+# --- persistent receipts (v34) ---------------------------------------------
+
+
+def _cfg_store(tmp_path):
+    from openai4s.config import Config
+    from openai4s.store import get_store
+
+    cfg = Config(data_dir=tmp_path / "data")
+    return cfg, get_store(cfg.db_path)
+
+
+def _root(store):
+    return store.new_frame(kind="turn", project_id="default", status="ready")
+
+
+def _dispatcher(cfg, root, instance, factory):
+    from openai4s.host_dispatch import build_dispatcher
+
+    dispatcher = build_dispatcher(cfg, frame_id=root)
+    dispatcher.durable_background = True
+    dispatcher.daemon_instance = instance
+    dispatcher.background_kernel_factory = factory
+    return dispatcher
+
+
+class _OkKernel:
+    def __init__(self, chunks=(), result=None, generation=None):
+        self.chunks = chunks
+        self.result = result or {"stdout": "ok", "error": None}
+        self.shutdown_calls = 0
+        self.executed = 0
+        if generation is not None:
+            self.authorization_generation = generation
+
+    def execute(self, code, origin="agent", on_chunk=None):
+        del code, origin
+        self.executed += 1
+        if on_chunk is not None:
+            for chunk in self.chunks:
+                on_chunk(chunk)
+        return dict(self.result)
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+    def interrupt(self):
+        return None
+
+
+class _WaitKernel:
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.chunks = ()
+
+    def execute(self, code, origin="agent", on_chunk=None):
+        del code, origin
+        if on_chunk is not None:
+            for chunk in self.chunks:
+                on_chunk(chunk)
+        self.entered.set()
+        self.release.wait(2)
+        return {"stdout": "", "error": None}
+
+    def shutdown(self):
+        self.release.set()
+
+    def interrupt(self):
+        self.release.set()
+        return None
+
+    def kill_worker(self):
+        self.release.set()
+
+
+def _join(dispatcher, exec_id):
+    job = dispatcher._bg_executor._get(exec_id)
+    assert job._thread is not None
+    job._thread.join(2)
+    assert not job._thread.is_alive()
+    return job
+
+
+def _raw(store, exec_id):
+    row = store._conn.execute(
+        "SELECT * FROM background_exec_receipts WHERE exec_id=?",
+        (exec_id,),
+    ).fetchone()
+    assert row is not None
+    return row
+
+
+def test_receipt_exists_before_the_kernel_and_stores_only_the_digest(tmp_path):
+    import hashlib
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    code = "print('secret-source-é')"
+    seen = {}
+
+    def factory():
+        row = store._conn.execute("SELECT * FROM background_exec_receipts").fetchone()
+        assert row is not None
+        seen["row"] = dict(row)
+        return _OkKernel(chunks=("out-é",), generation="kernel:real-gen")
+
+    dispatcher = _dispatcher(cfg, root, "daemon-a", factory)
+    try:
+        launched = dispatcher._m_exec_background({"code": code, "origin": "agent"})
+        assert launched["persistent"] is True
+        assert launched["status"] == "running"
+        _join(dispatcher, launched["exec_id"])
+        during = seen["row"]
+        digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        assert during["status"] == "launching"
+        assert during["code_sha256"] == digest
+        assert during["code_chars"] == len(code)
+        assert during["env_generation"] is None
+        assert during["root_frame_id"] == root
+        blob = " ".join(str(value or "") for value in during.values())
+        assert "secret-source" not in blob
+        assert code not in blob
+        receipt = dispatcher._bg().receipts.get(launched["exec_id"])
+        assert receipt["status"] == "done"
+        assert receipt["output"] == "out-é"
+        assert receipt["ended_at"] is not None
+        assert receipt["env_generation"] == "kernel:real-gen"
+        peeked = dispatcher._m_exec_peek(launched["exec_id"])
+        assert peeked["persistent"] is True
+        assert peeked["stdout"] == "out-é"
+        assert peeked["status"] == "done"
+    finally:
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_begin_failure_refuses_the_launch_before_any_kernel(tmp_path):
+    calls = {"n": 0}
+
+    class _Boom:
+        def begin(self, **_kwargs):
+            raise sqlite3.OperationalError("disk full")
+
+    def factory():
+        calls["n"] += 1
+        raise AssertionError("kernel_factory ran after a failed receipt")
+
+    executor = BackgroundExecutor(factory, dispatcher=None, receipts=_Boom())
+    with pytest.raises(RuntimeError, match="background receipt could not be recorded"):
+        executor.launch("print(1)")
+    assert calls["n"] == 0
+    assert executor.list_jobs() == []
+
+
+def test_integer_kernel_generation_is_not_stored_as_env_generation(tmp_path):
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+
+    class _Gen(_OkKernel):
+        generation = 0
+
+    dispatcher = _dispatcher(cfg, root, "daemon-a", _Gen)
+    try:
+        launched = dispatcher._m_exec_background({"code": "x = 1"})
+        _join(dispatcher, launched["exec_id"])
+        assert _raw(store, launched["exec_id"])["env_generation"] is None
+    finally:
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_restart_reads_an_unfinished_job_as_outcome_unknown_and_does_not_replay(
+    tmp_path,
+):
+    from openai4s.storage.background_execs import OUTCOME_UNKNOWN_ERROR
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    kernel = _WaitKernel()
+    calls = {"n": 0}
+
+    def factory():
+        calls["n"] += 1
+        return kernel
+
+    original = _dispatcher(cfg, root, "daemon-a", factory)
+    restarted_calls = {"n": 0}
+    restarted = _dispatcher(
+        cfg,
+        root,
+        "daemon-b",
+        lambda: restarted_calls.__setitem__("n", restarted_calls["n"] + 1),
+    )
+    try:
+        launched = original._m_exec_background({"code": "while True: pass"})
+        assert kernel.entered.wait(2)
+        peeked = restarted._m_exec_peek(launched["exec_id"])
+        assert peeked["status"] == "outcome_unknown"
+        assert peeked["done"] is True
+        assert peeked["persistent"] is True
+        assert peeked["source"] == "receipt"
+        assert peeked["error"] == OUTCOME_UNKNOWN_ERROR
+        assert calls["n"] == 1
+        assert restarted_calls["n"] == 0
+        assert restarted._bg().list_jobs() == []
+    finally:
+        kernel.release.set()
+        original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_effective_status_does_not_rewrite_a_foreign_running_row(tmp_path):
+    """Read-time derivation, with prune deliberately not called."""
+
+    from openai4s.storage.background_execs import BackgroundExecReceiptRepository
+
+    _cfg, store = _cfg_store(tmp_path)
+    repo = BackgroundExecReceiptRepository(
+        store._conn, store._lock, clock_ms=lambda: 50
+    )
+    try:
+        repo.begin(
+            exec_id="exec-foreign",
+            root_frame_id="root-a",
+            frame_id="root-a",
+            owner_user_id=None,
+            daemon_instance="old-daemon",
+            origin="agent",
+            code_sha256="ab" * 32,
+            code_chars=3,
+        )
+        seen = repo.get(
+            "exec-foreign", root_frame_id="root-a", current_instance="new-daemon"
+        )
+        assert seen is not None
+        assert seen["status"] == "outcome_unknown"
+        assert (
+            store._conn.execute(
+                "SELECT status FROM background_exec_receipts WHERE exec_id=?",
+                ("exec-foreign",),
+            ).fetchone()["status"]
+            == "launching"
+        )
+    finally:
+        store.close()
+
+
+def test_a_finished_receipt_survives_restart_on_peek_and_list(tmp_path):
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    original = _dispatcher(
+        cfg,
+        root,
+        "daemon-a",
+        lambda: _OkKernel(chunks=("kept-output",)),
+    )
+    try:
+        first = original._m_exec_background({"code": "print('one')"})
+        _join(original, first["exec_id"])
+        second = original._m_exec_background({"code": "print('two')"})
+        _join(original, second["exec_id"])
+        calls = {"n": 0}
+        restarted = _dispatcher(
+            cfg,
+            root,
+            "daemon-b",
+            lambda: calls.__setitem__("n", calls["n"] + 1),
+        )
+        peeked = restarted._m_exec_peek(first["exec_id"])
+        assert peeked["status"] == "done"
+        assert peeked["stdout"] == "kept-output"
+        assert peeked["source"] == "receipt"
+        assert peeked["code_sha256"]
+        listed = restarted._m_exec_list()
+        by_id = {item["exec_id"]: item for item in listed}
+        assert by_id[first["exec_id"]]["stdout"] == "kept-output"
+        assert by_id[second["exec_id"]]["stdout"] == "kept-output"
+        assert listed[0]["exec_id"] == second["exec_id"]
+        assert calls["n"] == 0
+        assert restarted._bg().list_jobs() == []
+    finally:
+        original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_another_session_cannot_read_the_receipt(tmp_path):
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    other = _root(store)
+    original = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel(chunks=("mine",)))
+    try:
+        launched = original._m_exec_background({"code": "print('mine')"})
+        _join(original, launched["exec_id"])
+        stranger = _dispatcher(cfg, other, "daemon-a", lambda: _OkKernel())
+        with pytest.raises(KeyError):
+            stranger._m_exec_peek(launched["exec_id"])
+        assert launched["exec_id"] not in {
+            item["exec_id"] for item in stranger._m_exec_list()
+        }
+        assert (
+            store.background_exec_receipts.get(
+                launched["exec_id"],
+                root_frame_id=other,
+                current_instance="daemon-a",
+            )
+            is None
+        )
+    finally:
+        original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_persisted_output_is_capped_without_shrinking_the_memory_peek(tmp_path):
+    from openai4s.storage.background_execs import (
+        MAX_PERSISTED_OUTPUT_BYTES,
+        truncation_marker,
+    )
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    chunk = "a" * 300_000
+    dispatcher = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel(chunks=(chunk,)))
+    try:
+        launched = dispatcher._m_exec_background({"code": "print('lots')"})
+        _join(dispatcher, launched["exec_id"])
+        peeked = dispatcher._m_exec_peek(launched["exec_id"])
+        assert peeked["stdout"] == chunk
+        assert "truncated at" not in peeked["stdout"]
+        receipt = _raw(store, launched["exec_id"])
+        assert receipt["output_truncated"] == 1
+        assert receipt["output_bytes"] <= MAX_PERSISTED_OUTPUT_BYTES
+        assert truncation_marker(MAX_PERSISTED_OUTPUT_BYTES) in receipt["output"]
+        assert len(receipt["output"].encode("utf-8")) <= MAX_PERSISTED_OUTPUT_BYTES
+    finally:
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_flush_writes_a_bounded_head_while_the_job_is_still_running(tmp_path):
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    kernel = _WaitKernel()
+    kernel.chunks = ("z" * 64,)
+    dispatcher = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    dispatcher._bg()
+    dispatcher._bg_executor.FLUSH_BYTES = 16
+    dispatcher._bg_executor.FLUSH_INTERVAL_MS = 60_000
+    try:
+        launched = dispatcher._m_exec_background({"code": "stream"})
+        assert kernel.entered.wait(2)
+        receipt = _raw(store, launched["exec_id"])
+        assert receipt["status"] == "running"
+        assert receipt["output"] == "z" * 64
+        assert receipt["output_truncated"] == 0
+    finally:
+        kernel.release.set()
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_prune_drops_expired_terminals_and_clears_oldest_output_first(tmp_path):
+    from openai4s.storage.background_execs import (
+        OUTCOME_UNKNOWN_ERROR,
+        BackgroundExecReceiptRepository,
+    )
+
+    _cfg, store = _cfg_store(tmp_path)
+    repo = BackgroundExecReceiptRepository(
+        store._conn,
+        store._lock,
+        clock_ms=lambda: 10_000,
+        max_output_bytes=80,
+        max_total_output_bytes=100,
+        terminal_ttl_ms=1_000,
+    )
+
+    def start(exec_id, daemon):
+        repo.begin(
+            exec_id=exec_id,
+            root_frame_id="root-a",
+            frame_id="root-a",
+            owner_user_id=None,
+            daemon_instance=daemon,
+            origin="agent",
+            code_sha256="cd" * 32,
+            code_chars=1,
+        )
+
+    try:
+        start("exec-old", "daemon-a")
+        repo.finish(
+            "exec-old",
+            status="done",
+            error=None,
+            interrupted=False,
+            ended_at=9_500,
+            output="A" * 80,
+            truncated=False,
+        )
+        start("exec-new", "daemon-a")
+        repo.finish(
+            "exec-new",
+            status="done",
+            error=None,
+            interrupted=False,
+            ended_at=9_800,
+            output="B" * 80,
+            truncated=False,
+        )
+        start("exec-expired", "daemon-a")
+        repo.finish(
+            "exec-expired",
+            status="failed",
+            error="old",
+            interrupted=False,
+            ended_at=100,
+            output="Z" * 10,
+            truncated=False,
+        )
+        start("exec-live", "daemon-a")
+        repo.mark_running("exec-live", 8_000)
+        repo.save_output("exec-live", "C" * 40, False)
+        start("exec-foreign", "daemon-b")
+        report = repo.prune(10_000, current_instance="daemon-a")
+        assert report["deleted"] == 1
+        assert report["marked_unknown"] == 1
+        assert (
+            repo.get(
+                "exec-expired", root_frame_id="root-a", current_instance="daemon-a"
+            )
+            is None
+        )
+        live = repo.get(
+            "exec-live", root_frame_id="root-a", current_instance="daemon-a"
+        )
+        assert live is not None
+        assert live["status"] == "running"
+        assert live["output"] == "C" * 40
+        old = repo.get("exec-old", root_frame_id="root-a", current_instance="daemon-a")
+        new = repo.get("exec-new", root_frame_id="root-a", current_instance="daemon-a")
+        assert old is not None and new is not None
+        assert old["output"] == ""
+        assert old["output_truncated"] == 1
+        assert old["status"] == "done"
+        assert new["output"] == ""
+        foreign = repo.get(
+            "exec-foreign", root_frame_id="root-a", current_instance="daemon-a"
+        )
+        assert foreign is not None
+        assert foreign["status"] == "outcome_unknown"
+        assert foreign["error"] == OUTCOME_UNKNOWN_ERROR
+        assert (
+            repo.get("exec-live", root_frame_id="root-a", current_instance="daemon-a")[
+                "status"
+            ]
+            == "running"
+        )
+    finally:
+        store.close()
+
+
+def test_a_failed_terminal_write_stays_unknown_after_restart(tmp_path):
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+
+    class _BoomFinish(BoundBackgroundReceipts):
+        def finish(self, *args, **kwargs):
+            raise RuntimeError("receipt finish failed")
+
+    kernel = _OkKernel(chunks=("should-not-count-as-success",))
+    dispatcher = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    try:
+        dispatcher._bg()
+        inner = dispatcher._bg_executor.receipts
+        dispatcher._bg_executor.receipts = _BoomFinish(
+            inner._repository,
+            root_frame_id=inner._root_frame_id,
+            frame_id=inner._frame_id,
+            daemon_instance=inner._daemon_instance,
+            owner_user_id=inner._owner_user_id,
+        )
+        launched = dispatcher._m_exec_background({"code": "print('ok')"})
+        _join(dispatcher, launched["exec_id"])
+        peeked = dispatcher._m_exec_peek(launched["exec_id"])
+        assert peeked["status"] == "done"
+        assert peeked["error"] is None
+        assert peeked["stdout"] == "should-not-count-as-success"
+        raw_status = _raw(store, launched["exec_id"])["status"]
+        assert raw_status in {"launching", "running"}
+        restarted = _dispatcher(
+            cfg,
+            root,
+            "daemon-b",
+            lambda: (_ for _ in ()).throw(AssertionError("replayed")),
+        )
+        again = restarted._m_exec_peek(launched["exec_id"])
+        assert again["status"] == "outcome_unknown"
+        assert again["status"] != "done"
+    finally:
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_interrupt_of_a_receipt_without_a_process_does_not_change_the_row(tmp_path):
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    original = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel(chunks=("stay",)))
+    try:
+        launched = original._m_exec_background({"code": "print('stay')"})
+        _join(original, launched["exec_id"])
+        before = dict(_raw(store, launched["exec_id"]))
+        restarted = _dispatcher(cfg, root, "daemon-b", lambda: _OkKernel())
+        report = restarted._m_exec_interrupt(launched["exec_id"])
+        assert report["interrupt_undelivered"] is True
+        assert report["reason"] == (
+            "no live process handle for this exec (daemon restarted); "
+            "delivery cannot be confirmed"
+        )
+        assert report["status"] == "done"
+        assert report["stdout"] == "stay"
+        after = dict(_raw(store, launched["exec_id"]))
+        assert after["status"] == before["status"]
+        assert after["output"] == before["output"]
+        assert after["updated_at"] == before["updated_at"]
+        assert after["error"] == before["error"]
+    finally:
+        original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_restored_receipts_do_not_block_idle_release(tmp_path):
+    from openai4s.server.gateway import SessionRunner
+    from openai4s.server.session_recovery import SessionRecoveryService
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    original = _dispatcher(cfg, root, "daemon-a", lambda: _OkKernel(chunks=("x",)))
+    gateway = SessionRunner.__new__(SessionRunner)
+    try:
+        launched = original._m_exec_background({"code": "print(1)"})
+        _join(original, launched["exec_id"])
+        restarted = _dispatcher(cfg, root, "daemon-b", lambda: _OkKernel())
+        restarted._bg()
+        session = SimpleNamespace(
+            dispatcher=restarted,
+            root_frame_id=root,
+            kernels=SimpleNamespace(
+                status=lambda: {"python": {"alive": True, "last_activity_at": 1}}
+            ),
+        )
+        assert gateway._background_active(session) is False
+        service = SessionRecoveryService(
+            store=store,
+            sessions=lambda: [session],
+            turn_active=lambda _root: False,
+            approval_pending=lambda _root: False,
+            background_active=gateway._background_active,
+            release_idle=lambda _session, _reason: True,
+            background_last_activity_ms=gateway._background_last_activity_ms,
+            ttl_s=1,
+            clock=lambda: 100.0,
+        )
+        assert service.blocked(session) is False
+        assert service.sweep_once() == [root]
+
+        hung_kernel = _WaitKernel()
+        hung = _dispatcher(cfg, root, "daemon-a", lambda: hung_kernel)
+        running = hung._m_exec_background({"code": "hang"})
+        assert hung_kernel.entered.wait(2)
+        hung_session = SimpleNamespace(dispatcher=hung, root_frame_id=root)
+        assert gateway._background_active(hung_session) is True
+        assert service.blocked(hung_session) is True
+        del running
+    finally:
+        if original._bg_executor is not None:
+            original._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_cli_background_jobs_stay_in_memory(tmp_path):
+    from openai4s.host_dispatch import build_dispatcher
+
+    cfg, store = _cfg_store(tmp_path)
+    dispatcher = build_dispatcher(cfg, frame_id=_root(store))
+    dispatcher.background_kernel_factory = lambda: _OkKernel(chunks=("cli",))
+    try:
+        launched = dispatcher._m_exec_background({"code": "print('cli')"})
+        assert launched["persistent"] is False
+        assert "source" not in launched
+        _join(dispatcher, launched["exec_id"])
+        peeked = dispatcher._m_exec_peek(launched["exec_id"])
+        assert peeked["persistent"] is False
+        assert peeked["status"] == "done"
+        assert peeked["stdout"] == "cli"
+        assert "source" not in peeked
+        assert (
+            store._conn.execute(
+                "SELECT COUNT(*) FROM background_exec_receipts"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_v34_migration_denies_agent_sql_and_session_delete_removes_receipts(
+    tmp_path,
+):
+    from openai4s.storage.migrations import SCHEMA_VERSION
+
+    cfg, store = _cfg_store(tmp_path)
+    try:
+        assert store.schema_state()["version"] == SCHEMA_VERSION == 34
+        names = [row["name"] for row in store.schema_state()["applied"]]
+        assert names[-1] == "background_exec_receipts"
+        assert "background_exec_receipts" not in store.schema()
+        with pytest.raises(PermissionError, match="background_exec_receipts"):
+            store.query("SELECT output FROM background_exec_receipts")
+        root = _root(store)
+        other = _root(store)
+        owner = store.team.create_user(
+            username="ada", password="test-password-not-real"
+        )
+        store.team.set_session_owner(root, owner["id"], project_id="default")
+        dispatcher = _dispatcher(
+            cfg, root, "daemon-a", lambda: _OkKernel(chunks=("z",))
+        )
+        launched = dispatcher._m_exec_background({"code": "print('z')"})
+        _join(dispatcher, launched["exec_id"])
+        assert _raw(store, launched["exec_id"])["owner_user_id"] == owner["id"]
+        store._conn.execute(
+            "UPDATE background_exec_receipts SET frame_id=NULL WHERE exec_id=?",
+            (launched["exec_id"],),
+        )
+        store._conn.commit()
+        store.background_exec_receipts.begin(
+            exec_id="exec-other",
+            root_frame_id=other,
+            frame_id=other,
+            owner_user_id=None,
+            daemon_instance="daemon-a",
+            origin="agent",
+            code_sha256="ef" * 32,
+            code_chars=1,
+        )
+        store.delete_frame(root)
+        assert (
+            store._conn.execute(
+                "SELECT COUNT(*) FROM background_exec_receipts WHERE exec_id=?",
+                (launched["exec_id"],),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            store.background_exec_receipts.get(
+                "exec-other", root_frame_id=other, current_instance="daemon-a"
+            )
+            is not None
+        )
+        dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+    finally:
+        store.close()
+
+
+def test_allowlist_refusal_survives_a_shutdown_error_and_records_launch_failed(
+    tmp_path, monkeypatch
+):
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+
+    class _BoomShutdown(_DegradedBackgroundKernel):
+        def shutdown(self):
+            self.shutdown_calls += 1
+            raise RuntimeError("shutdown exploded")
+
+    kernel = _BoomShutdown()
+    dispatcher = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    try:
+        with pytest.raises(EgressBoundaryUnavailable) as failure:
+            dispatcher._m_exec_background({"code": "print(1)"})
+        assert failure.value.code == "egress_boundary_unavailable"
+        assert kernel.executed == 0
+        assert kernel.shutdown_calls == 1
+        receipt = store._conn.execute(
+            "SELECT status, error FROM background_exec_receipts"
+        ).fetchone()
+        assert receipt["status"] == "launch_failed"
+        assert str(receipt["error"]).startswith("egress_boundary_unavailable:")
+    finally:
+        store.close()
+
+
+def test_allowlist_refusal_survives_a_lifetime_exit_error(tmp_path, monkeypatch):
+    from openai4s.egress import EgressBoundaryUnavailable
+    from openai4s.kernel.background import BackgroundExecutor
+    from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+    _cfg, store = _cfg_store(tmp_path)
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    bound = BoundBackgroundReceipts(
+        store.background_exec_receipts,
+        root_frame_id="root-a",
+        frame_id="root-a",
+        daemon_instance="daemon-a",
+        owner_user_id=None,
+    )
+
+    class _Life:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            raise RuntimeError("lifetime exploded")
+
+    kernel = _DegradedBackgroundKernel()
+    executor = BackgroundExecutor(
+        lambda: kernel,
+        dispatcher=None,
+        lifetime_factory=lambda: _Life(),
+        receipts=bound,
+    )
+    with pytest.raises(EgressBoundaryUnavailable) as failure:
+        executor.launch("print(1)")
+    assert failure.value.code == "egress_boundary_unavailable"
+    assert kernel.executed == 0
+    row = store.background_exec_receipts.get(
+        executor_exec_id(store),
+        root_frame_id="root-a",
+        current_instance="daemon-a",
+    )
+    assert row is not None
+    assert row["status"] == "launch_failed"
+    store.close()
+
+
+def executor_exec_id(store):
+    row = store._conn.execute("SELECT exec_id FROM background_exec_receipts").fetchone()
+    assert row is not None
+    return row["exec_id"]
+
+
+def test_finish_does_not_lose_to_a_later_mark_running(tmp_path):
+    _cfg, store = _cfg_store(tmp_path)
+    repo = store.background_exec_receipts
+    try:
+        repo.begin(
+            exec_id="exec-race",
+            root_frame_id="root-a",
+            frame_id="root-a",
+            owner_user_id=None,
+            daemon_instance="daemon-a",
+            origin="agent",
+            code_sha256="11" * 32,
+            code_chars=1,
+        )
+        repo.finish(
+            "exec-race",
+            status="done",
+            error=None,
+            interrupted=False,
+            ended_at=20,
+            output="final",
+            truncated=False,
+        )
+        repo.mark_running("exec-race", 15)
+        repo.save_output("exec-race", "late", False)
+        repo.finish(
+            "exec-race",
+            status="failed",
+            error="second writer",
+            interrupted=False,
+            ended_at=30,
+            output="nope",
+            truncated=False,
+        )
+        row = repo.get("exec-race", root_frame_id="root-a", current_instance="daemon-a")
+        assert row is not None
+        assert row["status"] == "done"
+        assert row["output"] == "final"
+        assert row["error"] is None
+    finally:
+        store.close()

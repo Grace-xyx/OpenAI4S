@@ -467,9 +467,21 @@ class SessionDeletionRepository:
                 execution_where,
                 execution_params,
             )
+        if roots:
+            self._delete_counted(
+                deleted_rows,
+                "background_exec_receipts",
+                f"root_frame_id IN {self._marks(roots)}",
+                roots,
+            )
         if frames:
             frame_where = f"frame_id IN {self._marks(frames)}"
-            for table in ("host_call_log", "frame_steps", "plans"):
+            for table in (
+                "host_call_log",
+                "frame_steps",
+                "plans",
+                "background_exec_receipts",
+            ):
                 self._delete_counted(deleted_rows, table, frame_where, frames)
             self._delete_counted(
                 deleted_rows,

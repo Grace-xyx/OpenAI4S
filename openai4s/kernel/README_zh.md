@@ -18,7 +18,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | [`__init__.py`](__init__.py) | 对外导出 `Kernel`、`KernelBusyError`、`KernelLease`、`KernelSupervisor` 和 `InterruptDelivery`。 |
-| [`background.py`](background.py) | `host.exec_background` 就住在这里。一个要跑很久的 Cell——训练、长仿真——会拿到属于它自己的 worker 进程，因此不会卡住前台内核，也不会卡住 Agent 这一轮。`exec_peek` 随时读出它已经积累的 stdout，不用等；`exec_interrupt` 发一次幂等的 SIGINT，而当这次停止谁也没够到时，回报会直说（`interrupt_undelivered`），不会留一个 `running` 状态让人误读成「还在收尾」。这类任务看不见前台命名空间，也没有任何东西落盘。它累积的东西两头都有上限：peek 缓冲区只保留 `MAX_PEEK_CHARS` 的头部并标出截断处，不会随任务寿命一路长下去；同时最多允许十六个任务同时在跑——每个任务自带一个子进程，所以这个上限管的是进程数，而且槽位是在 spawn 之前先占住的，不是之后再补登记，否则并发的多次启动会一起通过同一次检查。 |
+| [`background.py`](background.py) | `host.exec_background` 就住在这里。一个要跑很久的 Cell——训练、长仿真——会拿到属于它自己的 worker 进程，因此不会卡住前台内核，也不会卡住 Agent 这一轮。`exec_peek` 随时读出它已经积累的 stdout，不用等；`exec_interrupt` 发一次幂等的 SIGINT，而当这次停止谁也没够到时，回报会直说（`interrupt_undelivered`），不会留一个 `running` 状态让人误读成「还在收尾」。这类任务看不见前台命名空间。CLI 任务只留在进程内存里，响应里的 `persistent` 为 false。有稳定根 frame 的 Web 会话会在 worker 启动前写一条有界的 SQLite 收据：代码的 SHA-256 和字符数，不保存源码，stdout 只留最多 256 KiB 的头部。worker 不会跨重启继续跑，收据也不会被重放；没记下终态的任务读回来是 `outcome_unknown`。它累积的东西两头都有上限：peek 缓冲区只保留 `MAX_PEEK_CHARS` 的头部并标出截断处，不会随任务寿命一路长下去；同时最多允许十六个任务同时在跑——每个任务自带一个子进程，所以这个上限管的是进程数，而且槽位是在 spawn 之前先占住的，不是之后再补登记，否则并发的多次启动会一起通过同一次检查。 |
 | [`errors.py`](errors.py) | 内核的异常类型，放在一个什么都不 import 的模块里，同时保留「瞬态中断失败」与「远端内核根本没有信号路径」之间的区别。`KernelInterruptUnavailable` 需要被 `supervisor` catch，而 `manager` 又经 watchdog 触达 `supervisor`——把它定义在 `manager` 里就形成了一个循环导入，且只在 `manager` 恰好先被初始化的导入顺序下才不报错。`manager` 重新导出这两个名字，原有 import 照常可用。 |
 | [`environment.py`](environment.py) | 决定内核能继承到什么。子进程环境是照着一份很短的显式允许名单造出来的，不是从 `os.environ` 抄一份，所以 provider key、云 token、agent socket 和动态加载器注入变量都停在进程边界之外。Cell 之后拉起的任何东西，`host.bash` 也算在内，继承的是同一份过滤后的环境。`PATH` 的第一项是所选 conda prefix 的 `bin`；没选环境时则是 Python worker 自己解释器所在的目录（不解析符号链接，venv 才仍是 venv），所以即使 daemon 或 CLI 是用绝对路径从一个没人激活的 venv 里启动的，`host.bash` 里的 `python` 也是 Cell 自己的解释器。R worker 保留宿主的 `PATH`。 |
 | [`environments.py`](environments.py) | 环境选择：让任务换到一个本来就装好了所需包的解释器，而不是每次都现装。预置的 conda 环境从 `OPENAI4S_ENV_ROOTS` 或常见安装根目录里发现，探测 `bin/python` 或 `bin/Rscript`，连同包集合一起缓存。daemon 自己的解释器始终作为合成的 `base` 环境对外提供，所以再怎么选，也不会让一个 session 落到没有 Python 内核可用。 |
@@ -45,7 +45,7 @@
 - [`manager.py`](manager.py) 用 [`security/sandbox.py`](../security/sandbox.py) 包住 worker。无法建立隔离时，`enforce` 失败即拒绝；单用户的 `auto` 在真实自测失败后仍可能继续运行，但状态会明确标成降级或 unavailable。团队读取策略即使在 `auto` 下也是强制边界，`off` 或降级都会拒绝。它遮住 daemon 数据、其他成员的 data-root 个人区和系统临时目录中的旧 kernel，同时用精确只读例外保留源码目录、所选 Python/R runtime、已授权 sidecar 与本会话 Artifact 输入。这是受管数据隔离，不代表同 UID 下任意宿主文件都不可读。
 - 工作区里的 Python 代码本来就是全能的，这是有意为之。[`environment.py`](environment.py) 能挡住已识别的 secret 被继承，但它没办法让任意 Cell 代码变得可信。
 - R worker 靠 `jsonlite` 解析入站请求。缺这个包时它会发出结构化错误；无论如何，它始终只是分析通道。R Cell 和 Python Cell 走的是同一个执行前分类器，它的动态加载词表现在也认 `dyn.load` 和 `library.dynam`：以前一次多步的加载器逃逸到底会不会被筛，取决于这个 Cell 要的是哪个内核。
-- 后台执行走独立 worker，任务表和它累积下来的输出都只在进程内存里。现在两者都有上限了——最多十六个在跑的任务，peek 缓冲区也封了顶——但都不持久：daemon 一重启，所有后台任务连同它们打印过的东西一起没了。
+- 后台执行走独立 worker。进程内的任务表（最多十六个在跑，peek 缓冲区封顶）是空闲释放认定「活跃」的依据。Web 会话另外留一条 SQLite 收据：每个任务最多 256 KiB stdout，全部任务合计 128 MiB，终态之后七天删除。worker 不会跨重启继续跑，不会重放，CLI 任务不入库。
 - 溯源和 guards 都是观察性的：尽力而为，不保证覆盖。不支持的对象、库、native 转换，或者显式关闭，都可能让血缘不完整。
 - Recovery 不会序列化一个存活的 Python/R 命名空间。它建立新的 generation，只重放保守接受的步骤并校验 manifest，因此可能如实返回部分恢复。
 - supervisor 的 interrupt/restart 必须带上精确的 lease，并走 session 的执行 barrier。绕开这些所有权规则，就会和 manager 那唯一的 frame 读取方发生竞态。

@@ -704,6 +704,10 @@ connector and model-profile responses are allowlist projections (`env_keys` /
 `tests/test_secret_canary.py` that assert on the secret's bytes rather than on
 field names.
 
+### Background-cell receipts
+
+A Web session's background cell (`host.exec_background` / `exec_background`) writes a row to `background_exec_receipts` before the worker starts. The row keeps the code's SHA-256 and character count. The source itself is not stored. Stdout is a head of at most 256 KiB per job. The table's stored output is capped at 128 MiB; past that, the oldest terminal rows have their output cleared. A terminal row is deleted seven days after it ended. The table is on `QUERY_DENYLIST`, so agent SQL cannot select it, and session deletion removes the rows with the session. The data directory is mode `0700` and the database file is mode `0600`, which is the file-permission boundary for this output. A CLI job has no stable session id, stays in process memory, and reports `persistent: false`. A restarted daemon does not resume or replay the worker; an unfinished row reads as `outcome_unknown`.
+
 ### BYOC provider import-time secret scrubbing
 
 The remote-compute worker (`openai4s_compute_provider`) loads an untrusted-ish provider shim (`skills/remote-compute-<id>/provider.py`) by file path. To keep a provider's **top-level module code** from reading credential-shaped or known-prefix environment variables, scrubbing is two-staged. This is a **name-based heuristic** — a secret stored in a variable whose name matches neither rule below is **not** scrubbed:
