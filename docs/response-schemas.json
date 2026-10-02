@@ -23021,10 +23021,53 @@
         "type": "object"
       }
     },
-    "PATCH /frames/([^/]+) [ok]": {
+    "PATCH /frames/([^/]+) [error]": {
       "schema": {
-        "properties": {},
-        "required": [],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "PATCH /frames/([^/]+)(?:/.*)? [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
         "type": "object"
       }
     },
@@ -23050,7 +23093,10 @@
             "type": "integer"
           },
           "model": {
-            "type": "string"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "name": {
             "type": "string"
@@ -23071,13 +23117,32 @@
             "type": "string"
           },
           "task_summary": {
-            "type": "string"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "updated_at": {
             "type": "string"
           }
         },
-        "required": [],
+        "required": [
+          "conversation_type",
+          "created_at",
+          "folder_id",
+          "id",
+          "input_tokens",
+          "message_count",
+          "model",
+          "name",
+          "output_tokens",
+          "parent_frame_id",
+          "project_id",
+          "root_frame_id",
+          "status",
+          "task_summary",
+          "updated_at"
+        ],
         "type": "object"
       }
     },

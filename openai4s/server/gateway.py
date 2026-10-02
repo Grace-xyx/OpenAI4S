@@ -16556,6 +16556,14 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     self._json(_frame_json(f, store) if f else {})
                     return
                 if method == "PATCH":
+                    # An UPDATE naming no row succeeds, and `_frame_json(None)`
+                    # is `{}`, so a rename of a session that does not exist
+                    # answered 200 -- indistinguishable from a rename that
+                    # landed. Same sentence as the team scope guard's, which
+                    # already answers this in team mode (INV-13): missing and
+                    # not-yours must not read differently.
+                    if store.get_frame(fid) is None:
+                        raise GatewayError(404, "session not found")
                     store.update_frame(
                         fid,
                         **{
@@ -16564,11 +16572,14 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                             if k in ("name", "task_summary")
                         },
                     )
+                    frame = store.get_frame(fid)
+                    if frame is None:  # deleted between the check and this read
+                        raise GatewayError(404, "session not found")
                     hub.broadcast(
                         fid,
                         {"type": "frame_update", "frame_id": fid, "status": "updated"},
                     )
-                    self._json(_frame_json(store.get_frame(fid), store))
+                    self._json(_frame_json(frame, store))
                     return
                 if method == "DELETE":
                     runner.delete_session(fid)
