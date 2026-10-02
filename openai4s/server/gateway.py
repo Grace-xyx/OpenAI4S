@@ -16561,13 +16561,13 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                             if k in ("name", "task_summary")
                         },
                     )
+                    frame = store.get_frame(fid)
+                    if frame is None:  # deleted between the check and this read
+                        raise GatewayError(404, "session not found")
                     hub.broadcast(
                         fid,
                         {"type": "frame_update", "frame_id": fid, "status": "updated"},
                     )
-                    frame = store.get_frame(fid)
-                    if frame is None:  # deleted between the check and this read
-                        raise GatewayError(404, "session not found")
                     self._json(_frame_json(frame, store))
                     return
                 if method == "DELETE":

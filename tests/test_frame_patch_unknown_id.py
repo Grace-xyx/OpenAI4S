@@ -10,15 +10,17 @@ the workbench's title editor took the 200 as a saved rename.
 
 The 404 reuses the team scope guard's sentence. Team mode already refused an
 unknown id before the handler ran, and INV-13 is that a missing session and
-somebody else's read identically, so the last test holds both modes and both
+somebody else's read identically, so the scope test holds both modes and both
 cases to one body.
 
 `GET /frames/{id}` keeps its documented `{}` for an unknown id. A read that
 returns no fields claims nothing, and its readers (the context-usage panel, the
 frozen legacy `app.js`) render it as empty rather than handling a failure.
 
-Driven through the real handler on a real socket, unmarked, so the response
-schema capture observes the 404 and a PATCH of a real session.
+The ordinary requests use the real handler on a real socket, unmarked, so the
+response schema capture observes the 404 and a PATCH of a real session. The
+marked race test also checks that deletion during a PATCH cannot publish a
+success event before the handler returns 404.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+
+import pytest
 
 from openai4s.config import Config, LLMConfig
 from openai4s.server import gateway as gateway_mod
@@ -205,3 +209,53 @@ def test_missing_and_not_yours_read_the_same_in_both_modes(tmp_path):
         team.close()
 
     assert _refusal(alone) == _refusal(not_yours) == _refusal(missing)
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize("delete_before_write", [True, False])
+def test_delete_during_patch_does_not_broadcast_success(
+    tmp_path, monkeypatch, delete_before_write
+):
+    """A refused rename must not tell WebSocket subscribers it succeeded.
+
+    Inject a real deletion on either side of the real write, after the
+    handler's existence check. Mark the deterministic fault injection so it
+    cannot contribute a response schema.
+    """
+    daemon = _TeamDaemon(tmp_path, team_mode=False)
+    try:
+        project = daemon.store.create_project(name="Renames")
+        frame_id = daemon.runner.create_session(project["project_id"])
+        broadcasts = []
+        original_broadcast = daemon.hub.broadcast
+        original_update = daemon.store.update_frame
+
+        def record_broadcast(root_frame_id, event):
+            broadcasts.append((root_frame_id, event))
+            return original_broadcast(root_frame_id, event)
+
+        def update_with_delete(fid, **fields):
+            assert fid == frame_id
+            assert fields == {"name": "Too late"}
+            if delete_before_write:
+                daemon.store.delete_frame(fid)
+            original_update(fid, **fields)
+            if not delete_before_write:
+                daemon.store.delete_frame(fid)
+
+        monkeypatch.setattr(daemon.hub, "broadcast", record_broadcast)
+        monkeypatch.setattr(daemon.store, "update_frame", update_with_delete)
+        status, refused = _call(
+            daemon.port,
+            "PATCH",
+            f"/frames/{frame_id}",
+            {"name": "Too late"},
+            token=daemon.token,
+        )
+        assert status == 404, refused
+        assert refused["error"] == "session not found"
+        assert refused["code"] == "not_found"
+        assert daemon.store.get_frame(frame_id) is None
+        assert broadcasts == []
+    finally:
+        daemon.close()
