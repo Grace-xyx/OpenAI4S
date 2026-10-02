@@ -611,6 +611,15 @@ def _retry_loop(
                 or state.attempts >= state.max_attempts
                 or state.retries >= retry_limit
             ):
+                if (
+                    attempt >= local_attempts
+                    and state.attempts < state.max_attempts
+                    and state.retries < retry_limit
+                ):
+                    # The compatibility POST is one-shot even when the call
+                    # still has retries left. Raising MAX_RETRIES cannot lift
+                    # this invocation's cap, so preserve the actual cause.
+                    err.retry_stop = "request_limit"
                 raise
             delay = _sleep_for(err, state.attempts, base_backoff, cap)
             if state.spent + delay > budget:

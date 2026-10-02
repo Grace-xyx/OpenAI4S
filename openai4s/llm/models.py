@@ -72,7 +72,8 @@ class TransportError(LLMError):
         self.retries_attempted: int | None = None
         #: Why the retry loop stopped *early*, as a local, closed value:
         #: ``"budget"`` (the next wait exceeded the retry budget) or
-        #: ``"deadline"`` (it exceeded what was left of the total timeout).
+        #: ``"deadline"`` (it exceeded what was left of the total timeout), or
+        #: ``"request_limit"`` (this invocation's cap, with call retries left).
         self.retry_stop: str | None = None
 
     @property
@@ -150,14 +151,15 @@ def llm_retry_outcome(exc: BaseException) -> str | None:
 
     ``"committed"`` (output reached the caller, so replay was vetoed),
     ``"deadline"`` / ``"budget"`` (the next wait did not fit), ``"not_retried"``
-    or ``"retried"``; ``None`` when the error carries no record of it. Lets a
-    user-facing message say "retries were attempted" only when they were.
+    or ``"retried"``, or ``"request_limit"`` (an invocation exhausted its own
+    cap); ``None`` when the error carries no record of it. Lets a user-facing
+    message say "retries were attempted" only when they were.
     """
 
     if getattr(exc, "output_committed", False):
         return "committed"
     stop = getattr(exc, "retry_stop", None)
-    if stop in ("deadline", "budget"):
+    if stop in ("deadline", "budget", "request_limit"):
         return str(stop)
     retries = getattr(exc, "retries_attempted", None)
     if type(retries) is not int:

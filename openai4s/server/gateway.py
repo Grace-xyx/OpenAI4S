@@ -9241,7 +9241,7 @@ class SessionRunner:
         # How the retry policy ended the call, from typed fields: a capacity
         # message may say "retried" only when the transport recorded a retry.
         retry_outcome = llm_retry_outcome(exc)
-        gave_up = retry_outcome in ("not_retried", "budget", "deadline")
+        gave_up = retry_outcome != "retried"
         zh = language == "zh"
         if failure_code == "llm_deadline_exceeded":
             return (
@@ -9308,7 +9308,7 @@ class SessionRunner:
                 "continue this session later or temporarily switch models."
             )
         if failure_code == "llm_upstream_overloaded":
-            if gave_up or retry_outcome == "committed":
+            if gave_up:
                 return (
                     "**模型服务当前过载。** 在当前重试策略允许的范围内未能恢复；这不是 API Key 配置问题。"
                     "请稍后在当前会话继续，或临时切换模型。"
@@ -9387,14 +9387,35 @@ class SessionRunner:
                     "`OPENAI4S_LLM_MAX_RETRIES` in `.env` and restart, or continue "
                     "this session later or switch models."
                 )
+            if retry_outcome == "request_limit":
+                return (
+                    "**模型服务正在限流。** 已达到本次单次请求的发送上限，无法继续自动重试。"
+                    "请稍后在当前会话继续，或临时切换模型。若中转服务不支持流式响应，"
+                    "可在 `.env` 设置 `OPENAI4S_LLM_STREAM=0` 后重启，使非流式请求使用完整重试策略。"
+                    if zh
+                    else "**The model provider is rate-limiting requests.** This request "
+                    "reached its per-request attempt limit, so no further retry was "
+                    "allowed. Continue this session later or temporarily switch models. "
+                    "If the relay does not support streaming, set "
+                    "`OPENAI4S_LLM_STREAM=0` in `.env` and restart so non-streaming "
+                    "requests can use the full retry policy."
+                )
+            retry_note = (
+                (
+                    "系统已按重试策略自动退避重试；"
+                    if zh
+                    else "Automatic backoff retries were attempted under the retry policy. "
+                )
+                if retry_outcome == "retried"
+                else ""
+            )
             return (
-                "**模型服务正在限流。** 系统已按重试策略自动退避重试；若仍未恢复，请稍后在当前会话继续或更换模型。"
+                f"**模型服务正在限流。** {retry_note}若仍未恢复，请稍后在当前会话继续或更换模型。"
                 "使用限制 RPM 的中转或公益服务时，可在 `.env` 调大 `OPENAI4S_LLM_MAX_RETRIES`、"
                 "`OPENAI4S_LLM_RETRY_BUDGET` 与 `OPENAI4S_LLM_RETRY_MAX_DELAY` 后重启。"
                 if zh
-                else "**The model provider is rate-limiting requests.** Automatic "
-                "backoff retries were attempted under the retry policy; if it still "
-                "does not recover, continue this session later or switch models. "
+                else f"**The model provider is rate-limiting requests.** {retry_note}"
+                "If it still does not recover, continue this session later or switch models. "
                 "For a relay with a requests-per-minute limit, raise "
                 "`OPENAI4S_LLM_MAX_RETRIES`, `OPENAI4S_LLM_RETRY_BUDGET` and "
                 "`OPENAI4S_LLM_RETRY_MAX_DELAY` in `.env` and restart."

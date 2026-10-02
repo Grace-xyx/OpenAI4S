@@ -309,6 +309,7 @@ def test_a_rate_limit_names_the_retry_knobs_and_never_claims_a_vetoed_retry(
 @pytest.mark.parametrize(
     ("retries", "stop", "names", "claims_retry"),
     [
+        (None, None, "OPENAI4S_LLM_MAX_RETRIES", False),
         (2, None, "OPENAI4S_LLM_MAX_RETRIES", True),
         (0, None, "OPENAI4S_LLM_MAX_RETRIES", False),
         (0, "budget", "OPENAI4S_LLM_RETRY_BUDGET", False),
@@ -336,14 +337,15 @@ def test_a_rate_limit_message_matches_what_the_retry_policy_did(
 
 @pytest.mark.parametrize("language", ["zh", "en"])
 @pytest.mark.parametrize("code", ["RequestBurstTooFast", "ServerOverloaded"])
-def test_capacity_messages_do_not_claim_a_retry_that_never_ran(language, code):
+@pytest.mark.parametrize("retries", [None, 0])
+def test_capacity_messages_do_not_claim_an_unrecorded_retry(language, code, retries):
     from openai4s.llm.models import TransportError
     from openai4s.server.gateway import SessionRunner
 
     error = TransportError(
         "private upstream body", status=429, error_code=code, retryable=True
     )
-    error.retries_attempted = 0
+    error.retries_attempted = retries
     friendly = SessionRunner._friendly_error(error, language=language)
     for claim in ("退避重试", "retried automatically", "retried with backoff"):
         assert claim not in friendly
