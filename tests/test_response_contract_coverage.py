@@ -52,7 +52,6 @@ EXEMPT: dict[str, str] = {}
 EMPTY_ACK: dict[str, str] = {
     "/frames/([^/]+)": "a metadata patch with nothing to change acknowledges "
     "with an empty object",
-    "/frames/([^/]+)(?:/.*)?": "the catch-all inherits the same acknowledgement",
     "/projects/([^/]+)": "a project patch with nothing to change acknowledges "
     "with an empty object",
 }
