@@ -23187,6 +23187,8 @@
           "input_tokens",
           "message_count",
           "model",
+          "model_profile_id",
+          "model_profile_revision",
           "name",
           "output_tokens",
           "parent_frame_id",
