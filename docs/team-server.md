@@ -323,6 +323,38 @@ A configured key that cannot be read **refuses the turn** rather than
 falling back. The user asked for their own credential; quietly charging
 the group is a decision they did not make.
 
+**A member's key goes only to its provider's own endpoint.** It is stored
+against a provider name, so the one endpoint it was entered for is the one
+that name means: the base URL the provider registry gives it (OpenAI's for
+`chatgpt`, Anthropic's for `claude`, a registered custom provider's own). It
+is used only when the session's configuration — the profile it is pinned to,
+or the instance configuration while it is unpinned — sends the request there,
+over https, to a host that is not local. Otherwise it is **withheld**, not
+refused:
+
+| the session's configuration reaches | what is sent |
+|---|---|
+| the provider's own endpoint (any spelling of it) | the member's key |
+| a local server — loopback, private, link-local or `.local`, keyless or not | the profile's own key, or none; never the member's |
+| any other endpoint — an admin's proxy, an `OPENAI4S_<PROVIDER>_BASE_URL` gateway, another region or path of the same vendor | that configuration's own credential |
+| a plain-http endpoint, or a provider the registry does not know | that configuration's own credential |
+
+Withheld means the turn runs exactly as it would for a member with no key of
+their own, and it is metered to the member's quota either way. That is the
+deliberate answer for an admin-configured proxy: the member never asked for
+their key to go to it, and refusing would make every proxy or local model the
+admin sets up an outage for precisely the members who added a key. A key that
+is withheld here is not read at all, so a broken one refuses only the turns it
+would actually have been sent on.
+
+A session's **Reviewer** follows the same rule. Its model is a per-session
+setting. A selected profile resolves its own endpoint, including its
+provider/environment default when the URL is empty. A move uses that profile's
+credential; keeping a keyless local endpoint does not reload a cloud key from
+the environment. The member's key is selected only after this destination is
+known, with the same scope and unreadable-key rules as the agent. Local IPv6
+addresses are withheld just like local IPv4 addresses.
+
 ## 5. Reaching it from outside the lab
 
 The daemon binds loopback by default and that is the recommendation. Two

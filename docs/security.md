@@ -807,6 +807,67 @@ control predicate would revoke, plus the owner taking it back), and
 `tests/test_team_governance.py` (the control-mutation list). See
 `docs/team-server.md` §2 for the policy those predicates implement.
 
+### Team mode: a member's own LLM key goes only to its provider's endpoint
+
+Agent and Reviewer configurations share the credential rules in
+`openai4s/server/gateway.py`. For a profile or an
+environment key, `ModelProfileService.credential`
+(`openai4s/server/model_profiles.py`) already refused to send a key anywhere it
+was not entered for: a pinned revision whose provider or endpoint the profile no
+longer names is `revision_scope_mismatch`, and a keyless local endpoint is
+checked before any inherited key, so a cloud credential never goes over plain
+http to a local server. A member's own key (M4-1, `store.user_keys`) was then
+swapped in on top by **provider name alone**, so it went to whatever `base_url`
+the session's configuration named — a LAN Ollama over plain http, or a
+third-party proxy an admin configured. Pinning a session to such a profile is
+an ordinary act, so the member's key was one ordinary act away from either.
+
+`ModelProfileService.user_key_applies` is the rule, and `_apply_user_llm_key`
+(called after `_llm_cfg` or `_review_llm_cfg` resolves its destination) asks it
+before it reads the row or the secret. A
+member's key is used only when **all** of these hold for the request as
+`chat()` will send it (`cfg.base_url or spec["base_url"]`, after
+`OPENAI4S_<PROVIDER>_BASE_URL` has been applied):
+
+1. the provider is in the registry — the key is stored against a name, and an
+   unregistered name has no endpoint the key was entered for;
+2. the endpoint is the one the registry names for that provider, compared
+   normalised (`normalize_endpoint`, so case and a trailing slash do not
+   matter) — the vendor's own for a built-in, which registration cannot
+   replace; the registered one for a custom provider;
+3. it is https; and
+4. it is not local by the rule `chat()` and `doctor` apply (loopback, private,
+   link-local, `.local`, `host.docker.internal`), including IPv6 addresses.
+
+When any fails the key is **withheld, not refused**: the configuration's own
+credential goes, as for a member with no key. Refusing was considered and
+rejected — the member never asked for their key to reach a proxy, so not
+sending it there overrides nothing they chose, while a refusal would make any
+admin-chosen proxy or local model unusable for exactly the members who had set
+a key. The turn is metered to the member either way. One consequence is stated
+rather than hidden: a vendor's other first-party endpoints (another region,
+Ark's non-plan path) count as "another endpoint", because the rule names one
+endpoint per provider instead of guessing which hosts belong to a vendor.
+
+The Reviewer derives its configuration from `_llm_cfg`'s and can move to
+another profile's endpoint (the per-session reviewer model is a member
+setting). It used to keep the key chosen for the agent's endpoint when the
+target profile had none of its own. A selected profile now resolves its own
+endpoint, including the provider/environment default when its URL is empty.
+A move takes that profile's credential through `credential`; an unchanged
+endpoint retains the agent's credential unless the profile declares its own.
+An intentionally empty key stays empty after copying the configuration. A
+provider switch without a profile also uses the destination's credential rule,
+so a generic environment key for the agent is not sent to another provider.
+The member-key rule is then applied to the Reviewer's final destination,
+including its unreadable-key refusal. A key withheld from that destination is
+not read just because the agent would have used it.
+
+Pinned by `tests/test_user_llm_key_scope.py`, where every withheld case has a
+control at the provider's own endpoint and one test asserts on the
+`Authorization` header the transport would send rather than on the config
+object.
+
 ## Outbound data flow: Semantic judgment (experimental)
 
 Semantic recommendations initiated by `search_skills` independently re-enter

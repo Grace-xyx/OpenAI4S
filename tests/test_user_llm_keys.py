@@ -56,7 +56,24 @@ def _request(port: int, method: str, path: str, body: dict, cookie: str):
 
 @pytest.fixture()
 def daemon(tmp_path: Path):
+    # These tests are about *whose* key is used. *Where* it may be sent is
+    # tests/test_user_llm_key_scope.py: only to the endpoint the registry names
+    # for the provider. The suite's `deepseek` is not registered -- it has no
+    # endpoint a key could have been entered for, so a member's key for it is
+    # withheld -- so it is registered here, at an https endpoint of its own.
+    # After the daemon is built, so its `cfg.llm.base_url` stays empty as it
+    # always was: `test_the_override_is_per_provider` changes only the provider
+    # and relies on the new one's endpoint being resolved, not inherited.
+    from openai4s import llm
+
     node = _TeamDaemon(tmp_path)
+    llm.register_provider(
+        "deepseek",
+        wire="openai",
+        base_url="https://api.deepseek.example/v1",
+        model="deepseek-chat",
+        replace=True,
+    )
     node.seed_user("root", "fake-pw-r", role="admin")
     node.seed_user("alice", "fake-pw-a")
     node.seed_user("bob", "fake-pw-b")
@@ -64,6 +81,7 @@ def daemon(tmp_path: Path):
         yield node
     finally:
         node.close()
+        llm.unregister_provider("deepseek")
 
 
 def _session_for(daemon, username: str) -> str:
