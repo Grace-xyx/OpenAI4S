@@ -18,31 +18,31 @@ from openai4s.config import get_config
 
 @pytest.fixture(scope="module")
 def kernel():
-    sys.path.insert(0, str(get_config().skills_dir))
+    sys.path.insert(0, str(get_config(initialize_dirs=False).skills_dir))
     return importlib.import_module("retrosynthesis_planning.kernel")
 
 
 @pytest.fixture(scope="module")
 def workflow():
-    sys.path.insert(0, str(get_config().skills_dir))
+    sys.path.insert(0, str(get_config(initialize_dirs=False).skills_dir))
     return importlib.import_module("retrosynthesis_planning.workflow")
 
 
 @pytest.fixture(scope="module")
 def worker():
-    sys.path.insert(0, str(get_config().skills_dir))
+    sys.path.insert(0, str(get_config(initialize_dirs=False).skills_dir))
     return importlib.import_module("retrosynthesis_planning.syntheseus_worker")
 
 
 @pytest.fixture(scope="module")
 def backends():
-    sys.path.insert(0, str(get_config().skills_dir))
+    sys.path.insert(0, str(get_config(initialize_dirs=False).skills_dir))
     return importlib.import_module("retrosynthesis_planning.external_backends")
 
 
 @pytest.fixture(scope="module")
 def model_deployment():
-    sys.path.insert(0, str(get_config().skills_dir))
+    sys.path.insert(0, str(get_config(initialize_dirs=False).skills_dir))
     return importlib.import_module("retrosynthesis_planning.model_deployment")
 
 
