@@ -127,6 +127,23 @@ work safe: a second submit under a key that already has a job is refused with
 `duplicate_request` rather than becoming a second remote job, and the key
 survives a restart, which is precisely when a client retries.
 
+BYOC sandboxes carry an owner tag, the install id, and the helper refuses to
+poll, cancel or reuse a sandbox whose tag is not this install's. The id is kept
+in `<data dir>/install-id`. Earlier builds kept it at
+`~/.openai4s/install-id` whatever `OPENAI4S_DATA_DIR` said. An id found there is
+copied into the data dir on first use, so sandboxes it already tagged stay
+reachable, and the old file is left in place. `OPENAI4S_INSTALL_ID` overrides
+both.
+
+Concurrent publishers coordinate through `<data dir>/.install-id.lock` and
+re-read the stored id before publishing. This also covers repairing an empty
+or undecodable file and filesystems without hard links. The lock file stays
+in place; the OS releases its lock when the process exits. A read-permission
+or other I/O error does not authorize replacing an existing id. If the id
+cannot be read or persisted, the manager retains the historical in-memory
+fallback, which cannot guarantee ownership across restarts; restore access to
+the data dir or set `OPENAI4S_INSTALL_ID` to a stable value before using BYOC.
+
 ### Confinement status (Prototype)
 
 `openai4s_compute_provider` ships a confinement probe and an `expect_confined` mode, and the host now supplies the boundary that probe looks for: [`security/byoc_confinement.py`](../openai4s/security/byoc_confinement.py) builds a Seatbelt profile on macOS and a bubblewrap invocation on Linux, and [`compute/manager.py`](../openai4s/compute/manager.py) wraps the helper in it. The two travel together — whenever the host wraps, it also passes `expect_confined=1` and the anchor the probe compares against (`OPENAI4S_HOST_HOME_DEV`, the real home's device id; the netns anchor this replaces is now only a fallback for a host a release behind). Still do not read "the helper ran" as "the helper was confined" — read `confinement_status()`, which answers from the same self-test every other surface uses.
