@@ -1,5 +1,7 @@
 """Configuration defaults, validation, and placeholder API-key filtering."""
 
+import os
+import tempfile
 from dataclasses import asdict, fields
 from pathlib import Path
 
@@ -518,3 +520,21 @@ def test_placeholder_env_does_not_shadow_native_key(monkeypatch):
     monkeypatch.setenv("OPENAI4S_LLM_API_KEY", "your-api-key-here")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-native-real")
     assert LLMConfig(provider="chatgpt").api_key == "sk-native-real"
+
+
+@pytest.fixture(scope="module")
+def data_dir_before_the_per_test_redirect() -> tuple[str | None, Path]:
+    # Module scope is set up before conftest's function-scoped
+    # `isolated_openai4s_home`, which is the window a module-scoped Skill-eval
+    # fixture once used to open the developer's real ~/.openai4s database.
+    return os.environ.get("OPENAI4S_DATA_DIR"), Config().data_dir
+
+
+def test_fixtures_set_up_before_the_redirect_still_resolve_scratch_space(
+    data_dir_before_the_per_test_redirect: tuple[str | None, Path],
+) -> None:
+    configured, data_dir = data_dir_before_the_per_test_redirect
+    assert configured, "OPENAI4S_DATA_DIR is unset outside the per-test redirect"
+    assert data_dir == Path(configured)
+    assert data_dir != Path.home() / ".openai4s"
+    assert data_dir.resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
