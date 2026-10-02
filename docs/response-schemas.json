@@ -26249,10 +26249,77 @@
         "type": "object"
       }
     },
+    "PATCH /projects/([^/]+) [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "PATCH /projects/([^/]+) [ok]": {
       "schema": {
-        "properties": {},
-        "required": [],
+        "properties": {
+          "context": {
+            "type": "string"
+          },
+          "conversation_count": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_example": {
+            "type": "boolean"
+          },
+          "last_active_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "conversation_count",
+          "created_at",
+          "description",
+          "id",
+          "is_example",
+          "last_active_at",
+          "name",
+          "project_id",
+          "updated_at"
+        ],
         "type": "object"
       }
     },
@@ -46412,10 +46479,77 @@
         "type": "object"
       }
     },
+    "PUT /projects/([^/]+) [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "PUT /projects/([^/]+) [ok]": {
       "schema": {
-        "properties": {},
-        "required": [],
+        "properties": {
+          "context": {
+            "type": "string"
+          },
+          "conversation_count": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_example": {
+            "type": "boolean"
+          },
+          "last_active_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "conversation_count",
+          "created_at",
+          "description",
+          "id",
+          "is_example",
+          "last_active_at",
+          "name",
+          "project_id",
+          "updated_at"
+        ],
         "type": "object"
       }
     },

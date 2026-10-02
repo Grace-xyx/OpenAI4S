@@ -16351,6 +16351,14 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     self._json(runner.delete_project(pid))
                     return
                 if method in ("PUT", "PATCH"):
+                    # An UPDATE naming no row succeeds, and `_project_json({})`
+                    # is `{}`, so an edit of a project that does not exist
+                    # answered 200 -- indistinguishable from an edit that
+                    # landed. Same sentence as the team project guard's, which
+                    # already answers this for a non-participant (INV-13):
+                    # missing and not-yours must not read differently.
+                    if store.get_project(pid) is None:
+                        raise GatewayError(404, "project not found")
                     store.update_project(
                         pid,
                         **{
@@ -16359,7 +16367,10 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                             if k in ("name", "description", "context")
                         },
                     )
-                    self._json(_project_json(store.get_project(pid) or {}))
+                    project = store.get_project(pid)
+                    if project is None:  # deleted between the check and this read
+                        raise GatewayError(404, "project not found")
+                    self._json(_project_json(project))
                     return
                 if method == "GET":
                     p = store.get_project(pid)
