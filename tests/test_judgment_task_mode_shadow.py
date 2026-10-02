@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
-import queue
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Mapping
 
 import pytest
@@ -307,26 +309,36 @@ def test_returns_match_with_shadow_on_and_off(tmp_path: Any) -> None:
 
 
 @pytest.mark.parametrize("reset", [False, True])
-def test_wait_idle_includes_dequeued_unfinished_jobs(
-    monkeypatch: pytest.MonkeyPatch, reset: bool
-) -> None:
-    from openai4s.judgment import task_mode_shadow
+def test_wait_idle_includes_dequeued_unfinished_jobs(reset: bool) -> None:
+    # Keep persistent suite workers out of the controlled dequeue gap. Swapping
+    # their global queue could strand an existing worker on the test's queue.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"""
+from openai4s.judgment import task_mode_shadow as shadow
 
-    work_queue: queue.Queue[object] = queue.Queue()
-    monkeypatch.setattr(task_mode_shadow, "_QUEUE", work_queue)
-    work_queue.put((0, "plot the residuals", "analysis_run"))
-    work_queue.get_nowait()
-    # A worker can be descheduled after get() but before registering in-flight.
-    # Reset also clears that counter without completing an already-dequeued job.
-    if reset:
-        reset_for_tests()
-    assert stats()["pending"] == 0
-    assert stats()["in_flight"] == 0
-    try:
-        assert wait_idle(timeout=0.01) is False
-    finally:
-        work_queue.task_done()
-    assert wait_idle(timeout=0.01) is True
+shadow._QUEUE.put((0, "plot the residuals", "analysis_run"))
+shadow._QUEUE.get_nowait()
+if {reset!r}:
+    shadow._IN_FLIGHT = 1
+    shadow.reset_for_tests()
+assert shadow.stats()["pending"] == 0
+assert shadow.stats()["in_flight"] == 0
+try:
+    assert shadow.wait_idle(timeout=0.01) is False
+finally:
+    shadow._QUEUE.task_done()
+assert shadow.wait_idle(timeout=0.01) is True
+""",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_slow_backend_does_not_block_the_return(tmp_path: Any) -> None:
