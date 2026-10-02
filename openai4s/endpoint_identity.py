@@ -56,6 +56,8 @@ def normalize_endpoint(url: str | None) -> str:
         # Not a URL this can reason about -- a bare host, say. Left as typed.
         return text
     host = parts.hostname
+    if ":" in host:
+        host = f"[{host}]"
     if parts.port:
         host = f"{host}:{parts.port}"
     path = parts.path.rstrip("/")

@@ -94,11 +94,15 @@ def bind(*, service: Any | None = None, enabled: bool | None = None) -> None:
 
 
 def wait_idle(timeout: float = 5.0) -> bool:
-    """Block until the queue is empty and no worker is in flight."""
+    """Wait until every accepted queue item has finished processing."""
 
-    with _IDLE:
-        return _IDLE.wait_for(
-            lambda: _QUEUE.empty() and _IN_FLIGHT == 0, timeout=timeout
+    # A worker can dequeue the last item before incrementing _IN_FLIGHT;
+    # reset_for_tests can also clear that counter while a job is still running.
+    # Queue's completion accounting covers both gaps and notifies only after
+    # task_done(), including stale jobs and parked-worker sentinels.
+    with _QUEUE.all_tasks_done:
+        return _QUEUE.all_tasks_done.wait_for(
+            lambda: _QUEUE.unfinished_tasks == 0, timeout=timeout
         )
 
 

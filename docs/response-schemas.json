@@ -9890,13 +9890,19 @@
                   "type": "string"
                 },
                 "folder_id": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "id": {
                   "type": "string"
                 },
                 "input_tokens": {
-                  "type": "null"
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "kernel_alive": {
                   "type": "boolean"
@@ -9905,13 +9911,22 @@
                   "type": "integer"
                 },
                 "model": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "name": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "output_tokens": {
-                  "type": "null"
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "parent_frame_id": {
                   "type": "null"
@@ -10021,25 +10036,40 @@
             "type": "string"
           },
           "folder_id": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "id": {
             "type": "string"
           },
           "input_tokens": {
-            "type": "null"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "message_count": {
             "type": "integer"
           },
           "model": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "name": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "output_tokens": {
-            "type": "null"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "parent_frame_id": {
             "type": "null"
@@ -10054,7 +10084,10 @@
             "type": "string"
           },
           "task_summary": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "updated_at": {
             "type": "string"
@@ -23084,7 +23117,10 @@
             "type": "string"
           },
           "task_summary": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "updated_at": {
             "type": "string"

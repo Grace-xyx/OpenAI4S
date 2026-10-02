@@ -10,7 +10,7 @@ from openai4s.config import get_config
 
 @pytest.fixture(scope="module")
 def pm():
-    sys.path.insert(0, str(get_config().skills_dir))
+    sys.path.insert(0, str(get_config(initialize_dirs=False).skills_dir))
     return importlib.import_module("protein-mutation-enhancement.kernel")
 
 
