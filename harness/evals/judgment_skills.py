@@ -46,7 +46,10 @@ SYSTEMS = ("B0", "B1", "B2", "J1", "J2")
 LIVE_SYSTEMS = frozenset({"B1", "J1", "J2"})
 CASE_FIELDS = ("id", "lang", "category", "query", "gold", "notes", "split")
 
+#: The loader for the last configuration searched, and the resolved
+#: ``(data_dir, skills_dir)`` it was built for.
 _LOADER: Any = None
+_LOADER_KEY: tuple[str, str] | None = None
 _GLOSSARY: tuple[dict[str, str], ...] | None = None
 
 
@@ -400,22 +403,37 @@ def score_predictions(
 # ---------------------------------------------------------------------------
 
 
-def _skill_loader():
-    global _LOADER
-    if _LOADER is None:
+def _skill_loader(cfg: Any = None):
+    """A discovered loader bound to *cfg*, or to ``Config()`` resolved now.
+
+    Cached per resolved data dir and skills root, never once per process. A
+    ``SkillLoader`` pins ``cfg.db_path`` and ``user-skills`` when it is built,
+    so a process-wide cache kept whichever data dir the first caller saw. The
+    offline suite's first caller was a module-scoped fixture, which pytest
+    instantiates before the per-test ``OPENAI4S_DATA_DIR`` redirect: every
+    later B0/B2 search then opened -- and against an older schema, migrated --
+    the developer's real ``~/.openai4s/openai4s.db``.
+    """
+
+    global _LOADER, _LOADER_KEY
+    if cfg is None:
         from openai4s.config import Config
+
+        cfg = Config()
+    key = (str(cfg.data_dir.resolve()), str(cfg.skills_dir.resolve()))
+    if _LOADER is None or _LOADER_KEY != key:
         from openai4s.skills_loader import SkillLoader
 
-        loader = SkillLoader(cfg=Config())
+        loader = SkillLoader(cfg=cfg)
         loader.discover()
-        _LOADER = loader
+        _LOADER, _LOADER_KEY = loader, key
     return _LOADER
 
 
-def known_skill_names() -> set[str]:
+def known_skill_names(cfg: Any = None) -> set[str]:
     """Declared names and directory keys currently visible to the loader."""
 
-    loader = _skill_loader()
+    loader = _skill_loader(cfg)
     names: set[str] = set()
     for key, skill in loader.discover().items():
         names.add(str(key))
@@ -423,8 +441,8 @@ def known_skill_names() -> set[str]:
     return names
 
 
-def lexical_top3(query: str) -> list[str]:
-    hits = _skill_loader().search(query, limit=TOP_K)
+def lexical_top3(query: str, *, cfg: Any = None) -> list[str]:
+    hits = _skill_loader(cfg).search(query, limit=TOP_K)
     names: list[str] = []
     for hit in hits:
         name = hit.get("name") if isinstance(hit, Mapping) else None
@@ -496,7 +514,7 @@ def _input_tokens_from_usage(usage: object) -> int:
     return 0
 
 
-def _rewrite_query_b1(query: str) -> tuple[str, int]:
+def _rewrite_query_b1(query: str, cfg: Any = None) -> tuple[str, int]:
     from openai4s.config import get_config
     from openai4s.llm import chat
 
@@ -506,7 +524,7 @@ def _rewrite_query_b1(query: str) -> tuple[str, int]:
         "keywords. No punctuation, no quotes, no explanation.\n\nQuery:\n"
         f"{query}"
     )
-    cfg = get_config()
+    cfg = cfg if cfg is not None else get_config()
     reply = chat(
         [{"role": "user", "content": prompt}],
         cfg.llm,
@@ -526,11 +544,11 @@ def _rewrite_query_b1(query: str) -> tuple[str, int]:
     return (rewritten or query), tokens
 
 
-def _suggest_skills(query: str, *, first_only: bool) -> dict[str, Any]:
+def _suggest_skills(query: str, *, first_only: bool, cfg: Any = None) -> dict[str, Any]:
     from openai4s.config import get_config
     from openai4s.host.skills import SkillService
 
-    service = SkillService(get_config())
+    service = SkillService(cfg if cfg is not None else get_config())
     suggest = getattr(service, "suggest", None)
     if not callable(suggest):
         raise RuntimeError(
@@ -570,6 +588,7 @@ def run_system(
     case: Mapping[str, Any],
     *,
     terms: Sequence[Mapping[str, str]] | None = None,
+    cfg: Any = None,
 ) -> dict[str, Any]:
     """Run one system on one case. Never raises into the scorer."""
 
@@ -582,17 +601,17 @@ def run_system(
     error: str | None = None
     try:
         if system == "B0":
-            pred = lexical_top3(query)
+            pred = lexical_top3(query, cfg=cfg)
         elif system == "B2":
             glossary = terms if terms is not None else load_glossary()
             expanded = expand_query_b2(query, lang, glossary)
-            pred = lexical_top3(expanded)
+            pred = lexical_top3(expanded, cfg=cfg)
         elif system == "B1":
-            rewritten, tokens = _rewrite_query_b1(query)
-            pred = lexical_top3(rewritten)
+            rewritten, tokens = _rewrite_query_b1(query, cfg)
+            pred = lexical_top3(rewritten, cfg=cfg)
             requests = 1
         elif system in ("J1", "J2"):
-            payload = _suggest_skills(query, first_only=(system == "J1"))
+            payload = _suggest_skills(query, first_only=(system == "J1"), cfg=cfg)
             pred = _names_from_suggest(payload)
             if isinstance(payload, Mapping):
                 requests = int(payload.get("requests") or (1 if pred or payload else 0))
@@ -638,11 +657,12 @@ def evaluate_system(
     cases: Sequence[Mapping[str, Any]],
     *,
     terms: Sequence[Mapping[str, str]] | None = None,
+    cfg: Any = None,
 ) -> dict[str, Any]:
     predictions: dict[str, list[str]] = {}
     extra: dict[str, dict[str, Any]] = {}
     for case in cases:
-        outcome = run_system(system, case, terms=terms)
+        outcome = run_system(system, case, terms=terms, cfg=cfg)
         predictions[case["id"]] = list(outcome["pred"])
         extra[case["id"]] = {
             "requests": outcome["requests"],
@@ -800,6 +820,7 @@ def build_report(
     cases: Sequence[Mapping[str, Any]],
     live: bool,
     frozen_thresholds: str | None,
+    cfg: Any = None,
 ) -> dict[str, Any]:
     live_needed = [name for name in systems if name in LIVE_SYSTEMS]
     if live_needed and not live:
@@ -828,7 +849,9 @@ def build_report(
     if not selected:
         raise SystemExit(f"no cases for split {split!r}")
     terms = load_glossary() if "B2" in systems else None
-    results = {name: evaluate_system(name, selected, terms=terms) for name in systems}
+    results = {
+        name: evaluate_system(name, selected, terms=terms, cfg=cfg) for name in systems
+    }
     fake = fake_endpoint_active() and any(name in ("J1", "J2") for name in systems)
     return {
         "schema_version": SCHEMA_VERSION,

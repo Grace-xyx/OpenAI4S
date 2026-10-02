@@ -50,11 +50,16 @@ EXEMPT: dict[str, str] = {}
 #: *other* empty-properties schema fails, because that is what a fabricated
 #: coverage entry looks like.
 EMPTY_ACK: dict[str, str] = {
-    "/frames/([^/]+)": "a metadata patch with nothing to change acknowledges "
-    "with an empty object",
-    "/frames/([^/]+)(?:/.*)?": "the catch-all inherits the same acknowledgement",
-    "/projects/([^/]+)": "a project patch with nothing to change acknowledges "
-    "with an empty object",
+    # Observed from the probe, which names no real frame: GET of an unknown id
+    # answers `{}`, the not-found shape docs/webapp-api.md keeps for existing
+    # readers. PATCH of one is a 404 (tests/test_frame_patch_unknown_id.py), and
+    # the catch-all's `{}` merges with real frames into a shape that has fields.
+    "/frames/([^/]+)": "GET of an unknown session id answers the documented "
+    "compatibility shape, an empty object",
+    # No `/projects/([^/]+)` entry. Its `{}` was never an empty patch: it was
+    # the contract probe editing the nonexistent `probe-id`, which is now a 404
+    # (tests/test_project_patch_unknown_id.py). GET of that id still answers the
+    # documented `{}`, but merges with real projects into a shape with fields.
 }
 
 
@@ -89,18 +94,21 @@ def driven(tmp_path_factory, request):
     config = Config(
         data_dir=tmp_path, llm=LLMConfig(provider="deepseek", api_key="test-key")
     )
-    runner = gateway_mod.SessionRunner(config, _Hub(), start_idle_sweeper=False)
     recorder = response_capture.Recorder()
     session = getattr(request.config, "_openai4s_recorder", None)
     recorders = [recorder] + ([session[0]] if session else [])
-    original = response_capture.install(gateway_mod, recorder)
-    try:
-        for target in recorders:
-            response_capture.drive_all_routes(
-                target, gateway_mod.make_handler, config, runner
-            )
-    finally:
-        gateway_mod.make_handler = original
+    # Module-scoped, so this runs before conftest's per-test data-dir redirect.
+    with response_capture.drive_process_config(config):
+        runner = gateway_mod.SessionRunner(config, _Hub(), start_idle_sweeper=False)
+        original = response_capture.install(gateway_mod, recorder)
+        try:
+            for target in recorders:
+                response_capture.drive_all_routes(
+                    target, gateway_mod.make_handler, config, runner
+                )
+        finally:
+            gateway_mod.make_handler = original
+            runner.close()
     return recorder
 
 
