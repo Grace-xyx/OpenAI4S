@@ -16,7 +16,7 @@ from openai4s.skills_loader import SkillLoader
 
 @pytest.fixture(scope="module", autouse=True)
 def _skills_on_path():
-    path = str(get_config().skills_dir)
+    path = str(get_config(initialize_dirs=False).skills_dir)
     sys.path.insert(0, path)
     yield
     if path in sys.path:
