@@ -141,6 +141,14 @@ os.environ["OPENAI4S_SECRET_STORE"] = "plaintext"
 # "not installed" projection. Tests that exercise the bridge inject their own
 # executable or runner explicitly.
 os.environ["OPENAI4S_ARKCLI_PATH"] = "/nonexistent/openai4s-offline-arkcli"
+# A session builds its ComputeManager on the first compute route or call, and
+# every ComputeManager resolves the BYOC owner tag. The tag now lives under the
+# data dir, which the fixture below redirects per test. Resolution still falls
+# back to the pre-move `~/.openai4s/install-id` to keep an existing install's
+# id, and that is the developer's real one. A module- or session-scoped fixture
+# also builds its runner before the redirect. Pinning the id keeps both off the
+# real home. Tests of the resolution itself delete it.
+os.environ["OPENAI4S_INSTALL_ID"] = "offline-suite-install-id"
 # Nothing in the offline suite may reach the real telemetry endpoint, for the
 # same reason the share relay is cleared below — and this one is not
 # hypothetical. A benchmark case granted consent to itself, sealed a payload
@@ -370,6 +378,8 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI4S_SECRET_STORE", "plaintext")
     # Never the developer's real Ark CLI — see the module-level default.
     monkeypatch.setenv("OPENAI4S_ARKCLI_PATH", "/nonexistent/openai4s-offline-arkcli")
+    # Never the developer's real install id — see the module-level default.
+    monkeypatch.setenv("OPENAI4S_INSTALL_ID", "offline-suite-install-id")
     # Re-applied per test: a test that overrode the endpoint for its own reasons
     # must not leave the next one pointed at the real host. See the module-level
     # default for why this is set at all.
