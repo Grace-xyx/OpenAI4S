@@ -2,11 +2,13 @@
 
 import atexit
 import copy
+import functools
 import os
 import re
 import shutil
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 import pytest
@@ -175,24 +177,145 @@ for _name in (
 ):
     os.environ.pop(_name, None)
 
-# The autouse fixture below gives every test its own data directory, but code
-# that runs before a test's function-scoped fixtures never sees it: module- and
-# session-scoped fixtures, collection-time imports, and any cache built there.
-# `harness/evals/judgment_skills.py` cached a SkillLoader built from `Config()`
-# inside a module-scoped fixture, a later search opened the store at that
-# loader's db_path, and on 2026-09-30 a branch carrying schema 33 migrated the
-# developer's real ~/.openai4s/openai4s.db in place -- after which every
-# schema-32 checkout refused that database with FutureSchemaError. Point the
-# whole session at a private directory before any test module is imported, so
-# nothing outside a test can reach the real one. Each xdist worker imports this
-# file, so each gets its own directory.
-_SESSION_DATA_DIR = tempfile.mkdtemp(prefix="openai4s-pytest-session-")
-os.environ["OPENAI4S_DATA_DIR"] = _SESSION_DATA_DIR
-atexit.register(shutil.rmtree, _SESSION_DATA_DIR, True)
-
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
+
+
+# ---------------------------------------------------------------------------
+# the developer's real data dir is off limits
+# ---------------------------------------------------------------------------
+#
+# `isolated_openai4s_home` redirects OPENAI4S_DATA_DIR per test, which only
+# reaches code that resolves its data dir *after* that fixture has run. A
+# module- or session-scoped fixture is instantiated before it, and whatever it
+# caches keeps the developer's real ~/.openai4s for the rest of the process.
+# That is not hypothetical: the Skill-suggestion eval built its SkillLoader in a
+# module-scoped fixture, and every later search in the process opened the real
+# openai4s.db -- a FutureSchemaError against a newer one, a silent create or
+# migration against an older one, and green on CI only because runners have no
+# ~/.openai4s at all. The response-contract drives did the same through a
+# turn's global-config lookup, and five Skill fixtures created and chmod-ed the
+# real data dir through `get_config()`. The redirect cannot reach state built
+# before it, so the two ways in -- opening a Store and `Config.ensure_dirs` --
+# refuse the real data dir themselves, on every machine, whether or not that
+# directory exists.
+
+
+def _real_data_dirs() -> tuple[Path, ...]:
+    """Where this developer's data lives, read before any fixture moves it."""
+
+    roots: list[Path] = []
+    # An exported OPENAI4S_DATA_DIR is the real data dir just as much as the
+    # default is; the per-test fixture only shadows it.
+    exported = os.environ.get("OPENAI4S_DATA_DIR")
+    if exported:
+        roots.append(Path(exported).expanduser())
+    try:
+        roots.append(Path.home() / ".openai4s")
+    except RuntimeError:  # no resolvable home directory
+        pass
+    return tuple(dict.fromkeys(root.resolve() for root in roots))
+
+
+class RealDataDirError(RuntimeError):
+    """A test tried to write under the developer's real data dir."""
+
+
+class _RealDataDirGuard:
+    """Refuse, and remember, every Store or data dir under a real data dir.
+
+    Refusing protects the data; remembering is what fails the test. Code
+    under test routinely catches ``Exception`` -- the eval's ``run_system``
+    turns every error into a row, the task-mode shadow reads "off" -- so a
+    raise alone can be swallowed into a pass. ``isolated_openai4s_home``
+    drains the record at teardown instead.
+    """
+
+    def __init__(self, roots: tuple[Path, ...]) -> None:
+        self.roots = roots
+        self.violations: list[str] = []
+
+    def covers(self, path) -> bool:
+        # Relative paths resolve against the cwd, exactly as sqlite opens them.
+        target = Path(path).resolve()
+        return any(target == root or root in target.parents for root in self.roots)
+
+    def check(self, path, action: str) -> None:
+        if not self.covers(path):
+            return
+        message = (
+            f"refused to {action} {path} under the developer's real data dir "
+            f"({', '.join(map(str, self.roots))}); something resolved its data "
+            "dir before isolated_openai4s_home redirected it -- a module/"
+            "session-scoped fixture, a cache built by one, or a thread that "
+            "outlived its test."
+        )
+        stack = "".join(traceback.format_stack(limit=12)[:-2])
+        self.violations.append(f"{message}\n{stack}")
+        raise RealDataDirError(message)
+
+    def drain(self) -> list[str]:
+        drained, self.violations = self.violations, []
+        return drained
+
+
+_REAL_DATA_DIR_GUARD = _RealDataDirGuard(_real_data_dirs())
+
+# The per-test redirect in `isolated_openai4s_home` is function-scoped, but
+# collection imports every test module first and pytest sets up module- and
+# session-scoped fixtures before any function-scoped one. In that window the
+# data dir was whatever the shell had, usually nothing, so it resolved to
+# ~/.openai4s. With this floor, that window -- and the redirect's undo --
+# resolve a scratch directory rather than the developer's. The guard above
+# still catches what bypasses it (`Path.home()`, a test that deletes the
+# variable, a script outside pytest).
+#
+# Order matters: the guard must read the real roots first. Set before it, the
+# floor would be taken for the developer's exported data dir, and the guard
+# would refuse every pre-redirect Store in scratch space.
+_SUITE_DATA_DIR = tempfile.mkdtemp(prefix="openai4s-suite-data-")
+os.environ["OPENAI4S_DATA_DIR"] = _SUITE_DATA_DIR
+atexit.register(shutil.rmtree, _SUITE_DATA_DIR, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def real_data_dir_guard():
+    """Install the guard on ``Store`` and ``Config.ensure_dirs`` for the session.
+
+    Session-scoped so it is in place before any module-scoped fixture runs,
+    and a fixture rather than import-time code so the imports of
+    ``openai4s.store`` and ``openai4s.config`` happen after collection: a test
+    module that sets an environment variable before its own import still gets
+    the definition-time default it asked for.
+    """
+
+    from openai4s import config as config_mod
+    from openai4s import store as store_mod
+
+    original_init = store_mod.Store.__init__
+    original_ensure_dirs = config_mod.Config.ensure_dirs
+
+    @functools.wraps(original_init)
+    def guarded_init(self, db_path, *args, **kwargs):
+        _REAL_DATA_DIR_GUARD.check(db_path, "open a Store at")
+        original_init(self, db_path, *args, **kwargs)
+
+    @functools.wraps(original_ensure_dirs)
+    def guarded_ensure_dirs(self, *args, **kwargs):
+        _REAL_DATA_DIR_GUARD.check(self.data_dir, "create the data dir")
+        return original_ensure_dirs(self, *args, **kwargs)
+
+    store_mod.Store.__init__ = guarded_init
+    config_mod.Config.ensure_dirs = guarded_ensure_dirs
+    try:
+        yield _REAL_DATA_DIR_GUARD
+    finally:
+        store_mod.Store.__init__ = original_init
+        config_mod.Config.ensure_dirs = original_ensure_dirs
+        # Module/session finalizers run after the last function-scoped check.
+        # A swallowed refusal there must fail this worker too.
+        _fail_on_real_data_dir_violations()
 
 
 @pytest.fixture(autouse=True)
@@ -285,7 +408,65 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
     yield
     _reset_confinement_self_test()
     _reset_preinstall_status()
-    reset_singletons()
+    # Before reset_singletons and before monkeypatch undoes the redirect.
+    try:
+        _quiesce_judgment_shadows()
+    finally:
+        reset_singletons()
+    # Not drained at setup: higher-scoped fixtures this test instantiated ran
+    # before this fixture did, and their refusals belong to this test.
+    _fail_on_real_data_dir_violations()
+
+
+def _fail_on_real_data_dir_violations() -> None:
+    touched = _REAL_DATA_DIR_GUARD.drain()
+    if touched:
+        pytest.fail(
+            "test code attempted to access the developer's real data dir:\n\n"
+            + "\n".join(touched),
+            pytrace=False,
+        )
+
+
+_SHADOW_DRAIN_TIMEOUT_S = 10.0
+
+
+def _quiesce_judgment_shadows() -> None:
+    """Let shadow workers finish while this test's data dir is still in effect.
+
+    Both judgment shadows run on process-wide daemon workers that resolve the
+    process-global config when a job *starts* (`_live_config()` /
+    `get_config()`). A job a test left queued -- or one a busy runner
+    descheduled between dequeue and start -- could start after monkeypatch
+    restored the environment and resolve the real ~/.openai4s: the guard
+    caught exactly that on CI, from `judgment/shadow.py`'s worker. Under the
+    suite-wide floor such a job would land in scratch space instead, unseen,
+    but it would still run under the next test's data dir; waiting the workers
+    out here keeps every job inside the test that submitted it. Use Queue's
+    unfinished-task accounting: the shadow modules' own fixture finalizers
+    can reset their in-flight counters before this teardown, and a worker can
+    be descheduled between dequeue and incrementing its counter. Neither
+    makes its queue task complete. A timeout fails the test instead of
+    silently letting the work escape into another test's data directory.
+    """
+
+    for name, queue_name in (
+        ("openai4s.judgment.shadow", "_queue"),
+        ("openai4s.judgment.task_mode_shadow", "_QUEUE"),
+    ):
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        work_queue = getattr(module, queue_name)
+        # Queue.join's predicate and condition, with a bounded wait. Both
+        # workers call task_done only after their job exits, even after reset.
+        with work_queue.all_tasks_done:
+            drained = work_queue.all_tasks_done.wait_for(
+                lambda: work_queue.unfinished_tasks == 0,
+                timeout=_SHADOW_DRAIN_TIMEOUT_S,
+            )
+        if not drained:
+            pytest.fail(f"{name} workers did not drain before data-dir teardown")
 
 
 def _reset_confinement_self_test() -> None:
