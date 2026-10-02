@@ -61,6 +61,11 @@ class Tool:
     #: claims to be real -- a declaration nothing verifies is the failure mode
     #: this codebase keeps finding.
     derived_write_path: bool = False
+    #: The call can only succeed inside the Web gateway's native Artifact
+    #: capture transaction. Agents that never bind one -- the headless CLI root
+    #: and delegated children -- leave it out of the model-facing projection;
+    #: the Host still refuses it everywhere the transaction is absent.
+    requires_native_capture: bool = False
     screen_untrusted_output: bool = False
     # The Host uses these declarations for durable audit events and future
     # resource-aware scheduling. They are separate from permission targets:
@@ -93,6 +98,7 @@ class Tool:
         "permission_target_default",
         "secret_path_key",
         "derived_write_path",
+        "requires_native_capture",
         "screen_untrusted_output",
         "side_effect_class",
         "resource_key_prefix",
