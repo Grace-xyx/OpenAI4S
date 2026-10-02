@@ -50,8 +50,12 @@ EXEMPT: dict[str, str] = {}
 #: *other* empty-properties schema fails, because that is what a fabricated
 #: coverage entry looks like.
 EMPTY_ACK: dict[str, str] = {
-    "/frames/([^/]+)": "a metadata patch with nothing to change acknowledges "
-    "with an empty object",
+    # Observed from the probe, which names no real frame: GET of an unknown id
+    # answers `{}`, the not-found shape docs/webapp-api.md keeps for existing
+    # readers. PATCH of one is a 404 (tests/test_frame_patch_unknown_id.py), and
+    # the catch-all's `{}` merges with real frames into a shape that has fields.
+    "/frames/([^/]+)": "GET of an unknown session id answers the documented "
+    "compatibility shape, an empty object",
     "/projects/([^/]+)": "a project patch with nothing to change acknowledges "
     "with an empty object",
 }
