@@ -18,11 +18,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -1676,6 +1678,39 @@ def _capture_json(
         )
         return None
     return captured
+
+
+@contextmanager
+def drive_process_config(config) -> Iterator[None]:
+    """Resolve the process-global config under the drive's own data dir.
+
+    A drive hands its runner an explicit ``Config``, but a turn still reaches
+    code that resolves the process-global one -- the task-mode shadow's
+    capability check calls ``get_config()`` and then ``get_store(cfg.db_path)``.
+    In the daemon the two are one data dir. In a drive the global one fell
+    back to ``~/.openai4s``: a local ``capture_response_contract.py`` run
+    created and migrated the developer's real database and wrote an install id
+    beside it, and the pytest drives -- module-scoped fixtures, so outside the
+    suite's per-test isolation -- opened it as well.
+
+    Close the runner inside this block. A turn thread that outlives it
+    resolves the global config again, from whatever the environment says then.
+    """
+
+    from openai4s import config as config_mod
+
+    previous_env = os.environ.get("OPENAI4S_DATA_DIR")
+    previous_config = config_mod._CONFIG
+    os.environ["OPENAI4S_DATA_DIR"] = str(config.data_dir)
+    config_mod._CONFIG = None
+    try:
+        yield
+    finally:
+        config_mod._CONFIG = previous_config
+        if previous_env is None:
+            os.environ.pop("OPENAI4S_DATA_DIR", None)
+        else:
+            os.environ["OPENAI4S_DATA_DIR"] = previous_env
 
 
 def drive_all_routes(

@@ -134,15 +134,18 @@ def driven(tmp_path_factory):
     config = Config(
         data_dir=tmp_path, llm=LLMConfig(provider="deepseek", api_key="test-key")
     )
-    runner = gateway_mod.SessionRunner(config, _Hub(), start_idle_sweeper=False)
     recorder = response_capture.Recorder()
-    original = response_capture.install(gateway_mod, recorder)
-    try:
-        response_capture.drive_all_routes(
-            recorder, gateway_mod.make_handler, config, runner
-        )
-    finally:
-        gateway_mod.make_handler = original
+    # Module-scoped, so this runs before conftest's per-test data-dir redirect.
+    with response_capture.drive_process_config(config):
+        runner = gateway_mod.SessionRunner(config, _Hub(), start_idle_sweeper=False)
+        original = response_capture.install(gateway_mod, recorder)
+        try:
+            response_capture.drive_all_routes(
+                recorder, gateway_mod.make_handler, config, runner
+            )
+        finally:
+            gateway_mod.make_handler = original
+            runner.close()
     return recorder
 
 
