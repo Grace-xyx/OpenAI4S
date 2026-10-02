@@ -9890,13 +9890,19 @@
                   "type": "string"
                 },
                 "folder_id": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "id": {
                   "type": "string"
                 },
                 "input_tokens": {
-                  "type": "null"
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "kernel_alive": {
                   "type": "boolean"
@@ -9911,10 +9917,16 @@
                   ]
                 },
                 "name": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "output_tokens": {
-                  "type": "null"
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "parent_frame_id": {
                   "type": "null"
@@ -10024,13 +10036,19 @@
             "type": "string"
           },
           "folder_id": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "id": {
             "type": "string"
           },
           "input_tokens": {
-            "type": "null"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "message_count": {
             "type": "integer"
@@ -10054,10 +10072,16 @@
             ]
           },
           "name": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "output_tokens": {
-            "type": "null"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "parent_frame_id": {
             "type": "null"
@@ -10072,7 +10096,10 @@
             "type": "string"
           },
           "task_summary": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "updated_at": {
             "type": "string"
@@ -23030,7 +23057,53 @@
     },
     "PATCH /frames/([^/]+)(?:/.*)? [ok]": {
       "schema": {
-        "properties": {},
+        "properties": {
+          "conversation_type": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "folder_id": {
+            "type": "null"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "null"
+          },
+          "message_count": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "null"
+          },
+          "parent_frame_id": {
+            "type": "null"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "root_frame_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "task_summary": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
         "required": [],
         "type": "object"
       }

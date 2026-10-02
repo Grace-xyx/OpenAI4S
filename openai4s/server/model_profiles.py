@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from openai4s.config import (
     Config,
@@ -384,6 +385,65 @@ class ModelProfileService:
             spec = self._providers().get(provider, {})
             endpoint = normalize_endpoint(str(spec.get("base_url") or ""))
         return provider, endpoint
+
+    def user_key_applies(self, configuration: Any) -> bool:
+        """Whether a member's own key (team mode, M4-1) may go out under this.
+
+        `configuration` is the `LLMConfig` a turn is about to be dispatched
+        under, read for `provider`, `base_url` and `model`. `SessionRunner.
+        _apply_user_llm_key` asks this once per resolved agent or Reviewer
+        configuration and is the only caller.
+
+        A per-user key is stored against a provider *name* and nothing else, so
+        the one endpoint it can be said to have been entered for is the one
+        that name means: the base URL the registry gives the provider -- the
+        vendor's own for a built-in, which registration cannot replace, and
+        the registered one for a custom provider. `credential` already refuses
+        to send a profile or environment key to an endpoint it was not entered
+        for, and checks a keyless local server before any inherited key; a
+        per-user key used to be swapped in afterwards by provider name alone,
+        so a member's OpenAI key went to whatever `base_url` the pin named --
+        plain http to a LAN Ollama, or an admin's third-party proxy. It is
+        withheld when:
+
+        1. the provider is not in the registry: there is no endpoint the key
+           was entered for. `chat()` refuses such a provider too; this answer
+           does not rely on it doing so;
+        2. the request would reach any endpoint but that one, resolved the way
+           `chat()` resolves it (`cfg.base_url or spec["base_url"]`, where
+           `cfg.base_url` already carries `OPENAI4S_<P>_BASE_URL`): an admin's
+           proxy, an operator's gateway, another region or path of the same
+           vendor. Compared normalised, so a trailing slash or the host's case
+           is still the same endpoint;
+        3. that endpoint is plain http; or
+        4. it is local by the rule `chat()` and `doctor` apply (loopback,
+           private, link-local, `.local`) -- which only a custom provider
+           registered at a local server can still reach past (2).
+
+        Withheld is not refused. The configuration's own credential goes
+        instead -- the profile's key, the same provider's environment key, or
+        none for a keyless local server -- exactly as for a member with no key
+        of their own, and the turn is metered to the member either way. The
+        member never asked for their key to be sent to a proxy, so declining
+        to send it there overrides nothing they chose; refusing would instead
+        turn every admin-configured proxy or local model into an outage for
+        precisely the members who had set a key.
+        """
+        provider = str(getattr(configuration, "provider", "") or "").strip().lower()
+        spec = self._providers().get(provider) if provider else None
+        if not spec:
+            return False
+        own = normalize_endpoint(str(spec.get("base_url") or ""))
+        target = normalize_endpoint(
+            str(getattr(configuration, "base_url", "") or "") or own
+        )
+        if not own or target != own:
+            return False
+        if urlsplit(target).scheme != "https":
+            return False
+        return not self._keyless_endpoint(
+            provider, str(getattr(configuration, "model", "") or ""), target
+        )
 
     def _provider_key(self, provider: str) -> str:
         if not provider:

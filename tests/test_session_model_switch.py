@@ -279,8 +279,7 @@ def test_a_queued_turn_keeps_the_binding_it_was_admitted_under(api):
 
 def test_the_session_reports_its_own_pin(api):
     """The composer shows the open session's model, so the frame says which
-    configuration it is pinned to -- and the list, which does not read the
-    pin, does not claim a null one."""
+    configuration it is pinned to -- in the list row as in the detail."""
     runner, call = api
     frame, a, b = _two_profiles(runner, call)
 
@@ -295,7 +294,10 @@ def test_the_session_reports_its_own_pin(api):
     rows = call("GET", f"/frames?project_id={project}")["body"]
     listed = rows["frames"] if isinstance(rows, dict) else rows
     row = next(item for item in listed if item["id"] == frame)
-    assert "model_profile_id" not in row
+    assert (row["model_profile_id"], row["model_profile_revision"]) == (
+        b,
+        _pin(runner, frame)[1],
+    )
 
 
 def test_an_unsent_session_reports_no_pin(api):

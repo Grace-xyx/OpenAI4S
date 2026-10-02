@@ -340,7 +340,7 @@ success response body. Serializer shapes are in §4.
 | `GET /auth/status` | `{"authenticated":bool,"auth_mode":"token","token_header":"X-OpenAI4S-Token"}`. Exempt from the gate, so a client can discover it needs a credential; `authenticated` says whether *this* request carried a valid one (§1). Never any part of the token. |
 | `POST /auth/login` · `POST /auth/logout` · `GET /auth/me` | Team mode (M1). HttpOnly `SameSite=Lax` cookie; only the token's sha256 is stored. Login is rate-limited per username+IP and the bucket is charged *before* the password hash, so the limit also bounds the hashing an attacker can provoke. Wrong password, unknown user and disabled account are one sentence — the difference is the attacker's question. |
 | `GET /auth/me/llm-key` | Whether this user has a key of their own, per provider: `{keys: [{provider, configured, created_at, updated_at}]}`. Never the value — a credential a screen can display is one a screenshot leaks — and never the reference either, which names a keychain slot. |
-| `PUT /auth/me/llm-key` | Body `{provider, api_key}` (M4-1, decision D7's second half). The key goes to the `SecretBroker`; the database keeps only a reference. A broker that cannot store it answers `503 secret_store` and **writes no row**: a row pointing at a slot that was never filled would make the next turn refuse with "configured but unreadable" for a key that was never accepted. The override is per provider, so a user with their own Anthropic account and no OpenAI key runs on theirs for one and the group's for the other. |
+| `PUT /auth/me/llm-key` | Body `{provider, api_key}` (M4-1, decision D7's second half). The key goes to the `SecretBroker`; the database keeps only a reference. A broker that cannot store it answers `503 secret_store` and **writes no row**: a row pointing at a slot that was never filled would make the next turn refuse with "configured but unreadable" for a key that was never accepted. The override is per provider, so a user with their own Anthropic account and no OpenAI key runs on theirs for one and the group's for the other. It is also per *endpoint*: the key is sent only where the session's configuration reaches the endpoint the provider registry names for that provider, over https and not to a local host; anywhere else — a local server, an admin's proxy, an `OPENAI4S_<PROVIDER>_BASE_URL` gateway — it is withheld (not refused) and the configuration's own credential goes. See `docs/team-server.md` §4. |
 | `DELETE /auth/me/llm-key` | Body `{provider}` → `{ok, removed, provider}`. `removed:false` when there was nothing to clear, which is not an error: the intent — "do not use my key" — is satisfied either way. Disabling an account clears every key it had, because a credential that outlives its account is one nobody is watching. |
 | `GET /csrf` | `{"csrf_token":"local"}` (a stub; the real CSRF defense is the Origin check). |
 | `GET|POST|PUT|PATCH /config/llm` | GET → `{provider,model,base_url,has_api_key}`. Write → persists `provider`/`model`/`base_url`; `api_key` only overwrites when non-empty; `clear_api_key:true` empties it. Changing provider without a replacement key also clears the old provider-bound credential so it cannot be reinterpreted or sent to the new provider → `{"ok":true,"has_api_key"}`. The raw key is never returned. |
@@ -427,6 +427,8 @@ profile says today.
   variable, or — for the daemon's own provider only — its resolved key and an
   operator-injected `llm` credential), never another provider's. A brokered key
   that no longer resolves is refused rather than replaced by an environment key.
+  In team mode a member's own key (`PUT /auth/me/llm-key`) is laid over that
+  answer only at the provider's own https, non-local endpoint.
 - `409 model_revision_ambiguous` — a legacy session whose recorded model
   matches more than one live profile. Backfill happens only on a **unique** match;
   an ambiguous one stays unbound and asks, because picking either would be a
@@ -566,7 +568,7 @@ resolve their owning root and enforce the same rule.
 | --- | --- |
 | `GET /frames?project_id=&limit=&cursor=` | `{"frames":[…],"next_cursor":…,"has_more":bool}`. Keyset pagination, newest first; `limit` 1–200 (default 100). `cursor` is opaque — parsing it would couple a client to the sort key. An unreadable cursor is a `400`, never a silent restart, which would loop a client on page one. `has_more` is observed by collecting one row beyond the page, not inferred from the page being full: hidden abandoned sessions are filtered *after* the read, so a full-looking page is not evidence of a next one. |
 | `POST /frames` | Body `{project_id,model?}` → frame JSON for a new root frame. `project_id` is required: a missing, empty or non-string id is `400 project_id_required` (create a project with `POST /projects` or list them with `GET /projects`); an id with no project row is `404 not_found`. |
-| `GET /frames/{fid}` | Frame JSON, or `{}` when not found. It also carries `model_profile_id` / `model_profile_revision` — the configuration the session is pinned to, `null` until its first send binds one — which the composer selector shows for the open session. The list (`GET /frames`) does not read the pin and so omits both fields rather than reporting a null it never read. |
+| `GET /frames/{fid}` | Frame JSON, or `{}` when not found. It also carries `model_profile_id` / `model_profile_revision` — the configuration the session is pinned to, `null` until its first send binds one — which the composer selector shows for the open session. List rows report the same pin. |
 | `GET /frames/{fid}/auto-mode` | Durable Stage 2 logical-branch projection: feature/writable state, effective selection and precedence source, deployment metadata, read-only hard budget ceilings, sanitized current run, and last committed event identity/cursor. It never returns prompts, hidden rationale, permission payloads, or reusable authorization. |
 | `PATCH /frames/{fid}/auto-mode` | CAS selection update. Body requires `revision` and may set only `preset`, `result_review_mode`, and `approvals_reviewer`; setting all three to null clears the frame override. Disabled storage is 409, stale revision is 409, and imported quarantine is 423. It changes configuration only and starts no model or action. |
 | `GET /frames/{fid}/auto-audits?subject_kind=&before=&limit=` | Newest-first sanitized durable audit summaries for the active logical branch. `subject_kind` is `result_review` or `permission_review`; `before` is an event cursor/id and `limit` is 1–500 (default 100). The response contains no raw assessment prompt, hidden rationale, permission request, or authorization capability. |
@@ -1098,9 +1100,8 @@ timestamps are ISO-8601 strings (or null).
   name, task_summary, model, status, folder_id,
   conversation_type:"agent", message_count, input_tokens, output_tokens,
   created_at, updated_at}`, plus `model_profile_id` / `model_profile_revision`
-  (the session's pin, or null) on every single-frame answer (`GET`/`PATCH
-  /frames/{fid}`, `POST /frames`), where the row is read whole — not on list
-  rows, whose query does not select the pin. List rows additionally get
+  (the session's pin, or null) — on list rows as on single-frame answers;
+  both queries select it. List rows additionally get
   `running` and `kernel_alive`.
 - **Project** (`_project_json`): `{project_id, id, name, description, context,
   conversation_count, last_active_at, created_at, updated_at, is_example}`
