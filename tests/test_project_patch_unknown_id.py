@@ -17,8 +17,9 @@ both modes, both cases, and the admin who passes the guard to one body.
 compatibility shape `GET /frames/{id}` keeps. A read that returns no fields
 claims nothing; an edit that returns no fields claimed success.
 
-Driven through the real handler on a real socket, unmarked, so the response
-schema capture observes the 404 and a PUT and a PATCH of a real project.
+Ordinary requests use the real handler on a real socket, unmarked, so the
+response schema capture observes the 404 and both verbs on a real project.
+Marked race tests inject deletion before and after the real database update.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+
+import pytest
 
 from openai4s.config import Config, LLMConfig
 from openai4s.server import gateway as gateway_mod
@@ -138,7 +141,8 @@ def _refusal(body: dict) -> dict:
     return {key: value for key, value in body.items() if key != "request_id"}
 
 
-def test_missing_and_not_yours_read_the_same_in_both_modes(tmp_path):
+@pytest.mark.parametrize("method", ["PATCH", "PUT"])
+def test_missing_and_not_yours_read_the_same_in_both_modes(tmp_path, method):
     """INV-13: which projects exist is the information being protected.
 
     Team mode answers a non-participant from the project guard before the
@@ -150,7 +154,7 @@ def test_missing_and_not_yours_read_the_same_in_both_modes(tmp_path):
     try:
         status, alone = _call(
             solo.port,
-            "PATCH",
+            method,
             f"/projects/{MISSING}",
             {"name": "Ghost"},
             token=solo.token,
@@ -175,25 +179,25 @@ def test_missing_and_not_yours_read_the_same_in_both_modes(tmp_path):
 
         # The member's rename lands, so bob's 404 below is about bob.
         status, renamed = _call(
-            team.port, "PATCH", f"/projects/{pid}", {"name": "Mine"}, cookie=alice
+            team.port, method, f"/projects/{pid}", {"name": "Mine"}, cookie=alice
         )
         assert (status, renamed["name"]) == (200, "Mine"), renamed
         # And the admin's does too, so root's 404 below is about the id.
         status, renamed = _call(
-            team.port, "PATCH", f"/projects/{pid}", {"name": "Ours"}, cookie=root
+            team.port, method, f"/projects/{pid}", {"name": "Ours"}, cookie=root
         )
         assert (status, renamed["name"]) == (200, "Ours"), renamed
 
         status, not_yours = _call(
-            team.port, "PATCH", f"/projects/{pid}", {"name": "Bob's"}, cookie=bob
+            team.port, method, f"/projects/{pid}", {"name": "Bob's"}, cookie=bob
         )
         assert status == 404, not_yours
         status, missing = _call(
-            team.port, "PATCH", f"/projects/{MISSING}", {"name": "Ghost"}, cookie=bob
+            team.port, method, f"/projects/{MISSING}", {"name": "Ghost"}, cookie=bob
         )
         assert status == 404, missing
         status, admin_missing = _call(
-            team.port, "PATCH", f"/projects/{MISSING}", {"name": "Ghost"}, cookie=root
+            team.port, method, f"/projects/{MISSING}", {"name": "Ghost"}, cookie=root
         )
         assert status == 404, admin_missing
         assert team.store.get_project(pid)["name"] == "Ours"
@@ -207,3 +211,43 @@ def test_missing_and_not_yours_read_the_same_in_both_modes(tmp_path):
         == _refusal(missing)
         == _refusal(admin_missing)
     )
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize("method", ["PATCH", "PUT"])
+@pytest.mark.parametrize("delete_before_write", [True, False])
+def test_delete_during_edit_returns_404(
+    tmp_path, monkeypatch, method, delete_before_write
+):
+    """Deletion after the existence check must not turn into a successful edit."""
+    daemon = _TeamDaemon(tmp_path, team_mode=False)
+    try:
+        project = daemon.store.create_project(name="Renames")
+        pid = project["project_id"]
+        original_update = daemon.store.update_project
+
+        def update_with_delete(project_id, **fields):
+            assert project_id == pid
+            assert fields == {"name": "Too late"}
+            if delete_before_write:
+                daemon.store.delete_project(project_id)
+            original_update(project_id, **fields)
+            if not delete_before_write:
+                daemon.store.delete_project(project_id)
+
+        monkeypatch.setattr(daemon.store, "update_project", update_with_delete)
+        status, refused = _call(
+            daemon.port,
+            method,
+            f"/projects/{pid}",
+            {"name": "Too late"},
+            token=daemon.token,
+        )
+        assert status == 404, refused
+        assert refused["error"] == "project not found"
+        assert refused["code"] == "not_found"
+        assert refused["status"] == 404
+        assert refused.get("request_id")
+        assert daemon.store.get_project(pid) is None
+    finally:
+        daemon.close()
