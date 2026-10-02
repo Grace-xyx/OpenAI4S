@@ -61,8 +61,9 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from openai4s.compute import manifest, registry, states
 from openai4s.compute.safe_archive import UnsafeArchiveError, safe_extract_tar
@@ -823,6 +824,7 @@ def _now_ms() -> int:
 
 #: Where the byoc owner tag lives, relative to the data dir.
 _INSTALL_ID_FILE = "install-id"
+_INSTALL_ID_LOCK = threading.Lock()
 
 
 def _legacy_install_id_path() -> Path | None:
@@ -849,9 +851,33 @@ def _read_install_id(path: Path | None) -> str | None:
         return None
     try:
         value = path.read_text("utf-8").strip()
-    except (OSError, ValueError):
+    except (FileNotFoundError, ValueError):
         return None
     return value or None
+
+
+@contextmanager
+def _install_id_lock(path: Path) -> Iterator[None]:
+    """Serialize publishers across sessions and processes.
+
+    Keep the lock file in place: unlinking it would let a new caller lock a
+    different inode while an existing waiter still holds the old one. Closing
+    the descriptor releases the OS lock, including when a process exits.
+    """
+    with _INSTALL_ID_LOCK:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
 
 def _publish_install_id(path: Path, install_id: str) -> str:
@@ -861,39 +887,42 @@ def _publish_install_id(path: Path, install_id: str) -> str:
     manager, so on a fresh data dir two can resolve at once. The old resolver
     checked for the file, then wrote it. Both racers could mint, and the one
     whose write lost tagged its sandboxes with an id no later run would read
-    back. A hard link publishes exclusively and atomically: the file appears
-    whole or not at all, and the loser adopts the winner's id.
+    back. Hold a lock through the re-read and atomic publication, including
+    corrupt-file repair and filesystems without hard links. Otherwise those
+    two replace paths can overwrite an id another manager has already used.
 
     Never raises. An id that cannot be persisted still serves this run, as
     before.
     """
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd, staged = tempfile.mkstemp(prefix=".install-id-", dir=path.parent)
-    except OSError:
-        return install_id
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(install_id)
-        try:
-            os.link(staged, path)
-            return install_id
-        except FileExistsError:
+        with _install_id_lock(path.parent / ".install-id.lock"):
             winner = _read_install_id(path)
             if winner:
                 return winner
-            # Present but empty or unreadable: repair it below.
-        except OSError:
-            pass  # a filesystem without hard links: publish non-exclusively
-        os.replace(staged, path)
-        return _read_install_id(path) or install_id
+            fd, staged = tempfile.mkstemp(prefix=".install-id-", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(install_id)
+                try:
+                    os.link(staged, path)
+                    return install_id
+                except FileExistsError:
+                    winner = _read_install_id(path)
+                    if winner:
+                        return winner
+                    # Present but empty or undecodable: repair under the lock.
+                except OSError:
+                    pass  # a filesystem without hard links
+                os.replace(staged, path)
+                return install_id
+            finally:
+                try:
+                    os.unlink(staged)
+                except OSError:
+                    pass  # already moved into place by os.replace
     except OSError:
         return install_id
-    finally:
-        try:
-            os.unlink(staged)
-        except OSError:
-            pass  # already moved into place by os.replace
 
 
 def _open_store(cfg: Any):
@@ -1777,11 +1806,19 @@ class ComputeManager:
         if env:
             return env
         path = Path(data_dir) / _INSTALL_ID_FILE
-        current = _read_install_id(path)
+        try:
+            current = _read_install_id(path)
+        except OSError:
+            # An unreadable id may still own remote work. Do not overwrite it
+            # merely because this process cannot inspect its contents.
+            return uuid.uuid4().hex
         if current:
             return current
         legacy = _legacy_install_id_path()
-        inherited = _read_install_id(legacy) if legacy != path else None
+        try:
+            inherited = _read_install_id(legacy) if legacy != path else None
+        except OSError:
+            inherited = None
         return _publish_install_id(path, inherited or uuid.uuid4().hex)
 
     # --- provider family routing -----------------------------------------

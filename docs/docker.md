@@ -224,7 +224,8 @@ One volume at `/data`. It holds `openai4s.db` (every session, the audit ledger,
 settings), `artifacts/` and `artifact-versions/`, `agent-workspaces/`,
 `workspace-cas/` (fork and revert cannot work without it), `compaction-history/`,
 `user-skills/`, `shares/`, `access-token`, and `install-id` (the owner tag on
-remote BYOC sandboxes; `reconcile` finds them by it).
+remote BYOC sandboxes; `reconcile` finds them by it). Its `.install-id.lock`
+sidecar coordinates concurrent startup and stays in the same volume.
 
 The image owns `/data` as uid 1000, so a **named volume** inherits that. A
 **bind mount** does not: `chown -R 1000:1000 ./your-dir` on the host first, or
@@ -505,7 +506,8 @@ secret-read 掩码与网络命名空间是一起消失的。那些掩码正是�
 `artifacts/` 与 `artifact-versions/`、`agent-workspaces/`、`workspace-cas/`
 （没有它 fork 与 revert 都无法工作）、`compaction-history/`、`user-skills/`、
 `shares/`、`access-token`，以及 `install-id`（远程 BYOC sandbox 的属主标签，
-`reconcile` 靠它找回 sandbox）。
+`reconcile` 靠它找回 sandbox）。用于协调并发启动的 `.install-id.lock` 文件也
+保留在同一个卷中。
 
 镜像里 `/data` 属于 uid 1000，所以**具名卷**会继承这个属主。**bind mount** 不会：
 先在宿主机上 `chown -R 1000:1000 ./your-dir`，否则 daemon 建不了自己的数据库。在
