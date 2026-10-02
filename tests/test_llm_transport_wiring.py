@@ -896,9 +896,12 @@ def test_zero_retries_does_not_spend_the_spare_send_on_a_retry(monkeypatch):
 
 
 @pytest.mark.parametrize("provider", ["chatgpt", "claude"])
-@pytest.mark.parametrize("prior_retry", [False, True])
+@pytest.mark.parametrize(
+    ("retries", "prior_retry"),
+    [(0, False), (1, False), (2, False), (5, False), (2, True), (5, True)],
+)
 def test_compatibility_limit_is_not_reported_as_exhausted_configured_retries(
-    monkeypatch, provider, prior_retry
+    monkeypatch, provider, retries, prior_retry
 ):
     import dataclasses
 
@@ -921,7 +924,7 @@ def test_compatibility_limit_is_not_reported_as_exhausted_configured_retries(
 
     monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _s: None)
-    cfg = dataclasses.replace(_cfg(provider), max_retries=5)
+    cfg = dataclasses.replace(_cfg(provider), max_retries=retries)
 
     with pytest.raises(TransportError) as raised:
         chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)

@@ -73,7 +73,7 @@ class TransportError(LLMError):
         #: Why the retry loop stopped *early*, as a local, closed value:
         #: ``"budget"`` (the next wait exceeded the retry budget) or
         #: ``"deadline"`` (it exceeded what was left of the total timeout), or
-        #: ``"request_limit"`` (this invocation's cap, with call retries left).
+        #: ``"request_limit"`` (this invocation's explicit attempt cap).
         self.retry_stop: str | None = None
 
     @property
