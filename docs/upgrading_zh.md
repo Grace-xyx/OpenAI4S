@@ -137,7 +137,6 @@ CLI 和子代理的后台 job 不入库，结果里是 `persistent: false`。Web
 ### 留给以后版本的已知限制
 
 - Windows 启动器在 `openai4s url` 的查询串为空时会提示这个地址没有登录令牌。团队模式的 `/login` 正是这种空查询。
-- `ComputeManager._resolve_install_id` 写的是 `~/.openai4s/install-id`，不跟随 `OPENAI4S_DATA_DIR`。`OPENAI4S_INSTALL_ID` 仍可覆盖这个文件。
 - 出口关卡按 Cell 生效。worker 启动期间运行的 `.pth` 和 `sitecustomize` 不受它约束，`start_kernel`、`set_env` 和 `restart_kernel` 也不投影 `egress_boundary_refused`。
 - 在 `OPENAI4S_KERNEL_SANDBOX=enforce` 下，R 没有一项自动化测试能把原始网络阻断，和未加沙箱的 Rscript 在连接被拒绝时打印的那句话区分开。
 

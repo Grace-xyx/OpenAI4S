@@ -324,9 +324,6 @@ and no call to `/auto-mode` or `/auto-audits`.
 - The Windows launcher warns that the URL carries no sign-in token when
   `openai4s url` has an empty query, which is what team mode's `/login`
   address looks like.
-- `ComputeManager._resolve_install_id` writes `~/.openai4s/install-id` and
-  does not follow `OPENAI4S_DATA_DIR`. `OPENAI4S_INSTALL_ID` still overrides
-  that file.
 - The egress gate applies per Cell. `.pth` files and `sitecustomize` that run
   while the worker starts sit outside it, and `start_kernel`, `set_env`, and
   `restart_kernel` do not project `egress_boundary_refused`.
