@@ -289,6 +289,12 @@ def test_the_session_reports_its_own_pin(api):
 
     call("POST", f"/frames/{frame}/model-binding", {"model_id": b})
     assert call("GET", f"/frames/{frame}")["body"]["model_profile_id"] == b
+    # Every single-frame answer carries it, a rename's included.
+    renamed = call("PATCH", f"/frames/{frame}", {"name": "renamed"})["body"]
+    assert (renamed["model_profile_id"], renamed["model_profile_revision"]) == (
+        b,
+        _pin(runner, frame)[1],
+    )
 
     project = (runner.store.get_frame(frame) or {}).get("project_id")
     rows = call("GET", f"/frames?project_id={project}")["body"]
