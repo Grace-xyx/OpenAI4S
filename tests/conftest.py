@@ -313,6 +313,9 @@ def real_data_dir_guard():
     finally:
         store_mod.Store.__init__ = original_init
         config_mod.Config.ensure_dirs = original_ensure_dirs
+        # Module/session finalizers run after the last function-scoped check.
+        # A swallowed refusal there must fail this worker too.
+        _fail_on_real_data_dir_violations()
 
 
 @pytest.fixture(autouse=True)
@@ -406,17 +409,26 @@ def isolated_openai4s_home(tmp_path, monkeypatch):
     _reset_confinement_self_test()
     _reset_preinstall_status()
     # Before reset_singletons and before monkeypatch undoes the redirect.
-    _quiesce_judgment_shadows()
-    reset_singletons()
+    try:
+        _quiesce_judgment_shadows()
+    finally:
+        reset_singletons()
     # Not drained at setup: higher-scoped fixtures this test instantiated ran
     # before this fixture did, and their refusals belong to this test.
+    _fail_on_real_data_dir_violations()
+
+
+def _fail_on_real_data_dir_violations() -> None:
     touched = _REAL_DATA_DIR_GUARD.drain()
     if touched:
         pytest.fail(
-            "something wrote under the developer's real data dir since the "
-            "previous test finished:\n\n" + "\n".join(touched),
+            "test code attempted to access the developer's real data dir:\n\n"
+            + "\n".join(touched),
             pytrace=False,
         )
+
+
+_SHADOW_DRAIN_TIMEOUT_S = 10.0
 
 
 def _quiesce_judgment_shadows() -> None:
@@ -430,22 +442,31 @@ def _quiesce_judgment_shadows() -> None:
     caught exactly that on CI, from `judgment/shadow.py`'s worker. Under the
     suite-wide floor such a job would land in scratch space instead, unseen,
     but it would still run under the next test's data dir; waiting the workers
-    out here keeps every job inside the test that submitted it. No reset:
-    `task_mode_shadow.reset_for_tests` zeroes its in-flight count, which would
-    turn the wait into a no-op; the shadow test modules reset themselves.
+    out here keeps every job inside the test that submitted it. Use Queue's
+    unfinished-task accounting: the shadow modules' own fixture finalizers
+    can reset their in-flight counters before this teardown, and a worker can
+    be descheduled between dequeue and incrementing its counter. Neither
+    makes its queue task complete. A timeout fails the test instead of
+    silently letting the work escape into another test's data directory.
     """
 
-    for name, timeout in (
-        ("openai4s.judgment.shadow", {"timeout_s": 10.0}),
-        ("openai4s.judgment.task_mode_shadow", {"timeout": 10.0}),
+    for name, queue_name in (
+        ("openai4s.judgment.shadow", "_queue"),
+        ("openai4s.judgment.task_mode_shadow", "_QUEUE"),
     ):
         module = sys.modules.get(name)
         if module is None:
             continue
-        try:
-            module.wait_idle(**timeout)
-        except Exception:  # noqa: BLE001 - a stuck job is the guard's to report
-            pass
+        work_queue = getattr(module, queue_name)
+        # Queue.join's predicate and condition, with a bounded wait. Both
+        # workers call task_done only after their job exits, even after reset.
+        with work_queue.all_tasks_done:
+            drained = work_queue.all_tasks_done.wait_for(
+                lambda: work_queue.unfinished_tasks == 0,
+                timeout=_SHADOW_DRAIN_TIMEOUT_S,
+            )
+        if not drained:
+            pytest.fail(f"{name} workers did not drain before data-dir teardown")
 
 
 def _reset_confinement_self_test() -> None:

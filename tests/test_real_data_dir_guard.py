@@ -11,8 +11,14 @@ able to prove itself against the real directory.
 
 from __future__ import annotations
 
+import importlib
+import os
+import subprocess
+import sys
+import threading
 from pathlib import Path
 
+import conftest
 import pytest
 
 from openai4s.store import Store, get_store
@@ -94,3 +100,109 @@ def test_stores_elsewhere_open_normally(
     sibling = stand_in_real_dir.with_name(".openai4s-other")
     Store(sibling / "openai4s.db").close()
     assert real_data_dir_guard.drain() == []
+
+
+@pytest.mark.parametrize("scope", ["module", "session"])
+@pytest.mark.parametrize("workers", [0, 2])
+def test_a_swallowed_refusal_in_the_last_fixture_teardown_fails_pytest(
+    tmp_path: Path, scope: str, workers: int
+) -> None:
+    probe = tmp_path / "test_late_refusal.py"
+    probe.write_text(
+        "import pytest\n"
+        "from openai4s.store import Store\n\n"
+        f"@pytest.fixture(scope={scope!r}, autouse=True)\n"
+        "def late(real_data_dir_guard, tmp_path_factory):\n"
+        "    root = tmp_path_factory.mktemp('fake-real') / 'data'\n"
+        "    real_data_dir_guard.roots = (root,)\n"
+        "    yield\n"
+        "    try:\n"
+        "        Store(root / 'openai4s.db')\n"
+        "    except RuntimeError:\n"
+        "        pass\n"
+        "    assert not root.exists()\n\n"
+        "def test_pass():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    # Load the real suite fixtures without collecting any other test module.
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parent)
+    # A nested run must not publish over the outer schema capture's shares.
+    env.pop("OPENAI4S_CAPTURE_SCHEMAS", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "conftest",
+            "-q",
+            "-n",
+            str(workers),
+            str(probe),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "real data dir" in output
+    assert "1 passed, 1 error" in output
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize(
+    ("name", "reset"),
+    [("shadow", False), ("task_mode_shadow", False), ("task_mode_shadow", True)],
+)
+def test_unfinished_shadow_work_cannot_silently_outlive_isolation(
+    monkeypatch, name: str, reset: bool
+) -> None:
+    shadow = importlib.import_module(f"openai4s.judgment.{name}")
+    shadow.reset_for_tests()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked_job(*_args):
+        started.set()
+        release.wait(30)
+        finished.set()
+
+    monkeypatch.setattr(conftest, "_SHADOW_DRAIN_TIMEOUT_S", 0.02, raising=False)
+    if name == "shadow":
+        monkeypatch.setattr(shadow, "_run_job", blocked_job)
+        monkeypatch.setenv("OPENAI4S_EXPERIMENTAL_JUDGMENT", "1")
+        monkeypatch.setenv("OPENAI4S_JUDGMENT_SAFETY_SHADOW", "1")
+        work_queue = shadow._queue
+        shadow.submit("code", state={}, existing_verdict="SAFE")
+    else:
+        monkeypatch.setattr(shadow, "_process", blocked_job)
+        shadow.bind(enabled=True)
+        work_queue = shadow._QUEUE
+        shadow.submit(
+            request="synthetic probe", rule_mode="analysis_run", explicit=False
+        )
+    try:
+        assert started.wait(5), "shadow worker never started the probe"
+        if reset:
+            # Module-local fixture teardown zeroes this counter before the
+            # suite's isolation fixture runs; the actual job is still alive.
+            shadow.reset_for_tests()
+            assert shadow.stats()["in_flight"] == 0
+        assert not finished.is_set()
+        with pytest.raises(pytest.fail.Exception, match=f"{name}.*did not drain"):
+            conftest._quiesce_judgment_shadows()
+    finally:
+        release.set()
+        with work_queue.all_tasks_done:
+            assert work_queue.all_tasks_done.wait_for(
+                lambda: work_queue.unfinished_tasks == 0, timeout=5
+            )
+        shadow.reset_for_tests()
+    assert finished.is_set()
+    conftest._quiesce_judgment_shadows()
