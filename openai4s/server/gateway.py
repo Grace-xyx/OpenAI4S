@@ -2748,7 +2748,7 @@ class SessionRunner:
                     root_frame_id, project_id
                 ),
                 emitter_for=lambda root_frame_id: self.hub.emitter(root_frame_id),
-                llm_config_for=lambda state: self._llm_cfg(state),
+                llm_config_for=lambda state: self._llm_cfg(state, apply_user_key=False),
                 review_evidence=lambda evidence, config, root_frame_id: (
                     self.enforce_llm_quota(root_frame_id),
                     review_evidence(evidence, config),
@@ -9001,7 +9001,9 @@ class SessionRunner:
             pass
         return self.cfg.llm.api_key or ""
 
-    def _llm_cfg(self, st: "SessionState | None" = None):
+    def _llm_cfg(
+        self, st: "SessionState | None" = None, *, apply_user_key: bool = True
+    ):
         """Effective LLM config = base cfg + runtime overrides (Customize→Models)
         + the session's chosen model. Makes the model selector real.
 
@@ -9028,27 +9030,24 @@ class SessionRunner:
         # session pinned to A and continued after B was activated ran on B and
         # said it ran on A. That is the whole thing D2 exists to prevent, and it
         # was recorded rather than enforced.
-        pinned = self._pinned_llm_config(st)
-        if pinned is not None:
-            return self._apply_user_llm_key(pinned, st)
-        return self._apply_user_llm_key(
-            resolve_llm_config(
+        config = self._pinned_llm_config(st)
+        if config is None:
+            config = resolve_llm_config(
                 self.cfg.llm,
                 self.store,
                 model_override=(st.model if (st is not None and st.model) else None),
-            ),
-            st,
-        )
+            )
+        # The Reviewer first resolves its own destination, then applies this
+        # same member-key rule. An agent-only key must not refuse that review.
+        return self._apply_user_llm_key(config, st) if apply_user_key else config
 
     def _apply_user_llm_key(self, cfg, st: "SessionState | None"):
         """Swap in the session owner's own credential, if they have one (M4-1).
 
-        Applied here rather than at each call site because this method is the
-        single place a Web turn's LLM configuration is decided — the turn
-        loop, the reviewer and every other provider request downstream all
-        read what it returns. A per-call-site override is how one of them
-        ends up billing the group for a user who thought they were paying
-        their own way.
+        Shared by `_llm_cfg` and `_review_llm_cfg`, after each has resolved
+        its destination. Both use the same scope and unreadable-key rules;
+        selecting another Reviewer profile must not silently bill the group
+        for a user who chose their own credential for that provider.
 
         The override is per *provider*: a user with their own Anthropic
         account and no OpenAI key runs on their key for one and the group's
@@ -9356,7 +9355,7 @@ class SessionRunner:
         return self.reviews.auto_enabled(root_frame_id)
 
     def _review_llm_cfg(self, st: SessionState):
-        return self.reviews.llm_config(st)
+        return self._apply_user_llm_key(self.reviews.llm_config(st), st)
 
     def _branch_head_checkpoint(self, st: SessionState) -> str | None:
         """The restorable checkpoint auto-repair must roll back to, if any.

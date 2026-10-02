@@ -8,7 +8,7 @@ and had checked a keyless local server before any inherited key. So a member's
 OpenAI key went to whatever `base_url` the session was pinned to: plain http to
 a LAN Ollama, or an admin's third-party proxy.
 
-The rule (`ModelProfileService.user_key_applies`, asked by `_llm_cfg` only): a
+The rule (`ModelProfileService.user_key_applies`, shared by agent and Reviewer): a
 member's key goes to the endpoint the provider registry names for that provider,
 over https, and never to a local host. Anywhere else the configuration's own
 credential goes, exactly as for a member with no key of their own.
@@ -271,6 +271,9 @@ def test_a_custom_provider_at_its_registered_https_endpoint_gets_the_key(
         ("lab-private", "https://10.20.30.40:8443/v1"),
         # not local by the rule, its own endpoint -- withheld only for plain http
         ("lab-cleartext", "http://llm.lab.example:8000/v1"),
+        ("lab-ipv6-loopback", "https://[::1]:8443/v1"),
+        ("lab-ipv6-private", "https://[fd00::7]:8443/v1"),
+        ("lab-ipv6-link-local", "https://[fe80::7]:8443/v1"),
     ],
 )
 def test_a_custom_provider_at_a_local_or_cleartext_endpoint_does_not(
@@ -315,6 +318,7 @@ def test_an_unreadable_key_refuses_only_where_it_would_have_been_sent(daemon):
 # -- the request itself --------------------------------------------------------
 
 
+@pytest.mark.stubbed_backend
 def test_the_request_to_a_lan_server_carries_no_members_key(daemon, monkeypatch):
     """The config object is a proxy for what goes on the wire; this is the wire.
     `_post_json` is the facade's transport seam, so nothing leaves the process."""
@@ -342,12 +346,25 @@ def test_the_request_to_a_lan_server_carries_no_members_key(daemon, monkeypatch)
     for session in (hosted, local):
         llm.chat([{"role": "user", "content": "hi"}], _cfg_for(daemon, session))
 
-    (hosted_url, hosted_headers), (lan_url, lan_headers) = sent
+    for model in ("__agent__", "gpt-5"):
+        daemon.store.set_setting(f"review:model:{local}", model)
+        llm.chat(
+            [{"role": "user", "content": "review"}],
+            daemon.runner._review_llm_cfg(_State(local)),
+        )
+
+    (hosted_url, hosted_headers), (lan_url, lan_headers), local_review, cloud_review = (
+        sent
+    )
     assert hosted_url.startswith(OPENAI)
     assert hosted_headers.get("Authorization") == f"Bearer {MEMBER_KEY}"
     assert lan_url.startswith(LAN)
     assert not any(MEMBER_KEY in str(value) for value in lan_headers.values())
     assert "Authorization" not in lan_headers
+    assert local_review[0].startswith(LAN)
+    assert "Authorization" not in local_review[1]
+    assert cloud_review[0].startswith(OPENAI)
+    assert cloud_review[1].get("Authorization") == f"Bearer {MEMBER_KEY}"
 
 
 # -- the Reviewer derives its own configuration from `_llm_cfg`'s --------------
@@ -387,3 +404,88 @@ def test_nor_does_it_carry_the_groups_key_there(daemon):
 
     daemon.store.set_setting(f"review:model:{session}", "llama3.1")
     assert daemon.runner._review_llm_cfg(_State(session)).api_key == ""
+
+
+@pytest.mark.parametrize("model", ["__agent__", "local-review"])
+def test_keyless_reviewer_does_not_reload_an_environment_key(
+    daemon, monkeypatch, model
+):
+    monkeypatch.setenv("OPENAI4S_CHATGPT_API_KEY", "synthetic-cloud-environment")
+    session = _session(daemon, "bob")
+    _pin(daemon, session, _profile(daemon, base_url=LAN, model="local-agent"))
+    _profile(daemon, base_url=LAN, model="local-review")
+    assert _cfg_for(daemon, session).api_key == ""
+    daemon.store.set_setting(f"review:model:{session}", model)
+    reviewer = daemon.runner._review_llm_cfg(_State(session))
+    assert reviewer.base_url == LAN
+    assert reviewer.api_key == ""
+
+
+@pytest.mark.parametrize("environment_endpoint", [None, "https://gateway.example/v1"])
+def test_reviewer_empty_profile_endpoint_resolves_its_own_destination(
+    daemon, monkeypatch, environment_endpoint
+):
+    if environment_endpoint:
+        monkeypatch.setenv("OPENAI4S_CHATGPT_BASE_URL", environment_endpoint)
+    session = _session(daemon, "bob")
+    _pin(daemon, session, _profile(daemon, base_url=LAN, model="local-agent"))
+    _profile(daemon, base_url="", model="cloud-review", api_key="synthetic-review-key")
+    daemon.store.set_setting(f"review:model:{session}", "cloud-review")
+    reviewer = daemon.runner._review_llm_cfg(_State(session))
+    assert reviewer.base_url == (environment_endpoint or OPENAI)
+    assert reviewer.api_key == "synthetic-review-key"
+
+
+@pytest.mark.parametrize("agent_endpoint", [OPENAI, LAN])
+def test_reviewer_uses_member_key_at_its_final_endpoint(daemon, agent_endpoint):
+    _use(daemon, provider="chatgpt")
+    _own_key(daemon, "alice", "chatgpt")
+    session = _session(daemon, "alice")
+    _pin(daemon, session, _profile(daemon, base_url=agent_endpoint, model="agent"))
+    _profile(
+        daemon, base_url=OPENAI, model="cloud-review", api_key="synthetic-group-review"
+    )
+    daemon.store.set_setting(f"review:model:{session}", "cloud-review")
+    reviewer = daemon.runner._review_llm_cfg(_State(session))
+    assert reviewer.base_url == OPENAI
+    assert reviewer.api_key == MEMBER_KEY
+
+
+def test_unreadable_member_key_is_judged_for_the_reviewer_destination(daemon):
+    _use(daemon, provider="chatgpt")
+    user_id = daemon.store.team.get_user_by_username("alice")["id"]
+    daemon.store.user_keys.set_ref(user_id, "chatgpt", "secret:v2:gone/llm-user/x")
+    session = _session(daemon, "alice")
+    _profile(daemon, base_url=LAN, model="local-review")
+    daemon.store.set_setting(f"review:model:{session}", "local-review")
+    reviewer = daemon.runner._review_llm_cfg(_State(session))
+    assert reviewer.base_url == LAN and reviewer.api_key == ""
+    daemon.store.set_setting(f"review:model:{session}", "__agent__")
+    with pytest.raises(GatewayError) as caught:
+        daemon.runner._review_llm_cfg(_State(session))
+    assert caught.value.error_code == "user_key_unreadable"
+
+
+@pytest.mark.parametrize("with_profile", [False, True])
+def test_reviewer_provider_switch_does_not_inherit_generic_key(
+    daemon, monkeypatch, with_profile
+):
+    _use(daemon, provider="chatgpt")
+    monkeypatch.setenv("OPENAI4S_LLM_API_KEY", "synthetic-openai-only")
+    for name in ("OPENAI4S_CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    model = llm.PROVIDERS["claude"]["model"]
+    if with_profile:
+        _service(daemon).create(
+            {"name": "reviewer", "provider": "claude", "model": model}
+        )
+    session = _session(daemon, "bob")
+    daemon.store.set_setting(f"review:model:{session}", model)
+    reviewer = daemon.runner._review_llm_cfg(_State(session))
+    assert reviewer.provider == "claude"
+    assert reviewer.api_key == ""
+    monkeypatch.setenv("OPENAI4S_CLAUDE_API_KEY", "synthetic-claude-only")
+    assert (
+        daemon.runner._review_llm_cfg(_State(session)).api_key
+        == "synthetic-claude-only"
+    )

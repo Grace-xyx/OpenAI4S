@@ -391,9 +391,8 @@ class ModelProfileService:
 
         `configuration` is the `LLMConfig` a turn is about to be dispatched
         under, read for `provider`, `base_url` and `model`. `SessionRunner.
-        _apply_user_llm_key` asks this once per resolved configuration and is
-        the only caller; that keeps `_llm_cfg` the one place a turn's
-        credential is decided.
+        _apply_user_llm_key` asks this once per resolved agent or Reviewer
+        configuration and is the only caller.
 
         A per-user key is stored against a provider *name* and nothing else, so
         the one endpoint it can be said to have been entered for is the one

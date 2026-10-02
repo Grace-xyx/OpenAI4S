@@ -239,30 +239,34 @@ class ReviewService:
                     "",
                 )
             overrides["model"] = model
-            if provider and provider != config.provider:
+            if provider:
                 overrides["provider"] = provider
+            if profile is not None or (provider and provider != config.provider):
+                # Empty means this profile's provider/environment default,
+                # never the agent's possibly unrelated proxy or LAN endpoint.
                 overrides["base_url"] = str(
                     (profile or {}).get("base_url") or ""
                 ).strip()
-                overrides["api_key"] = self.ports.resolve_profile_key(profile or {})
-            elif profile and profile.get("base_url"):
-                overrides["base_url"] = str(profile["base_url"]).strip()
-            if profile and self.ports.resolve_profile_key(profile):
-                overrides["api_key"] = self.ports.resolve_profile_key(profile)
         try:
             reviewer = dataclasses.replace(config, **overrides)
         except Exception:  # noqa: BLE001 - preserve the agent config fallback
             return config
-        if profile and _destination(reviewer) != _destination(config):
-            # `config.api_key` is what the gateway chose for the AGENT's
-            # endpoint -- the active profile's key, or the session owner's own
-            # (M4-1) when that endpoint is their provider's. A same-provider
-            # profile with no key of its own used to inherit it on the way to
-            # that profile's endpoint: a member's cloud key over plain http to
-            # a LAN server, one session setting away. The profile's endpoint
-            # gets the profile's credential, assigned after `replace` so
-            # `LLMConfig.__post_init__` cannot refill it from the environment.
-            reviewer.api_key = self._profile_api_key(profile)
+        # Always assign after replace: __post_init__ refills an intentionally
+        # empty key from the environment even when the destination stayed put.
+        if _destination(reviewer) != _destination(config) or (
+            profile and profile.get("api_key")
+        ):
+            reviewer.api_key = self._profile_api_key(
+                profile
+                if profile is not None
+                else {
+                    "provider": reviewer.provider,
+                    "base_url": reviewer.base_url,
+                    "model": reviewer.model,
+                }
+            )
+        else:
+            reviewer.api_key = config.api_key
         return reviewer
 
     def _profile_api_key(self, profile: Mapping[str, Any]) -> str:

@@ -348,8 +348,12 @@ is withheld here is not read at all, so a broken one refuses only the turns it
 would actually have been sent on.
 
 A session's **Reviewer** follows the same rule. Its model is a per-session
-setting, and moving it to a profile at another endpoint used to keep the key
-chosen for the agent's; it now takes that profile's own credential.
+setting. A selected profile resolves its own endpoint, including its
+provider/environment default when the URL is empty. A move uses that profile's
+credential; keeping a keyless local endpoint does not reload a cloud key from
+the environment. The member's key is selected only after this destination is
+known, with the same scope and unreadable-key rules as the agent. Local IPv6
+addresses are withheld just like local IPv4 addresses.
 
 ## 5. Reaching it from outside the lab
 
