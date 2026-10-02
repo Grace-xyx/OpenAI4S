@@ -2557,7 +2557,31 @@ try {
       `body overflows horizontally at 375x812 (drawer open): body=${overflowOpen.body} root=${overflowOpen.root}`,
     );
   }
-  await page.locator("#mobile-scrim:not(.hidden)").click();
+  // Tap the scrim where a user can reach it: the strip right of the drawer.
+  // The open drawer (z-index 71, min(300px,86vw) wide) covers the scrim's
+  // center at 375px, so a default center click only landed while the .22s
+  // slide-in was still under way, and timed out whenever the drawer settled
+  // first -- a runner that got there sooner, or prefers-reduced-motion, which
+  // zeroes the transition. Waiting for the drawer to settle measures its final
+  // edge; a drawer that covers the whole scrim leaves nothing to tap, which
+  // fails here instead of in a 30s actionability retry.
+  const drawer = page.locator("#sidebar");
+  let drawerBox = null;
+  await waitUntil("mobile drawer settled open", async () => {
+    const previous = drawerBox;
+    drawerBox = await drawer.boundingBox();
+    return !!drawerBox && !!previous && Math.abs(drawerBox.x) < 0.5 && drawerBox.x === previous.x;
+  });
+  const scrim = page.locator("#mobile-scrim:not(.hidden)");
+  const scrimBox = await scrim.boundingBox();
+  const drawerRight = drawerBox.x + drawerBox.width;
+  const scrimRight = scrimBox ? scrimBox.x + scrimBox.width : 0;
+  if (!scrimBox || scrimRight - drawerRight < 16) {
+    throw new Error(
+      `the open drawer leaves no scrim to tap at 375x812: drawer=${JSON.stringify(drawerBox)} scrim=${JSON.stringify(scrimBox)}`,
+    );
+  }
+  await scrim.click({ position: { x: (drawerRight + scrimRight) / 2 - scrimBox.x, y: scrimBox.height / 2 } });
   await page.locator("body.sidebar-collapsed").waitFor({ state: "attached" });
   await page.locator("#sidebar-reopen").waitFor({ state: "visible" });
 

@@ -278,7 +278,9 @@ def test_auto_setting_precedence_and_late_model_provider_resolution():
     assert remote_config.provider == "gemini"
     assert remote_config.model == "remote-reviewer"
     assert remote_config.base_url == LLMConfig(provider="gemini").base_url
-    assert remote_config.api_key == LLMConfig(provider="gemini").api_key
+    # No profile or credential port was supplied: the original provider's
+    # generic environment key must not be forwarded to Gemini.
+    assert remote_config.api_key == ""
 
     store.profiles = [
         {
