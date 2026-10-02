@@ -9916,6 +9916,18 @@
                     "string"
                   ]
                 },
+                "model_profile_id": {
+                  "type": [
+                    "null",
+                    "string"
+                  ]
+                },
+                "model_profile_revision": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "name": {
                   "type": [
                     "null",
@@ -9962,6 +9974,8 @@
                 "kernel_alive",
                 "message_count",
                 "model",
+                "model_profile_id",
+                "model_profile_revision",
                 "name",
                 "output_tokens",
                 "parent_frame_id",
@@ -23079,6 +23093,18 @@
           "model": {
             "type": "string"
           },
+          "model_profile_id": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "model_profile_revision": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -23098,7 +23124,10 @@
             "type": "string"
           },
           "task_summary": {
-            "type": "string"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "updated_at": {
             "type": "string"
