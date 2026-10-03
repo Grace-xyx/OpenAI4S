@@ -821,3 +821,146 @@ def test_sse_error_then_http_stream_refusal_uses_remaining_compatibility_send(
         )
     assert sends == [True, True, False]
     assert raised.value.request_id == "final-json"
+
+
+@pytest.mark.parametrize("retries", [0, 5])
+def test_chat_sends_exactly_the_configured_attempts(monkeypatch, retries):
+    """host.llm, titles, the reviewer and the profile probe reach the
+    transport through ``chat()``'s own CallState, not the Agent runtime's."""
+    import dataclasses
+
+    sends = []
+
+    def urlopen(req, **kwargs):
+        sends.append(True)
+        raise _http_error(429)
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    cfg = dataclasses.replace(_cfg(), max_retries=retries, retry_budget_s=600)
+
+    with pytest.raises(TransportError) as raised:
+        chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _piece: None)
+
+    assert len(sends) == retries + 1
+    assert raised.value.status == 429
+
+
+def test_zero_retries_still_lets_a_refused_stream_fall_back_once(monkeypatch):
+    """``OPENAI4S_LLM_MAX_RETRIES=0`` means "do not retry", not "fail every
+    turn behind a proxy that refuses ``stream``": the compatibility POST is a
+    fallback, and a send ceiling of one used to leave it no room."""
+    import dataclasses
+
+    sends = []
+
+    def urlopen(req, **kwargs):
+        stream = bool(json.loads(req.data).get("stream"))
+        sends.append(stream)
+        if stream:
+            raise _http_error(
+                400,
+                body=b'{"error":{"code":"streaming_not_supported","param":"stream"}}',
+            )
+        return _Resp(
+            b'{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}'
+        )
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    cfg = dataclasses.replace(_cfg(), max_retries=0)
+
+    reply = chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)
+
+    assert reply["content"] == "ok"
+    assert sends == [True, False]
+
+
+def test_zero_retries_does_not_spend_the_spare_send_on_a_retry(monkeypatch):
+    import dataclasses
+
+    sends = []
+
+    def urlopen(req, **kwargs):
+        sends.append(True)
+        raise _http_error(429)
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    cfg = dataclasses.replace(_cfg(), max_retries=0)
+
+    with pytest.raises(TransportError) as raised:
+        chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)
+
+    assert len(sends) == 1
+    assert raised.value.retries_attempted == 0
+
+
+@pytest.mark.parametrize("provider", ["chatgpt", "claude"])
+@pytest.mark.parametrize(
+    ("retries", "prior_retry"),
+    [(0, False), (1, False), (2, False), (5, False), (2, True), (5, True)],
+)
+def test_compatibility_limit_is_not_reported_as_exhausted_configured_retries(
+    monkeypatch, provider, retries, prior_retry
+):
+    import dataclasses
+
+    from openai4s.llm.models import llm_retry_outcome
+    from openai4s.server.gateway import SessionRunner
+
+    sends = []
+
+    def urlopen(req, **kwargs):
+        stream = bool(json.loads(req.data).get("stream"))
+        sends.append(stream)
+        if prior_retry and len(sends) == 1:
+            raise _http_error(503)
+        if stream:
+            raise _http_error(
+                400,
+                body=b'{"error":{"code":"streaming_not_supported","param":"stream"}}',
+            )
+        raise _http_error(429)
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    cfg = dataclasses.replace(_cfg(provider), max_retries=retries)
+
+    with pytest.raises(TransportError) as raised:
+        chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)
+
+    assert sends == ([True, True, False] if prior_retry else [True, False])
+    assert raised.value.retries_attempted == int(prior_retry)
+    assert llm_retry_outcome(raised.value) == "request_limit"
+    for language in ("zh", "en"):
+        message = SessionRunner._friendly_error(raised.value, language=language)
+        assert "OPENAI4S_LLM_MAX_RETRIES" not in message
+        assert ("单次请求" if language == "zh" else "per-request") in message
+
+
+def test_a_streaming_chat_honours_the_configured_per_wait_cap(monkeypatch):
+    """``chat(on_delta=...)`` goes through ``post_sse``; a cap left at the old
+    8 s literal there would clip a configured 60 s cap on the path the
+    workbench actually uses."""
+    import dataclasses
+
+    ranges = []
+
+    def urlopen(req, **kwargs):
+        raise _http_error(429)
+
+    def jitter(low, high):
+        ranges.append((low, high))
+        return low
+
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport.random.uniform", jitter)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    cfg = dataclasses.replace(
+        _cfg(), max_retries=3, retry_budget_s=600, retry_max_delay_s=60
+    )
+
+    with pytest.raises(TransportError):
+        chat([{"role": "user", "content": "hi"}], cfg, on_delta=lambda _p: None)
+
+    assert ranges == [(2.0, 4.0), (4.0, 8.0), (8.0, 16.0)]
