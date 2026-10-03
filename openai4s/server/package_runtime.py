@@ -283,6 +283,11 @@ def llm_facts(
         "total_timeout_s": _number(getattr(llm_cfg, "total_timeout_s", None)),
         "max_tokens": _number(getattr(llm_cfg, "max_tokens", None)),
         "temperature": _number(getattr(llm_cfg, "temperature", None)),
+        # The retry policy decides whether a rate limit ends the turn, so a
+        # diagnosis of one has to be able to say which policy was in force.
+        "max_retries": _number(getattr(llm_cfg, "max_retries", None)),
+        "retry_budget_s": _number(getattr(llm_cfg, "retry_budget_s", None)),
+        "retry_max_delay_s": _number(getattr(llm_cfg, "retry_max_delay_s", None)),
     }
     try:
         spec = provider_spec(provider)

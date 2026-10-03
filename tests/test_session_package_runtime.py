@@ -909,6 +909,48 @@ def test_an_unregistered_provider_keeps_what_the_configuration_says():
     assert "endpoint" not in facts and "capabilities" not in facts
 
 
+def test_the_retry_policy_is_recorded_and_named_on_the_diagnosis_page():
+    """Whether a rate limit ends a turn depends on the retry policy; a
+    diagnosis that cannot say which policy was in force cannot explain it."""
+    facts = package_runtime.llm_facts(
+        LLMConfig(
+            provider="ark",
+            api_key="k" * 20,
+            max_retries=6,
+            retry_budget_s=180,
+            retry_max_delay_s=60,
+        )
+    )
+    assert (facts["max_retries"], facts["retry_budget_s"]) == (6, 180.0)
+    assert facts["retry_max_delay_s"] == 60.0
+
+    page = package_diagnosis.render_markdown(
+        package_diagnosis.diagnose({"runtime/environment.json": {"llm": facts}})
+    )
+    assert "up to 6 retries (retry budget 180.0 s, per-wait cap 60.0 s)" in page
+
+    # An export from before the policy existed renders exactly as it did.
+    older = {key: value for key, value in facts.items() if "retr" not in key}
+    page = package_diagnosis.render_markdown(
+        package_diagnosis.diagnose({"runtime/environment.json": {"llm": older}})
+    )
+    model_line = next(line for line in page.splitlines() if "- Model:" in line)
+    assert "retr" not in model_line
+
+    # The provider this process cannot resolve is the diagnosis that most
+    # needs the policy; and one retry is singular.
+    unresolved = package_runtime.llm_facts(
+        LLMConfig(provider="not-registered", model="m", api_key="k" * 20, max_retries=1)
+    )
+    assert unresolved["resolution"]["status"] == "unavailable"
+    page = package_diagnosis.render_markdown(
+        package_diagnosis.diagnose({"runtime/environment.json": {"llm": unresolved}})
+    )
+    model_line = next(line for line in page.splitlines() if "- Model:" in line)
+    assert "could not resolve" in model_line
+    assert "up to 1 retry (retry budget 30.0 s, per-wait cap 8.0 s)" in model_line
+
+
 def test_an_unresolvable_model_is_recorded_instead_of_failing():
     def pinned_to_a_deleted_profile():
         raise GatewayError(409, "rebind it", "model_revision_unavailable")

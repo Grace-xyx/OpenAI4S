@@ -788,6 +788,19 @@ def _model_call_summary(documents: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 # -------------------------------------------------------------------- findings
+def _retry_policy_text(llm: Mapping[str, Any]) -> str:
+    """``, up to N retries (...)`` -- empty for an export that predates it."""
+
+    retries = _int(llm.get("max_retries"))
+    if retries is None:
+        return ""
+    return (
+        f", up to {retries} retr{'y' if retries == 1 else 'ies'} (retry budget "
+        f"{_clean(llm.get('retry_budget_s', '?'))} s, per-wait cap "
+        f"{_clean(llm.get('retry_max_delay_s', '?'))} s)"
+    )
+
+
 def _seconds(ms: Any) -> str:
     value = _int(ms)
     if value is None:
@@ -1244,7 +1257,7 @@ def _environment_lines(environment: Mapping[str, Any]) -> list[str]:
             f"`{_clean(llm.get('provider') or '?')}`, which this process could not resolve "
             f"({_clean(_dict(llm.get('resolution')).get('reason') or 'unknown')}); read "
             f"timeout {_clean(llm.get('timeout_s', '?'))} s, total "
-            f"{_clean(llm.get('total_timeout_s', '?'))} s"
+            f"{_clean(llm.get('total_timeout_s', '?'))} s{_retry_policy_text(llm)}"
         )
     else:
         endpoint = _dict(llm.get("endpoint"))
@@ -1257,7 +1270,8 @@ def _environment_lines(environment: Mapping[str, Any]) -> list[str]:
             f"- Model: `{_clean(llm.get('model') or '?')}` via provider `{_clean(llm.get('provider') or '?')}` "
             f"(wire {_clean(llm.get('wire') or '?')}), streaming "
             f"{'on' if llm.get('stream') else 'off'}, read timeout "
-            f"{_clean(llm.get('timeout_s', '?'))} s, total {_clean(llm.get('total_timeout_s', '?'))} s, "
+            f"{_clean(llm.get('timeout_s', '?'))} s, total {_clean(llm.get('total_timeout_s', '?'))} s"
+            f"{_retry_policy_text(llm)}, "
             f"max output {_clean(llm.get('max_tokens', '?'))} tokens; endpoint: {endpoint_text}"
         )
         capabilities = _dict(llm.get("capabilities"))

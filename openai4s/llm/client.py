@@ -125,9 +125,7 @@ def chat(
         state = (
             call_state
             or getattr(should_cancel, "call_state", None)
-            or CallState(
-                should_cancel=should_cancel, total_timeout_s=cfg.total_timeout_s
-            )
+            or CallState.from_config(cfg, should_cancel=should_cancel)
         )
         context = dict(
             provider=cfg.provider, should_cancel=state.should_cancel, call_state=state
