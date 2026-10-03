@@ -5,8 +5,13 @@ import { copyFailedText } from "../chrome/clipboard";
 import * as transcript from "../sessions/transcript";
 import { renderStored as renderOlderPage } from "../sessions/transcript";
 import * as messageComponents from "./components";
-import { currentId, _openGen, historyLoad } from "../../stores/session";
+import { currentId, _openGen, historyContent, historyLoad, msgCursor, msgHasEarlier } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
+import { branchState } from "../../stores/timeline";
+import { loadEarlierMessages } from "../sessions/messages";
+import { historyT } from "./copy";
+import { FORK_NO_CHECKPOINT_MESSAGE } from "../execution/conflict";
+import { hint } from "../sessions/chrome";
 
 vi.mock("preact/hooks", async (original) => ({
   ...await original<typeof import("preact/hooks")>(),
@@ -22,6 +27,7 @@ import {
   renderMessageRefChips,
   renderStored as renderFirstPage,
   scheduleFramedRender,
+  type HistoryItem,
 } from "./list";
 
 afterEach(() => {
@@ -191,6 +197,8 @@ class RowEl {
   style: Record<string, string> = {};
   attrs: Record<string, string> = {};
   onclick: (() => unknown) | null = null;
+  hidden = false;
+  disabled = false;
   scrollHeight = 64;
   focused = 0;
   private text = "";
@@ -234,6 +242,9 @@ class RowEl {
   }
   getAttribute(name: string): string | null {
     return this.attrs[name] ?? null;
+  }
+  removeAttribute(name: string): void {
+    delete this.attrs[name];
   }
   appendChild<T extends RowEl>(child: T): T {
     child.parentNode?.removeChild(child);
@@ -279,10 +290,17 @@ class RowEl {
 function rowMatches(node: RowEl, sel: string): boolean {
   if (sel.startsWith("#")) return node.id === sel.slice(1);
   if (sel.startsWith(".")) return sel.slice(1).split(".").every((c) => node.classList.contains(c));
+  const attr = /^\[([^\]=~|^$*]+)(?:([~|^$*]?=)"([^"]*)")?\]$/.exec(sel);
+  if (attr) {
+    const have = node.getAttribute(attr[1]!);
+    if (have == null) return false;
+    return attr[3] === undefined || have === attr[3];
+  }
   return node.tagName === sel.toUpperCase();
 }
 
 class RowDoc {
+  documentElement = new RowEl("html");
   body = new RowEl("body");
   messages = new RowEl("div");
   composer = new RowEl("textarea");
@@ -297,6 +315,9 @@ class RowDoc {
   }
   createElement(tag: string): RowEl {
     return new RowEl(tag);
+  }
+  createDocumentFragment(): RowEl {
+    return new RowEl("#fragment");
   }
   createTextNode(text: string): RowEl {
     const node = new RowEl("#text");
@@ -434,6 +455,408 @@ describe("stored rows, first page and older page alike", () => {
     expect(chips).toHaveLength(1);
     expect(chips[0]!.textContent).toContain("growth.csv");
     expect(chips[0]!.title).toBe("v-1 · sha256:abcdef012345");
+  });
+
+  function forkButton(row: RowEl | null): RowEl | null {
+    return row?.querySelector("[data-fork-message-id]") ?? null;
+  }
+
+  function forkRoot(): string {
+    return doc.documentElement.dataset.forkFromMessage || "";
+  }
+
+  function underForkRow(button: RowEl | null): boolean {
+    let node = button?.parentNode ?? null;
+    while (node) {
+      if (node.classList.contains("msg-fork")) return true;
+      node = node.parentNode;
+    }
+    return false;
+  }
+
+  /** Shown only when the root flag is on and the control sits under `.msg-fork`. */
+  function forkShown(button: RowEl | null): boolean {
+    return forkRoot() === "on" && underForkRow(button);
+  }
+
+  const forkable = {
+    role: "user",
+    content: "Why does the control stay dark?",
+    message_id: "msg-exact",
+    fork_checkpoint_id: "ckpt-exact",
+  };
+
+  it.each(ROW_RENDERERS)("%s: a checkpointed user message shows a fork control for that message", (_name, render) => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    const row = render(forkable) as unknown as RowEl;
+    const button = forkButton(row);
+    expect(button).not.toBeNull();
+    expect(forkShown(button)).toBe(true);
+    expect(button!.hidden).toBe(false);
+    expect(button!.getAttribute("data-fork-message-id")).toBe("msg-exact");
+    expect(button!.textContent).toBe(historyT("history.forkMessage.label"));
+    expect(button!.getAttribute("aria-label")).toBeNull();
+    expect(row.querySelectorAll("[data-fork-message-id]")).toHaveLength(1);
+  });
+
+  it.each(ROW_RENDERERS)("%s: the fork control stays hidden while fork_from_message is false or missing", (_name, render) => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    branchState.value = null;
+    const missing = render(forkable) as unknown as RowEl;
+    const missingButton = forkButton(missing)!;
+    expect(forkRoot()).toBe("off");
+    expect(underForkRow(missingButton)).toBe(true);
+    expect(forkShown(missingButton)).toBe(false);
+    expect(missingButton.hidden).toBe(false);
+
+    branchState.value = {
+      capabilities: { fork_from_message: false },
+      capability_reasons: { fork_from_message: "workspace revert recovery must complete" },
+    };
+    const refused = render(forkable) as unknown as RowEl;
+    const button = forkButton(refused)!;
+    expect(forkRoot()).toBe("off");
+    expect(underForkRow(button)).toBe(true);
+    expect(forkShown(button)).toBe(false);
+    expect(button.disabled).toBeFalsy();
+  });
+
+  it.each(ROW_RENDERERS)("%s: a fork control painted before branch state appears when the capability turns on", (_name, render) => {
+    branchState.value = { capabilities: { fork_from_message: false } };
+    const row = render(forkable) as unknown as RowEl;
+    const button = forkButton(row)!;
+    expect(forkShown(button)).toBe(false);
+    expect(forkRoot()).toBe("off");
+    branchState.value = { capabilities: { fork_from_message: true } };
+    expect(forkShown(button)).toBe(true);
+    expect(button.getAttribute("data-fork-message-id")).toBe("msg-exact");
+  });
+
+  it("hides when the capability goes from true to false, and stays hidden when the projection is cleared", () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    const row = renderFirstPage(forkable) as unknown as RowEl;
+    const button = forkButton(row)!;
+    expect(forkShown(button)).toBe(true);
+    branchState.value = { capabilities: { fork_from_message: false } };
+    expect(forkRoot()).toBe("off");
+    expect(underForkRow(button)).toBe(true);
+    expect(forkShown(button)).toBe(false);
+    branchState.value = null;
+    expect(forkRoot()).toBe("off");
+    expect(underForkRow(button)).toBe(true);
+    expect(forkShown(button)).toBe(false);
+  });
+
+  it("hides when a true capability is replaced by a missing projection", () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    const row = renderFirstPage(forkable) as unknown as RowEl;
+    expect(forkShown(forkButton(row))).toBe(true);
+    branchState.value = null;
+    expect(forkRoot()).toBe("off");
+    expect(underForkRow(forkButton(row))).toBe(true);
+    expect(forkShown(forkButton(row))).toBe(false);
+  });
+
+  function frameQueue(): { flush: () => void; pending: () => number } {
+    const frames = new Map<number, FrameRequestCallback>();
+    let next = 1;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      const id = next++;
+      frames.set(id, cb);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      frames.delete(id);
+    });
+    return {
+      pending: () => frames.size,
+      flush() {
+        const id = Math.min(...frames.keys());
+        const cb = frames.get(id);
+        frames.delete(id);
+        cb?.(0);
+      },
+    };
+  }
+
+  function stagedForkItems(): HistoryItem[] {
+    return [0, 1].map((n) => ({
+      t: n,
+      seq: n,
+      kind: "msg",
+      v: {
+        ...forkable,
+        message_id: `msg-${n}`,
+        content: `Question ${n} stays checkpointed`,
+      },
+    }));
+  }
+
+  it("a capability that turns off while rows are in a fragment stays off after mount", () => {
+    const frames = frameQueue();
+    branchState.value = { capabilities: { fork_from_message: true } };
+    expect(forkRoot()).toBe("on");
+    const stage = doc.createDocumentFragment();
+    scheduleFramedRender(stagedForkItems(), { host: stage as unknown as ParentNode, batch: 1 });
+    frames.flush();
+    expect(doc.querySelector("[data-fork-message-id]")).toBeNull();
+    expect(stage.querySelector("[data-fork-message-id]")).not.toBeNull();
+    expect(underForkRow(stage.querySelector("[data-fork-message-id]"))).toBe(true);
+    branchState.value = { capabilities: { fork_from_message: false } };
+    expect(forkRoot()).toBe("off");
+    frames.flush();
+    expect(frames.pending()).toBe(0);
+    doc.messages.appendChild(stage);
+    const buttons = doc.querySelectorAll("[data-fork-message-id]");
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect(underForkRow(button)).toBe(true);
+      expect(forkShown(button)).toBe(false);
+    }
+    branchState.value = { capabilities: { fork_from_message: true } };
+    expect(forkRoot()).toBe("on");
+    expect(doc.querySelectorAll("[data-fork-message-id]")).toHaveLength(2);
+    for (const button of doc.querySelectorAll("[data-fork-message-id]")) {
+      expect(forkShown(button)).toBe(true);
+    }
+  });
+
+  it("a capability that turns on while rows are in a fragment shows them once mounted", () => {
+    const frames = frameQueue();
+    branchState.value = { capabilities: { fork_from_message: false } };
+    expect(forkRoot()).toBe("off");
+    const stage = doc.createDocumentFragment();
+    scheduleFramedRender(stagedForkItems(), { host: stage as unknown as ParentNode, batch: 1 });
+    frames.flush();
+    expect(doc.querySelector("[data-fork-message-id]")).toBeNull();
+    const staged = stage.querySelector("[data-fork-message-id]");
+    expect(underForkRow(staged)).toBe(true);
+    expect(forkShown(staged)).toBe(false);
+    branchState.value = { capabilities: { fork_from_message: true } };
+    frames.flush();
+    expect(frames.pending()).toBe(0);
+    doc.messages.appendChild(stage);
+    const buttons = doc.querySelectorAll("[data-fork-message-id]");
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) expect(forkShown(button)).toBe(true);
+    branchState.value = null;
+    expect(forkRoot()).toBe("off");
+    for (const button of doc.querySelectorAll("[data-fork-message-id]")) {
+      expect(underForkRow(button)).toBe(true);
+      expect(forkShown(button)).toBe(false);
+    }
+  });
+
+  it.each(ROW_RENDERERS)("%s: no fork control without an exact checkpoint, or on rows that are not that question", (_name, render) => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    const cases: Record<string, unknown>[] = [
+      { role: "user", content: "No snapshot", message_id: "msg-1", fork_checkpoint_id: null },
+      { role: "user", content: "Empty snapshot", message_id: "msg-2", fork_checkpoint_id: "" },
+      { role: "user", content: "Live bubble", fork_checkpoint_id: "ckpt-live" },
+      { role: "assistant", content: "Answer", message_id: "msg-a", fork_checkpoint_id: "ckpt-a" },
+      {
+        role: "user",
+        content: 'Plan "Demo" is approved; start executing it automatically now.',
+        message_id: "msg-seed",
+        fork_checkpoint_id: "ckpt-seed",
+      },
+      {
+        role: "assistant",
+        content: "Stopped mid-way",
+        message_id: "msg-stop",
+        fork_checkpoint_id: "ckpt-stop",
+        cancelled: { reason: "user", request_id: "req-1", execution_id: "exec-1" },
+      },
+    ];
+    for (const message of cases) {
+      const row = render(message) as unknown as RowEl;
+      expect(forkButton(row)).toBeNull();
+    }
+  });
+
+  it("load earlier keeps the same fork rules, including a capability that arrives late", async () => {
+    currentId.value = "frame-1";
+    _openGen.value = 1;
+    msgHasEarlier.value = true;
+    msgCursor.value = 20;
+    historyContent.value = null;
+    branchState.value = { capabilities: { fork_from_message: false } };
+    vi.stubGlobal("fetch", () => Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify({
+        messages: [
+          { ...forkable, seq: 4, created_at: "2026-09-01T00:00:00Z" },
+          {
+            role: "assistant",
+            content: "An earlier answer",
+            seq: 5,
+            message_id: "msg-asst",
+            fork_checkpoint_id: "ckpt-asst",
+          },
+          {
+            role: "user",
+            content: "No snapshot yet",
+            seq: 2,
+            message_id: "msg-open",
+            fork_checkpoint_id: null,
+          },
+        ],
+        has_earlier: false,
+        next_before_seq: null,
+      })),
+    }));
+    await loadEarlierMessages();
+    const user = doc.messages.querySelectorAll(".msg.user");
+    expect(user).toHaveLength(2);
+    const forked = user.find((row) => forkButton(row));
+    const plain = user.find((row) => !forkButton(row));
+    expect(forkRoot()).toBe("off");
+    expect(underForkRow(forkButton(forked!))).toBe(true);
+    expect(forkShown(forkButton(forked!))).toBe(false);
+    expect(forkButton(forked!)!.getAttribute("data-fork-message-id")).toBe("msg-exact");
+    expect(forkButton(plain!)).toBeNull();
+    expect(doc.messages.querySelector(".msg.assistant")!.querySelector("[data-fork-message-id]")).toBeNull();
+    branchState.value = { capabilities: { fork_from_message: true } };
+    expect(forkShown(forkButton(forked!))).toBe(true);
+  });
+
+  it("a second click while a message fork is in flight does not post again", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    currentId.value = "frame-1";
+    const posts: Array<{ url: string; body: unknown }> = [];
+    let release: (response: Response) => void = () => undefined;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      posts.push({ url: String(url), body: JSON.parse(String(init?.body || "{}")) });
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    });
+    vi.stubGlobal("hint", hint);
+    const row = renderFirstPage(forkable) as unknown as RowEl;
+    const button = forkButton(row)!;
+    button.focus();
+    const first = button.onclick!();
+    const second = button.onclick!();
+    expect(button.disabled).toBe(false);
+    expect(button.focused).toBe(1);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(button.textContent).toBe(historyT("history.forkMessage.busy"));
+    expect(button.getAttribute("aria-label")).toBeNull();
+    expect(doc.hint.getAttribute("aria-live")).toBe("polite");
+    expect(doc.hint.textContent).toContain(historyT("history.forkMessage.busy"));
+    expect(posts).toEqual([{
+      url: "/api/v1/frames/frame-1/branches/fork",
+      body: { from_message_id: "msg-exact" },
+    }]);
+    release(new Response(JSON.stringify({ branch_id: "br-new", name: "alt" }), { status: 200 }));
+    await first;
+    await second;
+    expect(posts).toHaveLength(1);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    expect(button.getAttribute("aria-busy")).toBeNull();
+    expect(button.textContent).toBe(historyT("history.forkMessage.label"));
+    expect(button.focused).toBe(1);
+  });
+
+  it("a no-checkpoint 409 leaves the button unavailable and says why", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    currentId.value = "frame-1";
+    vi.stubGlobal("hint", hint);
+    const posts: unknown[] = [];
+    vi.stubGlobal("fetch", (_url: string, init?: RequestInit) => {
+      posts.push(JSON.parse(String(init?.body || "{}")));
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: FORK_NO_CHECKPOINT_MESSAGE, code: "conflict" }),
+        { status: 409 },
+      ));
+    });
+    const row = renderFirstPage(forkable) as unknown as RowEl;
+    const button = forkButton(row)!;
+    await button.onclick!();
+    expect(posts).toHaveLength(1);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.getAttribute("aria-busy")).toBeNull();
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe(FORK_NO_CHECKPOINT_MESSAGE);
+    expect(button.getAttribute("aria-label")).toBeNull();
+    expect(doc.hint.getAttribute("aria-live")).toBe("polite");
+    expect(doc.hint.textContent).toContain(FORK_NO_CHECKPOINT_MESSAGE);
+    await button.onclick!();
+    expect(posts).toHaveLength(1);
+  });
+
+  it("leaving the session drops the busy announcement and does not invite another fork", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    currentId.value = "frame-1";
+    vi.stubGlobal("hint", hint);
+    let release: (response: Response) => void = () => undefined;
+    vi.stubGlobal("fetch", () => new Promise<Response>((resolve) => {
+      release = resolve;
+    }));
+    const row = renderFirstPage(forkable) as unknown as RowEl;
+    const button = forkButton(row)!;
+    const pending = button.onclick!();
+    expect(doc.hint.textContent).toContain(historyT("history.forkMessage.busy"));
+    currentId.value = "frame-2";
+    release(new Response(JSON.stringify({ branch_id: "br-left", name: "elsewhere" }), { status: 200 }));
+    await pending;
+    expect(doc.hint.textContent || "").not.toContain("elsewhere");
+    expect(doc.hint.textContent || "").not.toContain(historyT("history.forkMessage.busy"));
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.textContent).not.toBe(historyT("history.forkMessage.label"));
+  });
+
+  it("a late fork from another session leaves this session's busy announcement", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    vi.stubGlobal("hint", hint);
+    const releases: Array<(response: Response) => void> = [];
+    vi.stubGlobal("fetch", () => new Promise<Response>((resolve) => {
+      releases.push(resolve);
+    }));
+    currentId.value = "frame-1";
+    const left = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    const pendingLeft = left.onclick!();
+    currentId.value = "frame-2";
+    const here = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    const pendingHere = here.onclick!();
+    expect(releases).toHaveLength(2);
+    releases[0]!(new Response(JSON.stringify({ branch_id: "br-left", name: "left" }), { status: 200 }));
+    await pendingLeft;
+    expect(doc.hint.textContent).toContain(historyT("history.forkMessage.busy"));
+    expect(here.getAttribute("aria-busy")).toBe("true");
+    releases[1]!(new Response(JSON.stringify({ branch_id: "br-here", name: "here" }), { status: 200 }));
+    await pendingHere;
+    expect(doc.hint.textContent).toContain(historyT("history.forkMessage.created", "here"));
+  });
+
+  it("a row repainted while its fork is pending does not start a second busy state", async () => {
+    branchState.value = { capabilities: { fork_from_message: true } };
+    currentId.value = "frame-1";
+    vi.stubGlobal("hint", hint);
+    const posts: unknown[] = [];
+    let release: (response: Response) => void = () => undefined;
+    vi.stubGlobal("fetch", (_url: string, init?: RequestInit) => {
+      posts.push(JSON.parse(String(init?.body || "{}")));
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    });
+    const original = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    const pending = original.onclick!();
+    hint("The turn finished.");
+    const repainted = forkButton(renderFirstPage(forkable) as unknown as RowEl)!;
+    await repainted.onclick!();
+    expect(posts).toHaveLength(1);
+    expect(repainted.getAttribute("aria-busy")).toBeNull();
+    expect(repainted.getAttribute("aria-disabled")).toBeNull();
+    expect(repainted.textContent).toBe(historyT("history.forkMessage.label"));
+    expect(doc.hint.textContent).toContain("The turn finished.");
+    release(new Response(JSON.stringify({ branch_id: "br-new", name: "alt" }), { status: 200 }));
+    await pending;
+    expect(posts).toHaveLength(1);
   });
 
   it("a starter chip fills the composer and grows it to fit", () => {

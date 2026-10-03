@@ -1298,3 +1298,161 @@ def test_the_transaction_refuses_a_cross_project_source_on_its_own(tmp_path):
     ).replace("v-000000000000", "ID")
     # Nothing was written by either refusal.
     assert store.list_artifacts({"root_frame_id": mine_root}) == []
+
+
+def test_artifact_evidence_rows_follow_frame_and_observation_not_filename(tmp_path):
+    """The read returns raw rows for one frame: owned versions, observations
+    that attribute a reused head, and the execution_log receipt for each
+    producing Cell. A same-name version on another frame is absent.
+    """
+    store, repository = _repository(tmp_path)
+    root = store.new_frame(kind="turn", project_id="science", status="ready")
+    child = store.new_frame(
+        parent_id=root, kind="delegate", project_id="science", status="ready"
+    )
+    other = store.new_frame(
+        parent_id=root, kind="delegate", project_id="science", status="ready"
+    )
+    snapshot = tmp_path / "result.csv"
+    snapshot.write_bytes(b"same")
+    child_cell = store.log_cell(
+        frame_id=child,
+        code="value = 1\n",
+        result={},
+        origin="delegate",
+    )
+    other_cell = store.log_cell(
+        frame_id=other,
+        code="value = 2\n",
+        result={"error": "failed"},
+        origin="delegate",
+    )
+    original = repository.record_cell_artifact(
+        path=str(snapshot),
+        filename="result.csv",
+        content_type="text/csv",
+        size_bytes=4,
+        checksum="same-bytes",
+        producing_cell_id=other_cell,
+        frame_id=other,
+        snapshot_path=str(snapshot),
+        reuse_matching_head=True,
+    )
+    reused = repository.record_cell_artifact(
+        path=str(snapshot),
+        filename="result.csv",
+        content_type="text/csv",
+        size_bytes=4,
+        checksum="same-bytes",
+        producing_cell_id=child_cell,
+        frame_id=child,
+        snapshot_path=str(tmp_path / "not-the-retained-snapshot.csv"),
+        reuse_matching_head=True,
+    )
+    owned_snapshot = tmp_path / "notes.txt"
+    owned_snapshot.write_bytes(b"notes")
+    owned_cell = store.log_cell(
+        frame_id=child,
+        code="value = 3\n",
+        result={},
+        origin="delegate",
+    )
+    owned = repository.record_cell_artifact(
+        path=str(owned_snapshot),
+        filename="notes.txt",
+        content_type="text/plain",
+        size_bytes=5,
+        checksum="owned-bytes",
+        producing_cell_id=owned_cell,
+        frame_id=child,
+        snapshot_path=str(owned_snapshot),
+        reuse_matching_head=True,
+    )
+    # Same filename as the child's notes, produced by a third frame.
+    stranger = store.new_frame(
+        parent_id=root, kind="delegate", project_id="science", status="ready"
+    )
+    stranger_snapshot = tmp_path / "stranger-notes.txt"
+    stranger_snapshot.write_bytes(b"other")
+    stranger_saved = repository.save_artifact(
+        path=str(stranger_snapshot),
+        filename="notes.txt",
+        content_type="text/plain",
+        size_bytes=5,
+        checksum="stranger",
+        producing_cell_id=None,
+        frame_id=stranger,
+        snapshot_path=str(stranger_snapshot),
+    )
+
+    assert reused["version_id"] == original["version_id"]
+    assert reused["capture_kind"] == CAPTURE_KIND_HEAD_CHECKSUM_REUSED
+    rows = repository.artifact_evidence_rows_for_frame(child, limit=12)
+    facade = store.artifact_evidence_rows_for_frame(child, limit=12)
+    assert facade["total"] == rows["total"] == 2
+    version_ids = [row["version_id"] for row in rows["versions"]]
+    assert stranger_saved["version_id"] not in version_ids
+    assert original["version_id"] in version_ids
+    assert owned["version_id"] in version_ids
+    reused_row = next(
+        row for row in rows["versions"] if row["version_id"] == original["version_id"]
+    )
+    assert reused_row["frame_id"] == other
+    assert reused_row["filename"] == "result.csv"
+    kinds = {row["version_id"]: row["capture_kind"] for row in rows["observations"]}
+    assert kinds[original["version_id"]] == CAPTURE_KIND_HEAD_CHECKSUM_REUSED
+    assert kinds[owned["version_id"]] == CAPTURE_KIND_VERSION_CREATED
+    assert rows["cells"][child_cell] == {"status": "ok", "frame_id": child}
+    assert rows["cells"][owned_cell] == {"status": "ok", "frame_id": child}
+    # The reused version row still names the original Cell. The raw read
+    # returns that receipt; the verdict layer decides which Cell counts.
+    assert rows["cells"][other_cell] == {"status": "error", "frame_id": other}
+    assert (
+        repository.artifact_evidence_rows_for_frame(other, limit=12)["versions"][0][
+            "version_id"
+        ]
+        == original["version_id"]
+    )
+
+
+def test_artifact_evidence_rows_order_by_capture_time_and_honor_limit(tmp_path):
+    store, repository = _repository(tmp_path)
+    frame = store.new_frame(kind="turn", project_id="science", status="ready")
+    saved = []
+    for index in range(3):
+        path = tmp_path / f"f{index}.txt"
+        path.write_bytes(b"x")
+        saved.append(
+            repository.save_artifact(
+                path=str(path),
+                filename=path.name,
+                content_type="text/plain",
+                size_bytes=1,
+                checksum=f"h{index}",
+                frame_id=frame,
+                snapshot_path=str(path),
+            )
+        )
+    # The repository clock ticks once per save, so created_at is already
+    # increasing. Force a tie on the two older rows and check version_id order.
+    older = sorted(saved[:2], key=lambda row: row["version_id"])
+    for row in older:
+        repository._connection.execute(
+            "UPDATE artifact_versions SET created_at=? WHERE version_id=?",
+            (1000, row["version_id"]),
+        )
+    repository._connection.commit()
+
+    limited = repository.artifact_evidence_rows_for_frame(frame, limit=2)
+    assert limited["total"] == 3
+    assert len(limited["versions"]) == 2
+    assert [row["version_id"] for row in limited["versions"]][0] == saved[2][
+        "version_id"
+    ]
+    tied = repository.artifact_evidence_rows_for_frame(frame, limit=12)
+    tied_ids = [
+        row["version_id"]
+        for row in tied["versions"]
+        if row["version_id"] != saved[2]["version_id"]
+    ]
+    assert tied_ids == [row["version_id"] for row in older]

@@ -58,7 +58,7 @@ Reviewer 上报 token、Cell 失败率、相同 checksum/后续 cell 的重复�
 现场路径实际进入生产 Python/R kernel、Store/Artifact repository、Reviewer
 证据流水线、Notebook exporter、Ketcher 路由正文和科研 connector catalog。
 Ketcher 通过真实、隔离的 loopback HTTP socket 请求 production Gateway
-handler；其临时 access-token banner 只在派生子进程中捕获并验证，不会进入
+handler；其启动横幅只在派生子进程中捕获，并被验证为不含访问令牌，不会进入
 验收 CLI 流或报告。离线 Reviewer 用例只在该次调用的 LLM 边界注入确定性
 响应。若注入 Reviewer 写入正式 workspace，探针会如实观察为
 `workspace_unchanged=false` 并让该现场路径失败；Stage 0 不会假装这已经是

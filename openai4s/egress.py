@@ -33,6 +33,8 @@ import os
 import re
 import threading
 import urllib.parse
+from collections.abc import Mapping
+from typing import Any
 
 # --------------------------------------------------------------------------- #
 #  Canonical allowlist — the single source of truth for both enforcement and
@@ -370,3 +372,211 @@ def scan_command(command: str) -> str | None:
         if not domain_allowed(host):
             return host
     return None
+
+
+EGRESS_BOUNDARY_UNAVAILABLE = "egress_boundary_unavailable"
+
+_BOUNDARY_REASON = (
+    "OPENAI4S_EGRESS=allowlist admits a new Cell only when this kernel's OS "
+    "sandbox has proven it blocks raw network: macOS Seatbelt or Linux "
+    "bubblewrap, with enforced true, self-test passed, and network_policy "
+    "blocked. OPENAI4S_KERNEL_SANDBOX=auto admits the Cell when that "
+    "self-test passes; OPENAI4S_KERNEL_SANDBOX=enforce refuses to start "
+    "instead of degrading. Set OPENAI4S_EGRESS=off to admit Cells without "
+    "that proof. Remote kernels are always refused under allowlist."
+)
+
+_BOUNDARY_REMEDY = (
+    "Use macOS Seatbelt or Linux bubblewrap. OPENAI4S_KERNEL_SANDBOX=auto "
+    "admits a Cell when the self-test reports enforced, self_test_passed, "
+    "and network_policy blocked; set OPENAI4S_KERNEL_SANDBOX=enforce to "
+    "refuse to start instead of degrading.",
+    "Set OPENAI4S_EGRESS=off to admit Cells without a proven raw-network block.",
+    "Remote kernels are refused for as long as OPENAI4S_EGRESS=allowlist.",
+)
+
+_SANDBOX_PROJECTION_KEYS = (
+    "mode",
+    "state",
+    "backend",
+    "enforced",
+    "self_test_passed",
+    "network_policy",
+)
+
+
+class EgressBoundaryUnavailable(RuntimeError):
+    """Allowlist mode cannot prove this kernel blocks raw network."""
+
+    stable_reason = _BOUNDARY_REASON
+    stable_remedy = _BOUNDARY_REMEDY
+
+    def __init__(self, decision: Mapping[str, Any]) -> None:
+        payload = dict(decision)
+        code = str(payload.get("code") or EGRESS_BOUNDARY_UNAVAILABLE)
+        reason = str(payload.get("reason") or self.stable_reason)
+        payload["code"] = code
+        payload["reason"] = reason
+        self.code = code
+        self.decision = payload
+        super().__init__(f"{code}: {reason}")
+
+
+def cell_admission_refusal(sandbox_status: Any) -> dict[str, Any] | None:
+    """Refuse a new Cell unless allowlist mode has a proven raw-network block.
+
+    ``None`` means the Cell may proceed: egress is off, or ``boundary_holds``
+    is true. Any other posture returns a decision dict and does not raise.
+    """
+
+    if egress_mode() != "allowlist":
+        return None
+    from openai4s.security.sandbox import boundary_holds
+
+    if boundary_holds(sandbox_status):
+        return None
+    return _boundary_decision(sandbox_status)
+
+
+def _project_sandbox(sandbox_status: Any) -> dict[str, Any]:
+    projected = {key: None for key in _SANDBOX_PROJECTION_KEYS}
+    values: Mapping[str, Any] | None
+    if isinstance(sandbox_status, Mapping):
+        values = sandbox_status
+    elif sandbox_status is not None and hasattr(sandbox_status, "to_dict"):
+        raw = sandbox_status.to_dict()
+        values = raw if isinstance(raw, Mapping) else None
+    else:
+        values = None
+    if values is None:
+        return projected
+    for key in _SANDBOX_PROJECTION_KEYS:
+        if key in values:
+            projected[key] = values[key]
+    return projected
+
+
+def _boundary_decision(sandbox_status: Any) -> dict[str, Any]:
+    return {
+        "code": EGRESS_BOUNDARY_UNAVAILABLE,
+        "reason": _BOUNDARY_REASON,
+        "egress_mode": egress_mode(),
+        "sandbox": _project_sandbox(sandbox_status),
+        "remedy": list(_BOUNDARY_REMEDY),
+    }
+
+
+# Host-wrapped forms. The code token alone is not enough: a Cell can write it
+# into a worker's stderr, and that tail is glued onto
+# ``kernel worker exited unexpectedly:``.
+_KERNEL_BOOTSTRAP_REFUSAL_PREFIX = (
+    "kernel bootstrap failed: " + EGRESS_BOUNDARY_UNAVAILABLE + ":"
+)
+_R_BOOTSTRAP_REFUSAL_PREFIX = (
+    "R kernel unavailable: R kernel bootstrap failed: "
+    + EGRESS_BOUNDARY_UNAVAILABLE
+    + ":"
+)
+
+
+def _exception_chain(exc: BaseException):
+    """Yield ``exc`` and each ``__cause__`` / ``__context__``, cause first.
+
+    A context that ``raise ... from`` suppressed is not followed, the same
+    rule the interpreter uses when it prints the chain.
+    """
+
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield current
+        context = None if current.__suppress_context__ else current.__context__
+        cause = current.__cause__
+        if isinstance(context, BaseException):
+            stack.append(context)
+        if isinstance(cause, BaseException):
+            stack.append(cause)
+
+
+def _is_typed_boundary(exc: BaseException) -> bool:
+    """True for the boundary class or an exception carrying its stable code.
+
+    ``PermissionError.code`` is how the CLI admission seam types a refusal
+    without changing the exception class the caller already catches. The
+    message text is not consulted.
+    """
+
+    if isinstance(exc, EgressBoundaryUnavailable):
+        return True
+    return getattr(exc, "code", None) == EGRESS_BOUNDARY_UNAVAILABLE
+
+
+def _prefix_boundary_refusal(exc: BaseException) -> bool:
+    """Exact host prefixes, and only while allowlist is the current mode."""
+
+    if egress_mode() != "allowlist":
+        return False
+    text = str(exc)
+    return text.startswith(_KERNEL_BOOTSTRAP_REFUSAL_PREFIX) or text.startswith(
+        _R_BOOTSTRAP_REFUSAL_PREFIX
+    )
+
+
+def is_boundary_refusal(exc: BaseException) -> bool:
+    """True when ``exc`` is a kernel-boundary refusal the host can trust.
+
+    A typed ``EgressBoundaryUnavailable`` counts anywhere on the cause or
+    context chain, because the watchdog re-raises that object and a relay
+    may wrap it. The two bootstrap prefixes count only as the start of the
+    outermost message, and only while ``egress_mode()`` is ``allowlist``.
+    A substring of the code token does not count. An interrupt or exit
+    (a ``BaseException`` that is not an ``Exception``) is that interrupt,
+    even when a refusal sits on its context.
+    """
+
+    if not isinstance(exc, BaseException):
+        return False
+    if not isinstance(exc, Exception) and not _is_typed_boundary(exc):
+        return False
+    if any(_is_typed_boundary(item) for item in _exception_chain(exc)):
+        return True
+    return _prefix_boundary_refusal(exc)
+
+
+def _carried_decision(exc: BaseException) -> dict[str, Any] | None:
+    for current in _exception_chain(exc):
+        if not _is_typed_boundary(current):
+            continue
+        decision = getattr(current, "decision", None)
+        if isinstance(decision, dict):
+            return dict(decision)
+    return None
+
+
+def boundary_refusal_decision(
+    exc: BaseException,
+    sandbox_status: Any = None,
+) -> dict[str, Any] | None:
+    """Stable decision for a recognized refusal, otherwise None.
+
+    A typed refusal keeps the decision it was raised with. A prefix refusal
+    names a bootstrap candidate that was never published, so a caller passes
+    ``sandbox_status`` only when it holds that exact candidate; ``None``
+    projects null sandbox fields. A posture that would pass admission cannot
+    be the refused worker's, so it is not projected onto the refusal.
+    """
+
+    if not is_boundary_refusal(exc):
+        return None
+    carried = _carried_decision(exc)
+    if carried is not None:
+        return carried
+    fresh = cell_admission_refusal(sandbox_status)
+    if fresh is not None:
+        return fresh
+    return _boundary_decision(None)

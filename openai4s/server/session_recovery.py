@@ -11,11 +11,10 @@ import math
 import os
 import threading
 import time
-import uuid
 from contextlib import contextmanager
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
-PROCESS_INSTANCE_ID = f"daemon-{uuid.uuid4()}"
+from openai4s.process_instance import PROCESS_INSTANCE_ID
 
 
 def kernel_idle_ttl(

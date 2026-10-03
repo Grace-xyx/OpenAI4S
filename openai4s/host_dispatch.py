@@ -747,6 +747,94 @@ def _delegate_result_word(result: Any) -> str:
     return "malformed result"
 
 
+#: Prose the step card exists to show. A host path inside one of these stays;
+#: the card is how the user reads what the child handed back.
+_DELEGATE_STEP_PROSE_KEYS = frozenset(
+    {
+        "output",
+        "final_message",
+        "completion_bullets",
+        "limitations",
+        "error",
+        "reason",
+        "summary",
+        "message",
+        "text",
+        "name",
+    }
+)
+
+
+def _redact_delegate_step_value(value: Any) -> Any:
+    """Copy a delegate result with host paths removed and the prose kept.
+
+    ``artifact_refs`` use ``project_browser_artifact_refs`` (the REST rule:
+    drop ``durable_path``, drop an absolute ``path`` or ``filename``).
+    Absolute strings inside ``environment`` are dropped, as is an absolute
+    name in ``artifacts``. Other prose is left as the child wrote it. The
+    copy is what gets truncated for ``raw``; truncating first would keep a
+    path that sits in the first 2000 characters and cut the conclusion.
+    """
+
+    from openai4s.storage.delegation import (
+        host_absolute_path,
+        project_browser_artifact_refs,
+    )
+
+    def walk(node: Any, *, prose: bool) -> Any:
+        if prose and not isinstance(node, (Mapping, list)):
+            return node
+        if isinstance(node, Mapping):
+            cleaned: dict[str, Any] = {}
+            for key, item in node.items():
+                name = str(key)
+                if name == "durable_path":
+                    continue
+                if name == "artifact_refs" and isinstance(item, list):
+                    cleaned[name] = project_browser_artifact_refs(item)
+                    continue
+                if (
+                    name in ("path", "filename")
+                    and isinstance(item, str)
+                    and host_absolute_path(item)
+                ):
+                    continue
+                if name == "environment" and isinstance(item, Mapping):
+                    environment: dict[str, Any] = {}
+                    for env_key, env_value in item.items():
+                        if str(env_key) == "durable_path":
+                            continue
+                        rendered = walk(env_value, prose=False)
+                        if isinstance(rendered, str) and host_absolute_path(rendered):
+                            continue
+                        environment[str(env_key)] = rendered
+                    cleaned[name] = environment
+                    continue
+                if name == "artifacts" and isinstance(item, list):
+                    names: list[Any] = []
+                    for entry in item:
+                        if isinstance(entry, str):
+                            if host_absolute_path(entry):
+                                continue
+                            names.append(entry)
+                        else:
+                            names.append(walk(entry, prose=False))
+                    cleaned[name] = names
+                    continue
+                cleaned[name] = walk(
+                    item, prose=prose or name in _DELEGATE_STEP_PROSE_KEYS
+                )
+            return cleaned
+        if isinstance(node, list):
+            return [
+                (walk(item, prose=prose) if isinstance(item, (Mapping, list)) else item)
+                for item in node
+            ]
+        return node
+
+    return walk(value, prose=False)
+
+
 def _delegate_summary_text(result: dict) -> str:
     """A bounded human-readable line from the child's own completion."""
     final = result.get("final_message")
@@ -804,23 +892,27 @@ def _delegate_step_projection(result: Any, ok: bool) -> tuple[dict, str, str]:
     Replaces the old flattening (``{"result": _short(result, 2000)}``, "done"):
     the summary word reflects the envelope's ``task_status`` — never a
     hardcoded "done" — the default body is the structured projection, and the
-    bounded raw string sits behind it for the details reveal. Fan-out lists
-    project every child and the worst child's status wins. The generic
-    ``_declared_failure_reason`` contract stays untouched for everyone else.
+    bounded raw string sits behind it for the details reveal. Host paths are
+    removed before that bound, so ``raw`` and the structured card share one
+    scrubbed copy. Fan-out lists project every child and the worst child's
+    status wins. The generic ``_declared_failure_reason`` contract stays
+    untouched for everyone else.
     """
     if not ok:
         err = result.get("error") if isinstance(result, dict) else None
         reason = " ".join(str(err).split()) if err else ""
         summary = "failed" if not reason else f"failed: {reason[:160]}"
         return ({"error": str(err)[:600] if err else "failed"}, summary, "error")
+    safe = _redact_delegate_step_value(result)
     if isinstance(result, list):
+        projected = safe if isinstance(safe, list) else result
         children = [
             (
                 _delegate_child_view(item)
                 if isinstance(item, dict)
                 else {"summary": str(_short(item, 200))}
             )
-            for item in result[:48]
+            for item in projected[:48]
         ]
         worst = "done"
         counts: dict[str, int] = {}
@@ -834,12 +926,12 @@ def _delegate_step_projection(result: Any, ok: bool) -> tuple[dict, str, str]:
         summary = (
             f"{len(result)} children: {breakdown}"[:200] if result else "0 children"
         )
-        return ({"children": children, "raw": _short(result, 2000)}, summary, worst)
+        return ({"children": children, "raw": _short(safe, 2000)}, summary, worst)
     if isinstance(result, dict):
-        view = _delegate_child_view(result)
-        view["raw"] = _short(result, 2000)
+        view = _delegate_child_view(safe if isinstance(safe, dict) else result)
+        view["raw"] = _short(safe, 2000)
         return (view, _delegate_result_word(result), _delegate_result_status(result))
-    return ({"raw": _short(result, 2000)}, "malformed result", "error")
+    return ({"raw": _short(safe, 2000)}, "malformed result", "error")
 
 
 def _step_end(method: str, kind: str, result: Any, ok: bool) -> tuple[dict, str]:
@@ -3193,7 +3285,32 @@ class HostDispatcher:
         """
         if self._bg_executor is None:
             from openai4s.kernel.background import BackgroundExecutor
+            from openai4s.process_instance import PROCESS_INSTANCE_ID
 
+            receipts = None
+            if getattr(self, "durable_background", False):
+                from openai4s.storage.background_execs import BoundBackgroundReceipts
+
+                store = get_store(self.cfg.db_path)
+                root = str(self.frame_id or "")
+                owner: str | None = None
+                try:
+                    record = store.team.session_owner(root)
+                except Exception:
+                    record = None
+                if isinstance(record, dict):
+                    user = record.get("user_id")
+                    if isinstance(user, str) and user.strip():
+                        owner = user.strip()
+                configured = getattr(self, "daemon_instance", None)
+                instance = str(configured or PROCESS_INSTANCE_ID)
+                receipts = BoundBackgroundReceipts(
+                    store.background_exec_receipts,
+                    root_frame_id=root,
+                    frame_id=root or None,
+                    daemon_instance=instance,
+                    owner_user_id=owner,
+                )
             self._bg_executor = BackgroundExecutor(
                 kernel_factory=self._new_background_kernel,
                 dispatcher=self,
@@ -3202,7 +3319,15 @@ class HostDispatcher:
                     if self.background_execution_lease is not None
                     else nullcontext()
                 ),
+                receipts=receipts,
             )
+            if receipts is not None:
+                try:
+                    receipts.prune(int(time.time() * 1000))
+                except Exception:
+                    # A prune failure leaves the raw row non-terminal. Reads
+                    # still derive outcome_unknown, and the launch can proceed.
+                    pass
         return self._bg_executor
 
     def _m_exec_background(self, spec: dict) -> dict:
@@ -3227,13 +3352,81 @@ class HostDispatcher:
         return self._bg().launch(code, origin=origin)
 
     def _m_exec_peek(self, exec_id: str) -> dict:
-        return self._bg().peek(exec_id)
+        executor = self._bg()
+        try:
+            return executor.peek(exec_id)
+        except KeyError:
+            receipts = getattr(executor, "receipts", None)
+            if receipts is None:
+                raise
+            row = receipts.get(str(exec_id))
+            if row is None:
+                raise
+            from openai4s.storage.background_execs import project_receipt
+
+            return project_receipt(row)
 
     def _m_exec_interrupt(self, exec_id: str) -> dict:
-        return self._bg().interrupt(exec_id)
+        executor = self._bg()
+        try:
+            return executor.interrupt(exec_id)
+        except KeyError:
+            receipts = getattr(executor, "receipts", None)
+            if receipts is None:
+                raise
+            row = receipts.get(str(exec_id))
+            if row is None:
+                raise
+            from openai4s.storage.background_execs import (
+                NON_TERMINAL_STATUSES,
+                project_receipt,
+            )
+
+            report = project_receipt(row)
+            # The same string type the live path reports; `reason` repeats it
+            # for callers written against the first receipt release. The
+            # instance is the one the receipts are bound to, not recomputed.
+            current = str(getattr(receipts, "daemon_instance", "") or "")
+            stored = str(row.get("daemon_instance") or "")
+            if stored != current:
+                reason = "the daemon has restarted; delivery cannot be confirmed"
+            elif str(report.get("status") or "") in NON_TERMINAL_STATUSES:
+                reason = (
+                    "another session runtime in this process holds this job; "
+                    "this session cannot deliver the stop"
+                )
+            else:
+                reason = (
+                    "this process no longer has a handle for this job; "
+                    "delivery cannot be confirmed"
+                )
+            report["interrupt_undelivered"] = reason
+            report["reason"] = reason
+            return report
 
     def _m_exec_list(self, *_a: Any) -> list:
-        return self._bg().list_jobs()
+        executor = self._bg()
+        live = list(executor.list_jobs())
+        receipts = getattr(executor, "receipts", None)
+        if receipts is None:
+            return live
+        from openai4s.storage.background_execs import project_receipt
+
+        merged: dict[str, dict[str, Any]] = {}
+        for row in receipts.list(limit=50):
+            item = project_receipt(row)
+            merged[str(item.get("exec_id") or "")] = item
+        for item in live:
+            merged[str(item.get("exec_id") or "")] = item
+
+        def _when(item: Mapping[str, Any]) -> int:
+            created = item.get("created_at")
+            if isinstance(created, int):
+                return created
+            started = item.get("started_at")
+            return started if isinstance(started, int) else 0
+
+        return sorted(merged.values(), key=_when, reverse=True)[:50]
 
     # --- app tiles ------------------------------------------------
     #: Most recent tiles kept per session. A tile is a scratch surface a cell

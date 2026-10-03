@@ -20,7 +20,10 @@ as turns/cells/artifacts/compactions happen. Schema and write paths:
   notes             project notes
   lineage_edges     object-level data lineage: input_version -> output_version
   host_call_log     RPC audit (DERIVABLE_HOST_CALLS are NOT logged; the args of
-                    SECRET_ARG_HOST_CALLS are redacted before write)
+                    SECRET_ARG_HOST_CALLS are redacted before write, and
+                    host.judge args are projected before write: a registered
+                    template id, or "<invalid template>" / "<unknown template>",
+                    plus fixed state and params markers)
 
 Agent SQL (`host.query`) runs under a real SQLite authorizer installed for the
 duration of each statement, not behind a substring filter on the statement text.
@@ -75,6 +78,10 @@ from openai4s.storage.auto_mode import (
     create_auto_mode_budget_schema,
     create_auto_mode_schema,
     install_auto_mode_action_guards,
+)
+from openai4s.storage.background_execs import (
+    BackgroundExecReceiptRepository,
+    create_background_exec_receipts_schema,
 )
 from openai4s.storage.branch_projection import count_cursor, project_branch_records
 from openai4s.storage.capabilities import CapabilityStateRepository
@@ -763,6 +770,9 @@ QUERY_DENYLIST = frozenset(
         # Exact probe receipts.  Not agent-working-data; they name a profile
         # revision and an endpoint digest, and they gate native completion.
         "model_capability_receipts",
+        # Background-cell stdout. The peek projection is the read path; agent
+        # SQL must not select the receipt table.
+        "background_exec_receipts",
         "skill_blobs",
         "skill_versions",
         "skill_version_files",
@@ -1370,6 +1380,11 @@ class Store:
             self._lock,
             clock_ms=lambda: _now_ms(),
         )
+        self._background_exec_receipts = BackgroundExecReceiptRepository(
+            self._conn,
+            self._lock,
+            clock_ms=lambda: _now_ms(),
+        )
         self._shares = SharesRepository(
             self._conn,
             self._lock,
@@ -1651,6 +1666,14 @@ class Store:
                         "artifact_browse_index",
                         self._apply_artifact_browse_index,
                     ),
+                    33: (
+                        "redact_judge_host_call_args",
+                        self._apply_redact_judge_host_call_args,
+                    ),
+                    34: (
+                        "background_exec_receipts",
+                        self._apply_background_exec_receipts,
+                    ),
                 },
             )
             if report["migrated"]:
@@ -1841,6 +1864,59 @@ class Store:
             "CREATE INDEX IF NOT EXISTS ix_artifacts_project_created "
             "ON artifacts(project_id, created_at DESC, artifact_id DESC)"
         )
+
+    def _apply_redact_judge_host_call_args(self, conn: sqlite3.Connection) -> None:
+        """Version 33: redact raw host.judge state in the generic RPC audit.
+
+        ``host_call_log.args_preview`` for ``method='judge'`` is rewritten
+        with :func:`openai4s.storage.metadata.redact_stored_judge_args_preview`.
+        New rows are projected by ``HostCallRepository.log``; this step only
+        rewrites rows already stored. A preview that is byte for byte what
+        that projection stores is left alone. A raw preview that begins with
+        a charset-safe template id keeps it only when the registry resolves
+        it (``<unknown template>`` otherwise) and gets the state marker;
+        every other raw preview becomes the state-only marker.
+
+        Rows are updated by ``rowid``. ``call_id`` is nullable, and
+        ``WHERE call_id = NULL`` matches nothing.
+
+        ``PRAGMA secure_delete`` is on for the rewrite so the replaced bytes
+        are zeroed in the page, then restored by name (``0`` is ``OFF``,
+        ``1`` is ``ON``, ``2`` is ``FAST``). An integer ``2`` is not FAST:
+        SQLite reads it as ON. Runs inside the transaction owned by
+        ``run_migrations``; it must not commit.
+        """
+
+        from openai4s.storage.metadata import redact_stored_judge_args_preview
+
+        # SQLite accepts the integer 2 as boolean ON. FAST is the name only.
+        secure_delete_names = {0: "OFF", 1: "ON", 2: "FAST"}
+        previous_row = conn.execute("PRAGMA secure_delete").fetchone()
+        previous = int(previous_row[0]) if previous_row is not None else 0
+        previous_name = secure_delete_names.get(previous, "OFF")
+        try:
+            conn.execute("PRAGMA secure_delete = ON").fetchall()
+            rows = conn.execute(
+                "SELECT rowid, args_preview FROM host_call_log WHERE method = 'judge'"
+            ).fetchall()
+            for row in rows:
+                updated = redact_stored_judge_args_preview(row["args_preview"])
+                if updated != row["args_preview"]:
+                    conn.execute(
+                        "UPDATE host_call_log SET args_preview = ? WHERE rowid = ?",
+                        (updated, row["rowid"]),
+                    )
+        finally:
+            conn.execute(f"PRAGMA secure_delete = {previous_name}").fetchall()
+
+    def _apply_background_exec_receipts(self, conn: sqlite3.Connection) -> None:
+        """Version 34: bounded receipts for Web background cells.
+
+        Additive. The row is written before the worker starts and stores a
+        code digest, not the source. A later daemon does not replay it.
+        """
+
+        create_background_exec_receipts_schema(conn)
 
     def _apply_team_governance(self, conn: sqlite3.Connection) -> None:
         """Version 20: membership, invites, usage ledger, quotas (M2).
@@ -2535,6 +2611,11 @@ class Store:
     def model_capability_receipts(self) -> ModelCapabilityReceiptRepository:
         """Exact probe receipts bound to profile revision + endpoint."""
         return self._model_capability_receipts
+
+    @property
+    def background_exec_receipts(self) -> BackgroundExecReceiptRepository:
+        """Bounded Web background-cell receipts. CLI sessions do not write them."""
+        return self._background_exec_receipts
 
     @property
     def leases(self) -> LeaseRepository:
@@ -3955,6 +4036,11 @@ class Store:
     def delegation_tree(self, root_frame_id: str) -> dict:
         return self._delegations.project(root_frame_id)
 
+    def delegation_child_record(self, root_frame_id: str, child_id: str) -> dict | None:
+        """Full child row for in-process restore. Not the browser projection."""
+
+        return self._delegations.read_child(root_frame_id, child_id)
+
     def delegation_budget(self, root_frame_id: str) -> dict | None:
         return self._delegations.budget(root_frame_id)
 
@@ -4241,6 +4327,9 @@ class Store:
 
     def artifact_names_for_frame(self, frame_id: str) -> list[str]:
         return self._artifacts.artifact_names_for_frame(frame_id)
+
+    def artifact_evidence_rows_for_frame(self, frame_id: str, *, limit: int) -> dict:
+        return self._artifacts.artifact_evidence_rows_for_frame(frame_id, limit=limit)
 
     def resolve_artifact_path(self, ident: str) -> str | None:
         return self._artifacts.resolve_artifact_path(ident)

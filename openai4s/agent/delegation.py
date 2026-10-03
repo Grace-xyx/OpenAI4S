@@ -19,6 +19,8 @@ from __future__ import annotations
 import contextvars
 import dataclasses
 import math
+import os
+import re
 import threading
 import time
 import uuid
@@ -46,6 +48,7 @@ from openai4s.config import Config
 from openai4s.host.delegation_policy import child_execution_policy
 from openai4s.observability import carry_context
 from openai4s.security.sandbox import KernelReadIsolation
+from openai4s.storage.delegation import project_browser_artifact_evidence
 from openai4s.storage.delegation_attempts import (
     DelegationRequestConflict,
     delegation_identity,
@@ -73,6 +76,29 @@ _RETRYABLE_STATUS = frozenset({"partial", "blocked", "failed"})
 #: (mirrors the projection aliases in openai4s/server/completions.py without
 #: importing the server layer into the delegation core).
 _LIMITATION_ALIASES = ("limitations", "caveats", "限制", "局限性")
+
+#: Record-consistency check for one child frame. It never hashes file bytes.
+_EVIDENCE_SCOPE = "version_and_producer"
+#: Items one evidence envelope keeps. The live socket event reuses it
+#: (``workbench_state._bounded_artifact_evidence``), so both say the same.
+EVIDENCE_ITEM_CAP = 12
+_EVIDENCE_TEXT_LIMIT = 200
+_EVIDENCE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_EVIDENCE_CELL_STATUS = frozenset({"ok", "error", "interrupted"})
+_EVIDENCE_CAPTURE_KINDS = frozenset(
+    {"version_created", "same_cell_merge", "head_checksum_reused"}
+)
+_EVIDENCE_REASONS = (
+    "other_frame",
+    "no_checksum",
+    "no_snapshot",
+    "snapshot_missing",
+    "size_mismatch",
+    "cell_not_recorded",
+    "cell_failed",
+    "cell_other_frame",
+    "no_cell_receipt",
+)
 
 
 class DelegationError(RuntimeError):
@@ -578,7 +604,7 @@ class _Child:
             output = (self.result or {}).get("output")
             if self.status == "stopped":
                 output = None
-            return {
+            snap = {
                 "child_id": self.child_id,
                 "name": self.name,
                 "status": self.status,
@@ -608,6 +634,10 @@ class _Child:
                 },
                 "overrides": _public_overrides(self.spec),
             }
+            evidence = (self.result or {}).get("artifact_evidence")
+            if evidence is not None:
+                snap["artifact_evidence"] = evidence
+            return snap
 
     def persistence_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -1416,21 +1446,37 @@ class DelegationRunner:
     def _restore_one_child(self, child_id: str) -> _Child | None:
         if self.store is None or not self.parent_frame_id:
             return None
-        tree = self.store.delegation_tree(self.parent_frame_id)
-        for item in tree.get("children") or ():
-            if str(item.get("child_id") or "") != child_id:
-                continue
-            child = _Child.from_persisted(
-                item,
-                store=self.store,
-                budget=self.budget,
-                clock=self._tree.clock,
+        # The browser tree omits result bodies. Restore needs the stored
+        # result, which the full-text read returns. A store that only
+        # exposes the browser tree still resolves the child identity.
+        reader = getattr(self.store, "delegation_child_record", None)
+        item: Mapping[str, Any] | None
+        if callable(reader):
+            loaded = reader(self.parent_frame_id, child_id)
+            item = loaded if isinstance(loaded, Mapping) else None
+        else:
+            tree = self.store.delegation_tree(self.parent_frame_id)
+            item = next(
+                (
+                    candidate
+                    for candidate in tree.get("children") or ()
+                    if isinstance(candidate, Mapping)
+                    and str(candidate.get("child_id") or "") == child_id
+                ),
+                None,
             )
-            self._tree.children[child.child_id] = child
-            if child.parent_child_id == self.parent_child_id:
-                self._children[child.child_id] = child
-            return child
-        return None
+        if item is None:
+            return None
+        child = _Child.from_persisted(
+            item,
+            store=self.store,
+            budget=self.budget,
+            clock=self._tree.clock,
+        )
+        self._tree.children[child.child_id] = child
+        if child.parent_child_id == self.parent_child_id:
+            self._children[child.child_id] = child
+        return child
 
     def _reuse_child(self, child: _Child, *, wait: bool, is_list: bool) -> Any:
         """Return an existing child without spawning and without charging budget."""
@@ -1614,6 +1660,7 @@ class DelegationRunner:
                 "artifacts": self._child_artifacts(child_frame_id),
                 "artifact_refs": self._publish_scratch(child, scratch, child_frame_id),
             }
+            self._attach_artifact_evidence(failed, child_frame_id)
             child.finish_failed(detail, failed)
             self._persist_status(child, "failed")
             self._tree.emit("failed", child)
@@ -1651,6 +1698,7 @@ class DelegationRunner:
             "request_id": child.request_id,
             "attempt_id": child.attempt_id,
         }
+        self._attach_artifact_evidence(out, child_frame_id)
         schema = spec.get("output_schema")
         if schema is not None:
             from openai4s.host.completion import validate_output_schema
@@ -1752,6 +1800,30 @@ class DelegationRunner:
         except Exception:  # noqa: BLE001 - evidence lookup must not fail the child
             return []
         return [str(name) for name in names or ()]
+
+    def _artifact_evidence(self, child_frame_id: str | None) -> dict[str, Any] | None:
+        """Store-derived version check for this child, or None when there is no frame.
+
+        A missing store or frame omits the key. A read or projection error
+        returns an empty unavailable envelope and never fails the child.
+        """
+        if self.store is None or not child_frame_id:
+            return None
+        reader = getattr(self.store, "artifact_evidence_rows_for_frame", None)
+        if not callable(reader):
+            return _evidence_unavailable()
+        try:
+            rows = reader(child_frame_id, limit=EVIDENCE_ITEM_CAP)
+            return _project_artifact_evidence(rows, child_frame_id)
+        except Exception:  # noqa: BLE001 - evidence lookup must not fail the child
+            return _evidence_unavailable()
+
+    def _attach_artifact_evidence(
+        self, envelope: dict[str, Any], child_frame_id: str | None
+    ) -> None:
+        evidence = self._artifact_evidence(child_frame_id)
+        if evidence is not None:
+            envelope["artifact_evidence"] = evidence
 
     def _publish_scratch(
         self,
@@ -2286,6 +2358,201 @@ class DelegationRunner:
             child.store.update_frame(frame_id, status=status)
         except Exception:  # noqa: BLE001 - state remains observable in memory
             pass
+
+
+def _evidence_unavailable() -> dict[str, Any]:
+    return {
+        "scope": _EVIDENCE_SCOPE,
+        "items": [],
+        "total": 0,
+        "truncated": False,
+        "unavailable": True,
+        "checked_at": time.time(),
+    }
+
+
+def _evidence_text(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value[:_EVIDENCE_TEXT_LIMIT]
+
+
+def _evidence_checksum(value: Any) -> str | None:
+    if isinstance(value, str) and _EVIDENCE_SHA256.fullmatch(value):
+        return value
+    return None
+
+
+def _snapshot_reason(path: Any, size_bytes: Any) -> str | None:
+    """One snapshot reason, or None when the recorded file is present and sized.
+
+    This stats the path. It does not read or hash the bytes.
+    """
+    if not isinstance(path, str) or not path.strip():
+        return "no_snapshot"
+    try:
+        if not os.path.isfile(path):
+            return "snapshot_missing"
+        actual = os.path.getsize(path)
+    except OSError:
+        return "snapshot_missing"
+    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
+        return "size_mismatch"
+    if actual != size_bytes:
+        return "size_mismatch"
+    return None
+
+
+def _latest_observation(observations: list[Any]) -> Mapping[str, Any] | None:
+    best: Mapping[str, Any] | None = None
+    best_key: tuple[int, str] | None = None
+    for obs in observations:
+        if not isinstance(obs, Mapping):
+            continue
+        try:
+            stamp = int(obs.get("created_at") or 0)
+        except (TypeError, ValueError):
+            stamp = 0
+        key = (stamp, str(obs.get("observation_id") or ""))
+        if best_key is None or key > best_key:
+            best = obs
+            best_key = key
+    return best
+
+
+def _cell_receipt(
+    cell_id: Any, cells: Any, child_frame_id: str
+) -> tuple[str | None, str | None]:
+    """``(cell_status, reason)``. A missing Cell id is noted, not a failure."""
+    if not isinstance(cell_id, str) or not cell_id:
+        return None, "no_cell_receipt"
+    cell = cells.get(cell_id) if isinstance(cells, Mapping) else None
+    if not isinstance(cell, Mapping):
+        return None, "cell_not_recorded"
+    if cell.get("frame_id") != child_frame_id:
+        return None, "cell_other_frame"
+    status = cell.get("status")
+    if status == "ok":
+        return "ok", None
+    if status in _EVIDENCE_CELL_STATUS:
+        return str(status), "cell_failed"
+    return None, "cell_failed"
+
+
+def _attributed_to_frame(
+    version: Mapping[str, Any],
+    observations: list[Any],
+    child_frame_id: str,
+) -> bool:
+    """True when this version row or one of its observations names the child."""
+    if version.get("frame_id") == child_frame_id:
+        return True
+    return any(
+        isinstance(obs, Mapping) and obs.get("frame_id") == child_frame_id
+        for obs in observations
+    )
+
+
+def _project_artifact_evidence(rows: Any, child_frame_id: str) -> dict[str, Any]:
+    """Turn one frame's raw capture rows into the bounded public evidence object."""
+    if not isinstance(rows, Mapping):
+        raise TypeError("artifact evidence rows must be a mapping")
+    raw_versions = rows.get("versions")
+    raw_observations = rows.get("observations")
+    if not isinstance(raw_versions, list) or not isinstance(raw_observations, list):
+        raise TypeError("artifact evidence rows are incomplete")
+    seen: list[Mapping[str, Any]] = []
+    seen_ids: set[str] = set()
+    for row in raw_versions:
+        if not isinstance(row, Mapping):
+            continue
+        version_id = row.get("version_id")
+        if not isinstance(version_id, str) or not version_id or version_id in seen_ids:
+            continue
+        seen_ids.add(version_id)
+        seen.append(row)
+    reported = rows.get("total")
+    if isinstance(reported, bool) or not isinstance(reported, int) or reported < 0:
+        reported = len(seen)
+    total = max(reported, len(seen))
+    kept = seen[:EVIDENCE_ITEM_CAP]
+    kept_ids = {str(row["version_id"]) for row in kept}
+    by_version: dict[str, list[Any]] = {}
+    for obs in raw_observations:
+        if not isinstance(obs, Mapping):
+            continue
+        version_id = obs.get("version_id")
+        if isinstance(version_id, str) and version_id in kept_ids:
+            by_version.setdefault(version_id, []).append(obs)
+    cells = rows.get("cells")
+    items: list[dict[str, Any]] = []
+    for version in kept:
+        version_id = str(version["version_id"])
+        observations = by_version.get(version_id, [])
+        frame_observations = [
+            obs
+            for obs in observations
+            if isinstance(obs, Mapping) and obs.get("frame_id") == child_frame_id
+        ]
+        owned = version.get("frame_id") == child_frame_id
+        latest = _latest_observation(frame_observations)
+        # An owned version that already names a Cell keeps that Cell. One
+        # that does not adopts the latest same-frame observation, so a later
+        # failed or interrupted producer cannot stay "verified" on an empty
+        # producing_cell_id. A version with neither stays cell-less.
+        cell_id = version.get("producing_cell_id") if owned else None
+        if not isinstance(cell_id, str) or not cell_id:
+            cell_id = latest.get("producing_cell_id") if latest is not None else None
+        kind = latest.get("capture_kind") if latest is not None else None
+        capture_kind = kind if kind in _EVIDENCE_CAPTURE_KINDS else None
+        checksum = _evidence_checksum(version.get("checksum"))
+        size_bytes = version.get("size_bytes")
+        public_size = (
+            size_bytes
+            if isinstance(size_bytes, int) and not isinstance(size_bytes, bool)
+            else None
+        )
+        found: list[str] = []
+        if not _attributed_to_frame(version, observations, child_frame_id):
+            found.append("other_frame")
+        if checksum is None:
+            found.append("no_checksum")
+        snapshot_reason = _snapshot_reason(version.get("snapshot_path"), size_bytes)
+        if snapshot_reason is not None:
+            found.append(snapshot_reason)
+        cell_status, cell_reason = _cell_receipt(cell_id, cells, child_frame_id)
+        if cell_reason is not None:
+            found.append(cell_reason)
+        reasons = [code for code in _EVIDENCE_REASONS if code in found][:4]
+        blocking = [code for code in found if code != "no_cell_receipt"]
+        items.append(
+            {
+                "filename": _evidence_text(version.get("filename")),
+                "artifact_id": _evidence_text(version.get("artifact_id")),
+                "version_id": _evidence_text(version_id),
+                "checksum": checksum,
+                "size_bytes": public_size,
+                "capture_kind": capture_kind,
+                "producing_cell_id": _evidence_text(cell_id),
+                "cell_status": cell_status,
+                "verdict": (
+                    "insufficient_evidence"
+                    if blocking
+                    else "verified_version_and_producer"
+                ),
+                "reasons": reasons,
+            }
+        )
+    return project_browser_artifact_evidence(
+        {
+            "scope": _EVIDENCE_SCOPE,
+            "items": items,
+            "total": total,
+            "truncated": total > len(items),
+            # Frozen when the child finishes. A later panel read does not re-check.
+            "checked_at": time.time(),
+        }
+    )
 
 
 def _derive_task_status(

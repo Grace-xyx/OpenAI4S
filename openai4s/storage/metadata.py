@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from typing import Any, Callable, Mapping
@@ -31,6 +32,156 @@ SECRET_ARG_HOST_CALLS = frozenset(
         "record_bash_result",
     }
 )
+
+# ``host.judge`` keeps its replay-tape recording, and its result digest
+# unless the result is a soft-fail error (see ``_result_audit``). The
+# argument preview is replaced before the generic json.dumps, so every
+# writer of host_call_log is covered. Schema v33 only rewrites rows already
+# stored; new rows are projected here.
+REDACTED_JUDGE_STATE = "<redacted judge state>"
+REDACTED_JUDGE_PARAMS = "<redacted judge params>"
+_INVALID_JUDGE_TEMPLATE = "<invalid template>"
+_UNKNOWN_JUDGE_TEMPLATE = "<unknown template>"
+_JUDGE_TEMPLATE_BODY = r"[A-Za-z0-9_.:\-]{1,100}"
+_JUDGE_TEMPLATE_ID = re.compile("^" + _JUDGE_TEMPLATE_BODY + "$")
+_JUDGE_PREVIEW_KEYS = frozenset({"template", "state", "params"})
+# Historical previews are ``json.dumps`` (spaces after ":" and ",") cut at
+# 500 characters, so they are usually not valid JSON. The template id is
+# read from that prefix only.
+_STORED_JUDGE_TEMPLATE = re.compile(
+    r'^\[\{"template": "(' + _JUDGE_TEMPLATE_BODY + r')"'
+)
+
+
+def _bounded_audit_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)[:500]
+
+
+def _registered_judge_template(template_id: str) -> bool:
+    """Whether ``template_id`` is a template this process can run.
+
+    Imported lazily so opening the store does not import the judgment
+    package, and so a build that has removed that package still redacts.
+    Any failure -- a missing package, an unknown id, or an error while the
+    bundled templates load -- answers False. The projection then keeps no
+    caller text, and migration 33 cannot fail on the experimental package.
+    """
+
+    try:
+        from openai4s.judgment.registry import get_template
+
+        get_template(template_id)
+    except Exception:  # noqa: BLE001 - an unreadable registry keeps nothing
+        return False
+    return True
+
+
+def judge_audit_args(args: Any) -> list:
+    """Project one ``host.judge`` call for ``host_call_log.args_preview``.
+
+    A template id is kept only when :func:`openai4s.judgment.registry.get_template`
+    resolves it. A charset-safe id the registry does not know is
+    ``<unknown template>``. Any other template string is
+    ``<invalid template>``. State is the fixed marker. Params, when the
+    call carried them, are the fixed params marker. Any other shape
+    collapses to the state marker alone. This function never serializes
+    the original arguments.
+    """
+
+    if isinstance(args, list) and len(args) == 1 and isinstance(args[0], dict):
+        spec = args[0]
+        template = spec.get("template")
+        if isinstance(template, str) and _JUDGE_TEMPLATE_ID.fullmatch(template):
+            kept = (
+                template
+                if _registered_judge_template(template)
+                else _UNKNOWN_JUDGE_TEMPLATE
+            )
+            projected: dict[str, str] = {
+                "template": kept,
+                "state": REDACTED_JUDGE_STATE,
+            }
+        else:
+            projected = {
+                "template": _INVALID_JUDGE_TEMPLATE,
+                "state": REDACTED_JUDGE_STATE,
+            }
+        if "params" in spec:
+            projected["params"] = REDACTED_JUDGE_PARAMS
+        return [projected]
+    return [{"state": REDACTED_JUDGE_STATE}]
+
+
+def _is_projected_judge_preview(text: str) -> bool:
+    """Whether ``text`` is exactly what :func:`judge_audit_args` stores.
+
+    The text has to be the projection's own serialization, byte for byte,
+    and a template it names has to be one of the two markers or an id the
+    registry resolves. A raw preview that only parses into the same shape
+    -- a charset-safe id that is no template, another key order, other
+    separators, a duplicated key -- is still raw and gets projected.
+    """
+
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 1
+        or not isinstance(parsed[0], dict)
+    ):
+        return False
+    item = parsed[0]
+    if not set(item).issubset(_JUDGE_PREVIEW_KEYS):
+        return False
+    if item.get("state") != REDACTED_JUDGE_STATE:
+        return False
+    if "params" in item and (
+        item.get("params") != REDACTED_JUDGE_PARAMS or "template" not in item
+    ):
+        return False
+    if "template" in item:
+        template = item.get("template")
+        if template not in (_INVALID_JUDGE_TEMPLATE, _UNKNOWN_JUDGE_TEMPLATE) and not (
+            isinstance(template, str)
+            and _JUDGE_TEMPLATE_ID.fullmatch(template)
+            and _registered_judge_template(template)
+        ):
+            return False
+    canonical = {
+        key: item[key] for key in ("template", "state", "params") if key in item
+    }
+    return text == _bounded_audit_json([canonical])
+
+
+def redact_stored_judge_args_preview(preview: Any) -> str:
+    """Rewrite one stored ``args_preview``.
+
+    A preview that is byte for byte what :func:`judge_audit_args` stores
+    (see :func:`_is_projected_judge_preview`) is returned unchanged.
+
+    Anything else is still raw. A charset-safe template id is read from the
+    prefix and passed through :func:`judge_audit_args`: an id the registry
+    resolves is kept, any other becomes ``<unknown template>``, and params
+    from the raw preview are not copied. A raw preview that does not begin
+    with such an id becomes the state-only projection.
+    """
+
+    text = preview if isinstance(preview, str) else ""
+    if _is_projected_judge_preview(text):
+        return text
+    match = _STORED_JUDGE_TEMPLATE.match(text)
+    if match:
+        projected = judge_audit_args([{"template": match.group(1)}])
+    else:
+        projected = judge_audit_args(None)
+    return _bounded_audit_json(projected)
+
+
+AUDIT_ARG_PROJECTIONS: dict[str, Callable[[Any], list]] = {
+    "judge": judge_audit_args,
+}
 
 
 class NotesRepository:
@@ -364,8 +515,12 @@ class HostCallRepository:
         if method in SECRET_ARG_HOST_CALLS:
             preview = "<redacted secret args>"
         else:
+            # Projections run before the generic dumps. A hit replaces the
+            # arguments in full; there is no fallback that serializes them.
+            project = AUDIT_ARG_PROJECTIONS.get(method)
+            payload = project(args) if project is not None else args
             try:
-                preview = json.dumps(args, ensure_ascii=False)[:500]
+                preview = _bounded_audit_json(payload)
             except (TypeError, ValueError):
                 preview = "<unserializable>"
         result_preview, result_digest = self._result_audit(method, result)
@@ -530,6 +685,15 @@ class HostCallRepository:
 
         if method in SECRET_ARG_HOST_CALLS:
             return "<redacted secret-bearing result>", None
+        # A soft-fail error from a method whose arguments are projected can
+        # repeat those arguments ("unknown template: <id>"), and a short id
+        # is recoverable from a SHA-256 by trying candidates. Such a row
+        # records that an error happened, not a digest of its text.
+        error_echoes_arguments = (
+            method in AUDIT_ARG_PROJECTIONS
+            and isinstance(result, dict)
+            and bool(result.get("error"))
+        )
         try:
             encoded = json.dumps(
                 result,
@@ -557,6 +721,8 @@ class HostCallRepository:
             shape = {"type": "null"}
         else:
             shape = {"type": type(result).__name__}
+        if error_echoes_arguments:
+            return json.dumps(shape, separators=(",", ":")), None
         return json.dumps(shape, separators=(",", ":")), digest
 
     def _execute(self, sql: str, params: tuple = ()) -> None:
@@ -566,11 +732,16 @@ class HostCallRepository:
 
 
 __all__ = [
+    "AUDIT_ARG_PROJECTIONS",
     "CompactionRepository",
     "DERIVABLE_HOST_CALLS",
     "EndpointRepository",
     "FolderRepository",
     "HostCallRepository",
     "NotesRepository",
+    "REDACTED_JUDGE_PARAMS",
+    "REDACTED_JUDGE_STATE",
     "SECRET_ARG_HOST_CALLS",
+    "judge_audit_args",
+    "redact_stored_judge_args_preview",
 ]

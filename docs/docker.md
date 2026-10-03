@@ -62,11 +62,13 @@ docker run -d --name openai4s \
   -v openai4s-data:/data \
   -e OPENAI4S_LLM_API_KEY="$OPENAI4S_LLM_API_KEY" \
   openai4s:local
-docker logs openai4s
+docker exec openai4s openai4s url
 ```
 
-The last line prints the URL to open, token included. Or with Compose, which
-sets the same things and adds a health check and a stop grace period:
+The last line prints a sign-in link. In single-user mode the link carries the
+token; container logs do not. In team mode open `http://<host>:<port>/login`
+instead — a `?token=` link is not a browser login there. Or with Compose,
+which sets the same things and adds a health check and a stop grace period:
 
 ```bash
 docker compose up -d --build
@@ -78,14 +80,17 @@ with `docker build --build-arg OPENAI4S_EXTRAS= -t openai4s:core .`.
 
 ## The access token
 
-The daemon mints it once into `/data/access-token` and prints it at startup.
-Three ways to get it:
+The daemon mints it once into `/data/access-token`. Startup logs and
+`docker logs` do not include it. Three ways to print a sign-in link:
 
 ```bash
-docker compose exec openai4s openai4s url       # the URL, ready to open
-docker logs openai4s 2>&1 | grep token          # the startup banner
+docker exec openai4s openai4s url                 # single-user: ready to open
+docker compose exec openai4s openai4s url         # the same, under Compose
 kubectl -n openai4s exec deploy/openai4s -- openai4s url
 ```
+
+In team mode that command prints `http://<host>:<port>/login`. The token file
+on the volume is `/data/access-token` either way.
 
 It lives on the volume, so it survives restarts and every browser session you
 have already authorised stays valid. Lose the volume and every cookie is
@@ -96,9 +101,8 @@ need a token you control (GitOps, a shared cluster), pre-seed
 `/data/access-token` with a long random string, mode 0600, owned by uid 1000,
 before the daemon first starts; `load_or_mint` uses an existing file unchanged.
 
-Note that the token is printed in cleartext to stderr on every boot, so it
-reaches pod logs and any aggregator you ship them to. Treat that log stream as
-credential-bearing, or rotate the token by deleting the file and restarting.
+Rotate the token by deleting `/data/access-token` and restarting. Startup
+logs stay free of it; do not look for it in `docker logs`.
 
 ## Configuration
 
@@ -176,7 +180,8 @@ openai4s.security.secret_broker.SecretStoreUnavailable: refusing to handle
 credentials without a secure store (no secure secret store on this host).
 ```
 
-ahead of the access-token banner. It is caught and the daemon serves normally.
+ahead of the startup notice (which does not include the access token). It is
+caught and the daemon serves normally.
 Choosing a backend the container actually has is what removes it.
 
 ### Kernel isolation, honestly
@@ -364,11 +369,12 @@ docker run -d --name openai4s \
   -v openai4s-data:/data \
   -e OPENAI4S_LLM_API_KEY="$OPENAI4S_LLM_API_KEY" \
   openai4s:local
-docker logs openai4s
+docker exec openai4s openai4s url
 ```
 
-最后一行会打印出可直接打开的 URL，带着令牌。或者用 Compose——它设置同样的东西，
-另外加上健康检查与停止宽限期：
+最后一行会打印登录链接。单人模式下这条链接带着令牌；容器日志里没有。团队模式请
+打开 `http://<host>:<port>/login`——`?token=` 链接在那里不是浏览器登录。或者用
+Compose——它设置同样的东西，另外加上健康检查与停止宽限期：
 
 ```bash
 docker compose up -d --build
@@ -380,13 +386,17 @@ docker compose exec openai4s openai4s url
 
 ## 访问令牌
 
-daemon 只铸造一次，写进 `/data/access-token`，并在启动时打印出来。三种取法：
+daemon 只铸造一次，写进 `/data/access-token`。启动日志和 `docker logs` 都不含它。
+三种打印登录链接的方式：
 
 ```bash
-docker compose exec openai4s openai4s url       # 可直接打开的 URL
-docker logs openai4s 2>&1 | grep token          # 启动横幅
+docker exec openai4s openai4s url                 # 单人模式：可直接打开
+docker compose exec openai4s openai4s url         # 同上，Compose 环境
 kubectl -n openai4s exec deploy/openai4s -- openai4s url
 ```
+
+团队模式下这条命令打印的是 `http://<host>:<port>/login`。无论哪种模式，卷上的
+令牌文件都是 `/data/access-token`。
 
 它在卷上，所以能跨重启存活，你已经授权过的浏览器会话也都继续有效。卷丢了，所有
 cookie 也随之失效。
@@ -395,8 +405,8 @@ cookie 也随之失效。
 共享集群），就在 daemon 首次启动前把 `/data/access-token` 预置好：一个足够长的
 随机串，权限 0600，属主 uid 1000；`load_or_mint` 会原样沿用已存在的文件。
 
-另外注意：令牌每次启动都会以明文打到 stderr，因此会进入 Pod 日志和你转运日志的
-任何聚合系统。要么把那条日志流当作含凭据来对待，要么删掉文件并重启以轮换令牌。
+轮换令牌时删掉 `/data/access-token` 再重启。启动日志里不会出现它；不要到
+`docker logs` 里去找。
 
 ## 配置
 
@@ -458,7 +468,7 @@ cookie 也随之失效。
 **如果你把存储改回 `auto`，那每次启动都会看到一段 traceback。** 在既没有 keychain
 也没有 session bus 的主机上，`auto` 会 fail closed——这对凭据是对的，对噪音是错的：
 每次启动都会跑一遍的凭据迁移会构造一个它并不需要的 broker（根本没有什么可迁移的），
-于是启动时会在访问令牌横幅之前打印
+于是启动时会在启动通知之前打印（这条通知不含访问令牌）
 
 ```
 openai4s.security.secret_broker.SecretStoreUnavailable: refusing to handle

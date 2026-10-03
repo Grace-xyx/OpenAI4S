@@ -257,6 +257,54 @@ def test_escaped_like_treats_percent_and_underscore_as_literals(server):
     assert "notes.txt" not in {row["filename"] for row in body["artifacts"]}
 
 
+@pytest.mark.parametrize(
+    ("filename", "query"),
+    [
+        ("ÉTUDE_100%", "étude_100%"),
+        ("étude_100%", "ÉTUDE_100%"),
+        ("ΔΕΙΓΜΑ", "δειγμα"),
+        ("ОТЧЁТ", "отчёт"),
+    ],
+)
+def test_unicode_case_insensitive_filename_search_keeps_pagination(
+    server, filename, query
+):
+    # The composer used to lowercase the full project list in JavaScript.
+    # Its index query must find the same files, even in another session.
+    _cfg, runner, client = server
+    pid = _project(runner.store)
+    source = runner.create_session(pid)
+    runner.create_session(pid)
+    expected = []
+    for index in range(3):
+        row = _save(
+            runner.store,
+            root_frame_id=source,
+            project_id=pid,
+            filename=f"{filename}-{index}.csv",
+        )
+        _set_created_at(runner.store, row["artifact_id"], 2_000 + index)
+        expected.insert(0, row["artifact_id"])
+    hidden = _save(
+        runner.store,
+        root_frame_id=source,
+        project_id=pid,
+        filename=f"{filename}-hidden.csv",
+    )
+    runner.store.set_priority(hidden["artifact_id"], -1)
+    _save(
+        runner.store,
+        root_frame_id=source,
+        project_id=pid,
+        filename="ÉTUDEX100a-unrelated.csv",
+    )
+
+    seen, final, pages = _walk(client, pid, q=query, limit=1)
+    assert seen == expected
+    assert pages == 3
+    assert final["has_more"] is False
+
+
 def test_filters_combine_and_a_changed_filter_invalidates_the_cursor(server):
     _cfg, runner, client = server
     pid = _project(runner.store)
@@ -514,7 +562,7 @@ def test_malformed_limit_and_origin_are_refused(server):
 def test_the_browse_index_exists_and_dropping_it_does_not_touch_rows(tmp_path):
     store = get_store(Config(data_dir=tmp_path).db_path)
     try:
-        assert store.schema_state()["version"] == SCHEMA_VERSION == 32
+        assert store.schema_state()["version"] == SCHEMA_VERSION == 34
         names = {
             row[1] for row in store._conn.execute("PRAGMA index_list('artifacts')")
         }

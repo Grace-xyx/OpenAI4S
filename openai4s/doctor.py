@@ -347,8 +347,52 @@ def _runtime(cfg: Any) -> Check:
     return Check("runtime", OK, f"{detail}, Rscript at {r_path}", facts=facts)
 
 
+def _with_allowlist_boundary(check: Check) -> Check:
+    """Fail an unproven kernel when Cells also require an allowlist boundary."""
+
+    from openai4s.egress import cell_admission_refusal, egress_mode
+
+    if egress_mode() != "allowlist":
+        return check
+    decision = cell_admission_refusal(check.facts)
+    if decision is None:
+        return check
+    code = str(decision.get("code") or "egress_boundary_unavailable")
+    # A check that already failed has its own detail and remedy. Prefix the
+    # stable code and leave that text in place. A warning or an otherwise
+    # passing probe has no failure of its own, so the boundary copy is the
+    # explanation.
+    if check.status == FAIL:
+        detail = str(check.detail or "")
+        prefix = f"{code}: "
+        if not detail.startswith(prefix):
+            detail = prefix + detail
+        return Check(
+            check.name,
+            FAIL,
+            detail,
+            check.remedy,
+            dict(check.facts),
+        )
+    remedy = " ".join(str(item) for item in decision.get("remedy") or [])
+    reason = str(decision.get("reason") or check.detail)
+    return Check(
+        check.name,
+        FAIL,
+        f"{code}: {reason}",
+        remedy or check.remedy,
+        dict(check.facts),
+    )
+
+
 def _isolation(cfg: Any) -> Check:
     """Is the kernel sandbox actually going to be applied?"""
+    return _with_allowlist_boundary(_isolation_report(cfg))
+
+
+def _isolation_report(cfg: Any) -> Check:
+    """Measured sandbox posture, before the allowlist Cell gate."""
+
     mode = (os.environ.get("OPENAI4S_KERNEL_SANDBOX") or "auto").strip().lower()
     facts: dict[str, Any] = {"mode": mode}
     if mode == "off":
@@ -585,7 +629,8 @@ def _data_dir(cfg: Any) -> Check:
             f"serve` or `openai4s run` migrates it to schema {supported}, which "
             f"reinstalling an older release does not undo. doctor does not "
             f"migrate it, so the checks that read the database did not open it",
-            "Back up the data directory first (docs/upgrading.md, section 1), "
+            "Back up the data directory first (docs/upgrading.md, the section "
+            "for the release you are upgrading from), "
             "then start `openai4s serve` or run `openai4s run` once and rerun "
             "`openai4s doctor`.",
             facts,

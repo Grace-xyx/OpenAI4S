@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -1205,7 +1206,14 @@ class LocalActionExecutor:
             # Keep the lazy runtime genuinely lazy: readiness and other local
             # admission checks run before safety, action-context binding, or a
             # Python/R worker can be created.
-            self.admit_cell(action)
+            try:
+                self.admit_cell(action)
+            except BaseException as exc:
+                from openai4s.egress import is_boundary_refusal
+
+                if is_boundary_refusal(exc):
+                    return self._egress_boundary_outcome(exc)
+                raise
             return self._execute_code(action, reply, state)
         return self._execute_legacy_or_nudge(reply, state)
 
@@ -1402,6 +1410,21 @@ class LocalActionExecutor:
             if result is not None and artifact_receipts:
                 result["_openai4s_artifact_receipts"] = list(artifact_receipts)
         except BaseException as exc:
+            from openai4s.egress import is_boundary_refusal
+
+            if is_boundary_refusal(exc):
+                try:
+                    if hooks is not None:
+                        failed_result = (
+                            {"id": attempt[2], "error": str(exc)}
+                            if attempt is not None
+                            else None
+                        )
+                        hooks.after(action, token, failed_result)
+                finally:
+                    if attempt is not None:
+                        self._finish_code_attempt(attempt, "egress_boundary_refused")
+                return self._egress_boundary_outcome(exc)
             try:
                 if hooks is not None:
                     failed_result = (
@@ -1579,6 +1602,26 @@ class LocalActionExecutor:
         else:
             observation = self.prose_nudge
         return self._user_observation(observation)
+
+    def _egress_boundary_outcome(self, exc: BaseException) -> ExecutionOutcome:
+        from openai4s.egress import (
+            EGRESS_BOUNDARY_UNAVAILABLE,
+            boundary_refusal_decision,
+        )
+
+        message = str(exc)
+        prefix = f"{EGRESS_BOUNDARY_UNAVAILABLE}:"
+        if not message.startswith(prefix):
+            # The refusal can sit below a wrapper; its decision travels with it.
+            decision = boundary_refusal_decision(exc) or {}
+            reason = str(decision.get("reason") or "")
+            message = f"{EGRESS_BOUNDARY_UNAVAILABLE}: {reason}"
+        print(f"error: {message}", file=sys.stderr)
+        return ExecutionOutcome(
+            ({"role": "user", "content": message},),
+            observation=message,
+            stop_reason=EGRESS_BOUNDARY_UNAVAILABLE,
+        )
 
     @staticmethod
     def _user_observation(

@@ -139,6 +139,9 @@ Undo these mounts. After the edit, the named function must not import
 | `tests/test_egress_surface.py` | `test_the_surface_is_small_enough_to_review` | Bound `14` → `13`. Delete the paragraph that says the surface grew from thirteen for `judgment/typesafe.py`. |
 | `tests/test_doctor.py` | `test_every_probe_reports_without_a_running_daemon` | Remove `"judgment"` from the expected check-name set. |
 | `tests/test_kernel_recovery.py` | `test_bundled_sidecar_recovery_compatibility_is_explicit` | `assert len(sidecars) == 19` → `18` (deleting `skills/text-features/kernel.py`). |
+| `tests/test_metadata_repositories.py` | `test_registered_template_ids_are_kept_and_unknown_ids_are_not`, `test_a_failing_template_registry_keeps_no_caller_text` | Delete both. They import `openai4s.judgment.registry`. |
+| `tests/test_metadata_repositories.py` | `test_judge_audit_preview_drops_state_and_params`, `test_judge_audit_outputs_are_fixed_points_of_the_stored_rewrite` | Every expected preview that keeps `system.probe` or `features.custom` becomes `<unknown template>`. With no registry, no id is kept (section 5). |
+| `tests/test_schema_migrations.py` | `test_v33_redacts_historical_judge_args_and_leaves_other_rows` | Every expected preview that keeps `system.probe`, `literature.screen` or `features.custom` becomes `<unknown template>`. The step itself stays (section 5). |
 | `pyproject.toml` | `[tool.setuptools.package-data] openai4s` | Delete `"judgment/templates/*.json"`. |
 | `pyproject.toml` | `[tool.mypy] files` | Delete every `openai4s/judgment/...` path (disclosure through `llm_backend.py`). |
 | `scripts/render_skill_install_sections.py` | `NPM_020_UNAVAILABLE_SKILLS` | Remove `"text-features"` from the frozenset. Keep `"single-cell-rna-analysis"`. |
@@ -165,7 +168,21 @@ does not inspect hashed dist assets.
 
 ## 5. Settings keys (Store)
 
-No schema migration. After removal nothing reads these rows. Optional cleanup
+Do not add a schema migration, and do not delete one. Migration 33
+(`redact_judge_host_call_args`, `Store._apply_redact_judge_host_call_args`)
+stays in the numbered sequence. It rewrites historical `host_call_log`
+rows. Dropping the step would skip that rewrite on a database that has not
+reached 33.
+
+Keep `AUDIT_ARG_PROJECTIONS["judge"]` in `openai4s/storage/metadata.py`
+(`judge_audit_args` and `redact_stored_judge_args_preview`).
+`HostCallRepository.log` projects `method="judge"` through that entry.
+Deleting it stores the raw arguments again. After `openai4s/judgment/` is
+gone, the projection's `get_template` import fails and every template id
+is stored as `<unknown template>`. That is the outcome to keep. Do not
+replace it with the caller's text.
+
+After removal nothing reads these settings rows. Optional cleanup
 on a running data dir (not required for the suite):
 
 ```text

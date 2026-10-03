@@ -4542,31 +4542,30 @@ def test_token_gate_401_and_cookie_redirect(monkeypatch, tmp_path, capsys):
     timing. And the redirect went to "/" unconditionally, so a bookmarked deep
     link carrying a token landed on the dashboard instead of its target.
     """
-    cfg = _cfg(tmp_path)
-    runner = gateway_mod.SessionRunner(cfg, _Hub())
-    handler_cls = gateway_mod.make_handler(cfg, _Hub(), runner)
-    captured = capsys.readouterr()
-    # stderr, and this assertion is the point rather than a detail. On `print`
-    # to stdout the banner is block-buffered whenever stdout is not a TTY, so
-    # under nohup, systemd, Docker or any redirect to a log file the one line a
-    # user needs in order to open their own daemon never appeared. It showed in
-    # a terminal, which is exactly why it survived review -- the configuration
-    # that hides it is the one nobody develops in. Found by running a real
-    # daemon with stdout redirected, not by reading the code.
-    assert (
-        "?token=" not in captured.out
-    ), "the access token went to stdout, which is block-buffered off a TTY"
-    tok = re.search(r"\?token=([A-Za-z0-9_-]{20,})", captured.err)
-    assert tok, "gateway did not print the access token to stderr"
-    token = tok.group(1)
+    import uuid
 
-    # Persisted, so a second daemon on the same data dir uses the same token
-    # rather than invalidating the first one's cookies.
     from openai4s.server import local_auth
 
+    cfg = _cfg(tmp_path)
+    token = "tok-03-" + uuid.uuid4().hex
+    (cfg.data_dir / "access-token").write_text(token, encoding="utf-8")
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    handler_cls = gateway_mod.make_handler(cfg, _Hub(), runner)
+    # Persisted, so a second daemon on the same data dir uses the same token
+    # rather than invalidating the first one's cookies. Both banners are in
+    # the capture below: startup logs must not carry the token.
     assert local_auth.read_token(cfg.data_dir) == token
     gateway_mod.make_handler(cfg, _Hub(), runner)
     assert local_auth.read_token(cfg.data_dir) == token
+    captured = capsys.readouterr()
+    assert token not in captured.out
+    assert token not in captured.err
+    assert "?token=" not in captured.out
+    assert "?token=" not in captured.err
+    expected = local_auth.startup_auth_banner(cfg.host, cfg.port, team_mode=False)
+    assert captured.err.count(expected) == 2
+    assert "access token required" in captured.err
+    assert "openai4s url" in captured.err
 
     handler = object.__new__(handler_cls)
     handler.headers = {}  # no Cookie, no Origin

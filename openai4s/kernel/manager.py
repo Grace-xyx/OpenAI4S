@@ -547,7 +547,25 @@ class Kernel:
             try:
                 if not self.is_alive():
                     raise RuntimeError("kernel worker is not alive")
+                # Allowlist admits a Cell only after this kernel has proven it
+                # blocks raw network. The check is before any fifo or frame,
+                # and it applies to every origin, including bootstrap. Read
+                # the mode first: ``sandbox_status`` is not needed while
+                # egress is off, and it is a measured snapshot.
+                from openai4s.egress import (
+                    EgressBoundaryUnavailable,
+                    cell_admission_refusal,
+                    egress_mode,
+                )
+
+                if egress_mode() == "allowlist":
+                    decision = cell_admission_refusal(self.sandbox_status)
+                    if decision is not None:
+                        raise EgressBoundaryUnavailable(decision)
                 cell_id = str(cell_id or uuid.uuid4())
+                # Host copy of the id on the execute frame. Artifact host
+                # calls are stamped from it; the worker global is not.
+                self._inflight_execute_cell_id = cell_id
                 request: dict[str, Any] = {
                     "type": "execute",
                     "id": cell_id,
@@ -675,6 +693,9 @@ class Kernel:
                         if isinstance(message, str) and message:
                             self.worker_log_tail.append(message[:2000])
             finally:
+                # No execute is in flight on the way out, including a refusal
+                # that never chose an id. A later host call must not reuse it.
+                self._inflight_execute_cell_id = None
                 if capture is not None:
                     # Unconditional: an interrupt, a dead worker or a raising
                     # host call all leave a fifo and two reader threads behind,
@@ -925,6 +946,50 @@ class Kernel:
         if transport is not None:
             transport.kill()
 
+    _EXECUTION_CELL_STAMP_METHODS = frozenset(
+        {"save_artifact", "materialise_artifact", "prov_record"}
+    )
+
+    #: The producing Cell recorded when the worker's own claim and the Cell
+    #: the host is executing disagree. No ``execution_log`` row has this id,
+    #: so the evidence check never verifies such a version.
+    UNATTRIBUTED_EXECUTION_CELL = "unattributed"
+
+    def _stamp_inflight_execution_cell(self, method: str, args: Any) -> None:
+        """Decide ``executionCellId`` on the three version-writing calls.
+
+        The worker copies a process-global cell id into the call. Cell code
+        can rewrite that global, or add a snake-case ``execution_cell_id``
+        that wins when the dispatcher decodes the keys; and a thread can
+        send a call after its Cell returned, which this read loop then
+        services during the next execute. So every spelling of the key is
+        removed, and the host writes the id of the execute it is reading
+        for -- only when the worker's own claim, if it made one, is that same
+        id. Any disagreement, or no execute in flight, records
+        ``UNATTRIBUTED_EXECUTION_CELL``. ``producingCellId`` is the caller's
+        claim and is left alone; the host prefers the execution id.
+        """
+
+        if method not in self._EXECUTION_CELL_STAMP_METHODS:
+            return
+        if not isinstance(args, list) or not args or not isinstance(args[0], dict):
+            return
+        spec = args[0]
+        claimed: set[str] = set()
+        for key in [
+            key
+            for key in spec
+            if str(key).replace("_", "").lower() == "executioncellid"
+        ]:
+            value = spec.pop(key)
+            if value is not None and value != "":
+                claimed.add(str(value))
+        cell_id = getattr(self, "_inflight_execute_cell_id", None)
+        if isinstance(cell_id, str) and cell_id and claimed <= {cell_id}:
+            spec["executionCellId"] = cell_id
+        else:
+            spec["executionCellId"] = self.UNATTRIBUTED_EXECUTION_CELL
+
     def _service_host_call(self, frame: dict) -> None:
         call_id = frame.get("id")
         method = frame.get("method", "")
@@ -939,6 +1004,8 @@ class Kernel:
             )
             return
         try:
+            # Inside the try: a malformed frame still gets its one response.
+            self._stamp_inflight_execution_cell(method, args)
             bind_generation = getattr(self.dispatcher, "bind_bash_generation", None)
             bind_action = getattr(self.dispatcher, "bind_action_context", None)
             bind_sandbox = getattr(self.dispatcher, "bind_sandbox_status", None)

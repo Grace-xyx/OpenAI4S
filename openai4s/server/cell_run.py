@@ -369,6 +369,19 @@ class CellExecutionService:
                 else None
             )
         except BaseException as exc:
+            egress_decision = _egress_decision_from_failure(exc)
+            if egress_decision is not None:
+                return self._refuse_egress_boundary(
+                    session,
+                    request,
+                    emit,
+                    index,
+                    cell_id,
+                    None,
+                    attempt_id,
+                    None,
+                    egress_decision,
+                )
             self._finish_attempt(attempt_id, "prepare_failed", exc)
             raise
         try:
@@ -416,6 +429,24 @@ class CellExecutionService:
                 generation_id,
             )
         if runtime_error is not None:
+            # R bootstrap is stringified before this service sees it:
+            # ``R kernel unavailable: R kernel bootstrap failed:
+            # egress_boundary_unavailable: …``. That happens before the
+            # posture precheck below, and the refused worker has already
+            # been shut down, so the precheck cannot recover the code.
+            egress_decision = _egress_decision_from_failure(RuntimeError(runtime_error))
+            if egress_decision is not None:
+                return self._refuse_egress_boundary(
+                    session,
+                    request,
+                    emit,
+                    index,
+                    cell_id,
+                    kernel_id,
+                    attempt_id,
+                    generation_id,
+                    egress_decision,
+                )
             return self._soft_error(
                 session,
                 request,
@@ -429,9 +460,23 @@ class CellExecutionService:
                 generation_id,
             )
 
+        from openai4s.egress import cell_admission_refusal
         from openai4s.server.skill_network_admission import admit_cell, frame_scope
 
         sandbox_status = _session_sandbox_status(session, request.language)
+        egress_decision = cell_admission_refusal(sandbox_status)
+        if egress_decision is not None:
+            return self._refuse_egress_boundary(
+                session,
+                request,
+                emit,
+                index,
+                cell_id,
+                kernel_id,
+                attempt_id,
+                generation_id,
+                egress_decision,
+            )
         network_decision = admit_cell(
             frame_id=session.root_frame_id,
             sandbox_status=sandbox_status,
@@ -478,6 +523,21 @@ class CellExecutionService:
             with frame_scope(session.root_frame_id):
                 result = self.ports.run(session, request, cell_id, on_chunk, lease)
         except BaseException as exc:
+            egress_decision = _egress_decision_from_failure(exc)
+            if egress_decision is not None:
+                # The kernel is still usable: a boundary refusal sends no
+                # Cell, so the R lease stays published for a later Cell.
+                return self._refuse_egress_boundary(
+                    session,
+                    request,
+                    emit,
+                    index,
+                    cell_id,
+                    kernel_id,
+                    attempt_id,
+                    generation_id,
+                    egress_decision,
+                )
             # A live R process can still be protocol-desynchronized when its
             # reader exits through a callback/parse error. Close only this lease;
             # watchdog recovery may already have advanced the generation.
@@ -720,6 +780,36 @@ class CellExecutionService:
             )
 
         return on_chunk
+
+    def _refuse_egress_boundary(
+        self,
+        session: CellSession,
+        request: CellRequest,
+        emit: EventSink,
+        index: int,
+        cell_id: str,
+        kernel_id: str | None,
+        attempt_id: str | None,
+        generation_id: str | None,
+        decision: dict[str, Any],
+    ) -> CellExecutionResult:
+        code = str(decision.get("code") or "egress_boundary_unavailable")
+        reason = str(decision.get("reason") or "")
+        refused = self._soft_error(
+            session,
+            request,
+            emit,
+            index,
+            cell_id,
+            kernel_id,  # type: ignore[arg-type]
+            f"{code}: {reason}",
+            attempt_id,
+            "egress_boundary_refused",
+            generation_id,
+        )
+        if isinstance(refused.result, dict):
+            refused.result["egress_boundary"] = dict(decision)
+        return refused
 
     def _soft_error(
         self,
@@ -983,6 +1073,29 @@ def activity_title(code: str, index: int) -> str:
         elif stripped:
             break
     return f"Running analysis · cell {index}"
+
+
+def _egress_decision_from_failure(exc: BaseException) -> dict[str, Any] | None:
+    """Project a trusted boundary refusal, or None when ``exc`` is not one.
+
+    Recognition is ``egress.is_boundary_refusal``: a typed boundary
+    exception on the cause/context chain, or one of the two exact bootstrap
+    prefixes while allowlist is on. A typed refusal carries the decision of
+    the kernel that refused. A prefix refusal comes from a bootstrap
+    candidate that was never published, so the session's slot -- a previous
+    worker, or none -- is not its posture, and the sandbox fields stay null.
+
+    A cancellation or timeout is the user's or the watchdog's verdict on the
+    Cell. A refusal it happens to wrap does not replace it.
+    """
+
+    from openai4s.egress import boundary_refusal_decision, is_boundary_refusal
+
+    if isinstance(exc, (KernelCancellation, TimeoutError)):
+        return None
+    if not is_boundary_refusal(exc):
+        return None
+    return boundary_refusal_decision(exc)
 
 
 def _session_sandbox_status(

@@ -13230,11 +13230,86 @@
           "children": {
             "items": {
               "properties": {
+                "artifact_evidence": {
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "properties": {
+                          "reasons": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "verdict": {
+                            "type": "string"
+                          },
+                          "version_id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "reasons",
+                          "verdict",
+                          "version_id"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "scope": {
+                      "type": "string"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "scope",
+                    "total",
+                    "truncated"
+                  ],
+                  "type": "object"
+                },
                 "artifact_refs": {
+                  "items": {
+                    "properties": {
+                      "artifact_id": {
+                        "type": "string"
+                      },
+                      "checksum": {
+                        "type": "string"
+                      },
+                      "filename": {
+                        "type": "string"
+                      },
+                      "frame_id": {
+                        "type": "string"
+                      },
+                      "version_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "artifact_id",
+                      "checksum",
+                      "filename",
+                      "frame_id",
+                      "version_id"
+                    ],
+                    "type": "object"
+                  },
                   "type": "array"
                 },
                 "attempt_id": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "child_id": {
                   "type": "string"
@@ -13256,9 +13331,6 @@
                 },
                 "name": {
                   "type": "string"
-                },
-                "output": {
-                  "type": "null"
                 },
                 "overrides": {
                   "properties": {},
@@ -13291,10 +13363,10 @@
                   "type": "object"
                 },
                 "request_id": {
-                  "type": "null"
-                },
-                "result": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "started_at": {
                   "type": "null"
@@ -13311,6 +13383,33 @@
                       "type": "integer"
                     },
                     "messages": {
+                      "items": {
+                        "properties": {
+                          "boundary": {
+                            "type": "null"
+                          },
+                          "delivered_at": {
+                            "type": "null"
+                          },
+                          "message_id": {
+                            "type": "string"
+                          },
+                          "queued_at": {
+                            "type": "number"
+                          },
+                          "status": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "boundary",
+                          "delivered_at",
+                          "message_id",
+                          "queued_at",
+                          "status"
+                        ],
+                        "type": "object"
+                      },
                       "type": "array"
                     },
                     "queued": {
@@ -13342,13 +13441,11 @@
                 "finished_at",
                 "frame_id",
                 "name",
-                "output",
                 "overrides",
                 "parent_child_id",
                 "parent_frame_id",
                 "progress",
                 "request_id",
-                "result",
                 "started_at",
                 "status",
                 "steering",

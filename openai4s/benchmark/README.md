@@ -81,9 +81,9 @@ numbers must never be presented as current-model performance.
 The field probes use the production Python/R kernels, Store/Artifact
 repository, Reviewer evidence pipeline, Notebook exporter, Ketcher route body,
 and science connector catalog. Ketcher is fetched from the production Gateway
-handler through a real, isolated loopback HTTP socket. Its ephemeral access
-token banner is captured and verified inside a spawned child process, never
-written to the acceptance CLI streams or report. Only the LLM boundary is
+handler through a real, isolated loopback HTTP socket. Its startup banner is
+captured and verified to contain no access token inside a spawned child
+process, never written to the acceptance CLI streams or report. Only the LLM boundary is
 deterministically and call-locally injected for the offline Reviewer case. An
 injected Reviewer that writes the formal workspace is observed as
 `workspace_unchanged=false` and fails the field-path assertion. Stage 0 does not

@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -315,6 +316,142 @@ def test_url_ignores_a_recorded_endpoint_when_the_pid_is_not_live(
 
     assert module.cmd_url(SimpleNamespace()) == 0
     assert capsys.readouterr().out.strip() == "http://127.0.0.1:8760/"
+
+
+def _plant_token(data_dir: Path) -> str:
+    token = "tok-03-" + uuid.uuid4().hex
+    (data_dir / "access-token").write_text(token, encoding="utf-8")
+    return token
+
+
+def test_url_follows_team_mode_recorded_by_the_live_daemon(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="172.25.100.5")
+    payload = json.loads(config.statefile.read_text(encoding="utf-8"))
+    payload["team_mode"] = True
+    config.statefile.write_text(json.dumps(payload), encoding="utf-8")
+    token = _plant_token(tmp_path)
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    output = capsys.readouterr().out.strip()
+    assert output == "http://172.25.100.5:9876/login"
+    assert token not in output
+
+
+def test_url_follows_a_single_user_daemon_even_when_this_shell_says_team(
+    tmp_path, monkeypatch, capsys
+):
+    """The divergence `_live_team_mode` exists for: the daemon was started
+    single-user, the shell running `openai4s url` exports team mode. The live
+    daemon's record wins, so the sign-in URL still carries its token."""
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="172.25.100.5")
+    payload = json.loads(config.statefile.read_text(encoding="utf-8"))
+    payload["team_mode"] = False
+    config.statefile.write_text(json.dumps(payload), encoding="utf-8")
+    config.team_mode = True
+    token = _plant_token(tmp_path)
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == f"http://172.25.100.5:9876/?token={token}"
+
+
+def test_url_in_team_mode_without_a_live_daemon_uses_cfg(monkeypatch, capsys):
+    module = _cli_module()
+    monkeypatch.setattr(
+        module,
+        "get_config",
+        lambda: SimpleNamespace(
+            host="127.0.0.1", port=9876, team_mode=True, pidfile=None
+        ),
+    )
+
+    assert module.main(["url"]) == 0
+    assert capsys.readouterr().out.strip() == "http://127.0.0.1:9876/login"
+
+
+def test_url_falls_back_to_cfg_when_an_old_statefile_omits_team_mode(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="172.25.100.5")
+    config.team_mode = True
+    token = _plant_token(tmp_path)
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    output = capsys.readouterr().out.strip()
+    assert output == "http://172.25.100.5:9876/login"
+    assert token not in output
+
+
+def test_url_ignores_a_non_bool_team_mode_in_the_statefile(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="172.25.100.5")
+    payload = json.loads(config.statefile.read_text(encoding="utf-8"))
+    payload["team_mode"] = "false"
+    config.statefile.write_text(json.dumps(payload), encoding="utf-8")
+    token = _plant_token(tmp_path)
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == (
+        f"http://172.25.100.5:9876/?token={token}"
+    )
+
+
+def test_url_ignores_team_mode_recorded_for_a_different_pid(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path)
+    payload = json.loads(config.statefile.read_text(encoding="utf-8"))
+    payload["pid"] = 9999
+    payload["team_mode"] = True
+    config.statefile.write_text(json.dumps(payload), encoding="utf-8")
+    token = _plant_token(tmp_path)
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == (f"http://127.0.0.1:8760/?token={token}")
+
+
+def test_statefile_payload_records_team_mode():
+    module = _cli_module()
+    bare = json.loads(
+        module._statefile_payload(SimpleNamespace(host="127.0.0.1", port=1))
+    )
+    enabled = json.loads(
+        module._statefile_payload(
+            SimpleNamespace(host="127.0.0.1", port=1, team_mode=True)
+        )
+    )
+    disabled = json.loads(
+        module._statefile_payload(
+            SimpleNamespace(host="127.0.0.1", port=1, team_mode=False)
+        )
+    )
+    assert bare["team_mode"] is False
+    assert enabled["team_mode"] is True
+    assert disabled["team_mode"] is False
 
 
 @pytest.mark.parametrize(
@@ -1092,14 +1229,23 @@ def test_detached_serve_starts_the_foreground_command_in_a_new_session(
 
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(module, "_health_ready", lambda _cfg: True)
-    monkeypatch.setattr(module, "_url", lambda _cfg: "http://127.0.0.1:8760/?ready")
+
+    def _fake_url(_cfg, *, with_token=True, endpoint=None):
+        if with_token:
+            return "http://127.0.0.1:8760/?ready"
+        return "http://127.0.0.1:8760/"
+
+    monkeypatch.setattr(module, "_url", _fake_url)
 
     args = SimpleNamespace(no_open=True)
     assert module._cmd_serve_detached(args, config) == 0
     assert launched["command"][-1] == "--no-browser"
     assert launched["kwargs"]["start_new_session"] is True
     assert launched["kwargs"]["stdin"] is module.subprocess.DEVNULL
-    assert "daemon started (pid 4321)" in capsys.readouterr().out
+    started = capsys.readouterr().out
+    assert "daemon started (pid 4321) at http://127.0.0.1:8760/" in started
+    assert "?ready" not in started
+    assert "sign in: run `openai4s url` to print a sign-in link" in started
 
 
 def test_detached_serve_stops_a_child_that_never_becomes_ready(

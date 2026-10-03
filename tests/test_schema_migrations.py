@@ -26,6 +26,7 @@ history that is simply not recorded anywhere.
 import json
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 
 import pytest
@@ -161,6 +162,12 @@ def test_a_new_store_is_stamped_and_recorded(tmp_path):
         # Keyset browse index for GET /projects/{pid}/artifact-index.
         # Additive CREATE INDEX IF NOT EXISTS; DROP INDEX is the reverse.
         "artifact_browse_index",
+        # Historical host.judge previews kept the raw state. New writes
+        # project it; this step rewrites the rows already on disk.
+        "redact_judge_host_call_args",
+        # Bounded Web background-cell receipts. Written before the worker
+        # starts; a later daemon does not replay an unfinished row.
+        "background_exec_receipts",
     ]
     assert state["applied"][0]["checksum"]
     assert state["applied"][0]["applied_at"] > 0
@@ -1650,7 +1657,10 @@ def test_storage_readmes_name_the_migration_numbers_the_code_uses(tmp_path):
             "artifact_browse_index"
         ),
         r"版本 (\d+) 增加可回滚的 Artifact browse 索引": "artifact_browse_index",
+        r"Version (\d+) rewrites": "redact_judge_host_call_args",
+        r"版本 (\d+) 改写": "redact_judge_host_call_args",
     }
+    matched: set[str] = set()
     for name in ("README.md", "README_zh.md"):
         text = Path("openai4s/storage") / name
         body = text.read_text("utf-8")
@@ -1658,10 +1668,12 @@ def test_storage_readmes_name_the_migration_numbers_the_code_uses(tmp_path):
             match = re.search(pattern, body)
             if match is None:
                 continue
+            matched.add(pattern)
             assert int(match.group(1)) == by_name[migration], (
                 f"{name} says migration {match.group(1)} for {migration}, "
                 f"but the code applies it as {by_name[migration]}"
             )
+    assert matched == set(claims)
 
 
 def _schema_objects(path: Path) -> set[tuple[str, str]]:
@@ -1947,3 +1959,281 @@ def test_hot_rollback_journal_does_not_bypass_the_future_schema_refusal(tmp_path
     with pytest.raises(FutureSchemaError) as rejected:
         Store(path)
     assert rejected.value.actual_version == SCHEMA_VERSION + 1
+
+
+def test_v33_redacts_historical_judge_args_and_leaves_other_rows(tmp_path, monkeypatch):
+    """Migration 33 rewrites stored judge previews and leaves every other row.
+
+    The truncated preview is the 500-character cut ``json.dumps`` actually
+    stored, so it is not valid JSON. A registered template id is taken from
+    that prefix. A second open takes the ``user_version`` fast path and does
+    not execute the step. Rewinding to 32 and opening again does. The two
+    shapes a new write stores — a params marker, and ``<invalid template>`` —
+    stay byte for byte across that forced re-run, and a ``judge`` row whose
+    ``call_id`` is NULL is rewritten. ``PRAGMA secure_delete`` after the
+    upgrade equals the value the connection had before it, including FAST.
+    A charset-safe id that is no template -- complete, cut at 500
+    characters, or already in the projection's shape -- is stored as
+    ``<unknown template>`` and leaves no byte of itself on disk.
+    """
+
+    near = f"SENTINEL-02-{uuid.uuid4()}"
+    far = f"SENTINEL-02-{uuid.uuid4()}"
+    param = f"SENTINEL-02-{uuid.uuid4()}"
+    mrn = f"MRN-{uuid.uuid4().hex[:12]}-HIV"
+    secrets = (near, far, param, mrn)
+
+    complete = json.dumps(
+        [
+            {
+                "template": "system.probe",
+                "state": {"nest": {"secret": near, "tail": far}},
+                "params": {"specs": param},
+            }
+        ],
+        ensure_ascii=False,
+    )
+    assert len(complete) <= 500
+    json.loads(complete)
+
+    long_dump = json.dumps(
+        [
+            {
+                "template": "literature.screen",
+                "state": {"nest": {"secret": near, "pad": "q" * 800, "tail": far}},
+                "params": {"specs": param},
+            }
+        ],
+        ensure_ascii=False,
+    )
+    assert long_dump.find(near) < 500
+    assert long_dump.find(far) > 500
+    truncated = long_dump[:500]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(truncated)
+    assert near in truncated
+    assert far not in truncated
+
+    invalid = json.dumps(
+        [
+            {
+                "template": f"not a template {near}",
+                "state": {"secret": far},
+                "params": {"specs": param},
+            }
+        ],
+        ensure_ascii=False,
+    )
+    assert near in invalid and far in invalid and param in invalid
+
+    kept = json.dumps(
+        [{"template": "system.probe", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    state_only = json.dumps(
+        [{"state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    projected_params = json.dumps(
+        [
+            {
+                "template": "features.custom",
+                "state": "<redacted judge state>",
+                "params": "<redacted judge params>",
+            }
+        ],
+        ensure_ascii=False,
+    )
+    projected_invalid = json.dumps(
+        [{"template": "<invalid template>", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    null_raw = json.dumps(
+        [{"template": "system.probe", "state": {"secret": near}}],
+        ensure_ascii=False,
+    )
+    control = json.dumps(
+        [{"url": "https://example.test/keep"}],
+        ensure_ascii=False,
+    )
+    mrn_raw = json.dumps(
+        [{"template": mrn, "state": {"secret": near}}],
+        ensure_ascii=False,
+    )
+    mrn_truncated = json.dumps(
+        [{"template": mrn, "state": {"secret": near, "pad": "q" * 800}}],
+        ensure_ascii=False,
+    )[:500]
+    mrn_shaped = json.dumps(
+        [{"template": mrn, "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    unknown_template = json.dumps(
+        [{"template": "<unknown template>", "state": "<redacted judge state>"}],
+        ensure_ascii=False,
+    )
+    for secret in secrets:
+        assert secret not in control
+        assert secret not in kept
+        assert secret not in state_only
+
+    expected = {
+        "complete": json.dumps(
+            [{"template": "system.probe", "state": "<redacted judge state>"}],
+            ensure_ascii=False,
+        ),
+        "truncated": json.dumps(
+            [
+                {
+                    "template": "literature.screen",
+                    "state": "<redacted judge state>",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        "invalid": state_only,
+        "kept": kept,
+        "state": state_only,
+        "projected_params": projected_params,
+        "projected_invalid": projected_invalid,
+        "null_call": json.dumps(
+            [{"template": "system.probe", "state": "<redacted judge state>"}],
+            ensure_ascii=False,
+        ),
+        "mrn_raw": unknown_template,
+        "mrn_truncated": unknown_template,
+        "mrn_shaped": unknown_template,
+        "control": control,
+    }
+    methods = {key: "judge" for key in expected}
+    methods["control"] = "web_fetch"
+    inserted = {
+        "complete": complete,
+        "truncated": truncated,
+        "invalid": invalid,
+        "kept": kept,
+        "state": state_only,
+        "projected_params": projected_params,
+        "projected_invalid": projected_invalid,
+        "null_call": null_raw,
+        "mrn_raw": mrn_raw,
+        "mrn_truncated": mrn_truncated,
+        "mrn_shaped": mrn_shaped,
+        "control": control,
+    }
+
+    db = Config(data_dir=tmp_path).db_path
+    get_store(db).close()
+    conn = sqlite3.connect(db)
+    try:
+        for index, key in enumerate(inserted):
+            conn.execute(
+                "INSERT INTO host_call_log("
+                "call_id,method,args_preview,result_preview,result_digest,"
+                "ok,created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    None if key == "null_call" else f"hc-{key}",
+                    methods[key],
+                    inserted[key],
+                    f"result:{key}",
+                    "ab" * 32,
+                    1,
+                    1000 + index,
+                ),
+            )
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 33")
+        conn.execute("PRAGMA user_version = 32")
+        conn.commit()
+    finally:
+        conn.close()
+
+    def read_rows(store):
+        fetched = store._conn.execute(
+            "SELECT call_id,method,args_preview,result_preview,result_digest "
+            "FROM host_call_log ORDER BY created_at"
+        ).fetchall()
+        return [tuple(row) for row in fetched]
+
+    def version_33_names(store):
+        return [
+            row["name"]
+            for row in store.schema_state()["applied"]
+            if row["version"] == 33
+        ]
+
+    def secure_delete_mode(connection):
+        return int(connection.execute("PRAGMA secure_delete").fetchone()[0])
+
+    def call_id_for(key):
+        return None if key == "null_call" else f"hc-{key}"
+
+    with sqlite3.connect(db) as probe:
+        secure_before = secure_delete_mode(probe)
+
+    upgraded = get_store(db)
+    try:
+        rows = read_rows(upgraded)
+        assert secure_delete_mode(upgraded._conn) == secure_before
+        assert upgraded.schema_state()["version"] == SCHEMA_VERSION == 34
+        assert version_33_names(upgraded) == ["redact_judge_host_call_args"]
+    finally:
+        upgraded.close()
+
+    by_id = {row[0]: row for row in rows}
+    assert set(by_id) == {call_id_for(key) for key in inserted}
+    for key, preview in expected.items():
+        _call_id, method, args_preview, result_preview, result_digest = by_id[
+            call_id_for(key)
+        ]
+        assert method == methods[key]
+        assert args_preview == preview
+        assert result_preview == f"result:{key}"
+        assert result_digest == "ab" * 32
+        for secret in secrets:
+            assert secret not in (args_preview or "")
+    assert by_id["hc-control"][2] == control
+
+    def assert_disk_has_no_sentinel() -> None:
+        files = [path for path in tmp_path.rglob("*") if path.is_file()]
+        assert db in files
+        assert b"https://example.test/keep" in db.read_bytes()
+        for path in files:
+            data = path.read_bytes()
+            for secret in secrets:
+                assert secret.encode() not in data, path
+
+    assert_disk_has_no_sentinel()
+    assert not db.with_name(f"{db.name}.v32.bak").exists()
+    for suffix in ("-journal", "-wal"):
+        assert not db.with_name(db.name + suffix).exists()
+
+    again = get_store(db)
+    try:
+        assert read_rows(again) == rows
+        assert version_33_names(again) == ["redact_judge_host_call_args"]
+    finally:
+        again.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 33")
+        conn.execute("PRAGMA user_version = 32")
+        conn.commit()
+    finally:
+        conn.close()
+    real_pragmas = Store._apply_pragmas
+
+    def fast_secure_delete(self):
+        real_pragmas(self)
+        self._conn.execute("PRAGMA secure_delete = FAST").fetchall()
+
+    monkeypatch.setattr(Store, "_apply_pragmas", fast_secure_delete)
+    rerun = get_store(db)
+    try:
+        assert read_rows(rerun) == rows
+        assert version_33_names(rerun) == ["redact_judge_host_call_args"]
+        # Integer 2 is ON. The step has to put the name FAST back.
+        assert secure_delete_mode(rerun._conn) == 2
+    finally:
+        rerun.close()
+    assert_disk_has_no_sentinel()

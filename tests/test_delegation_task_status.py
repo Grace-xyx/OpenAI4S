@@ -10,6 +10,8 @@ machine checks can only downgrade it, and the durable lifecycle mapping
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 
@@ -20,6 +22,7 @@ import openai4s.agent.loop as loop_mod
 from openai4s.agent.delegation import (
     DelegationError,
     DelegationRunner,
+    _project_artifact_evidence,
 )
 from openai4s.agent.models import KernelEnvSpec
 from openai4s.config import get_config
@@ -78,6 +81,8 @@ def test_submitted_child_defaults_to_completed_with_the_new_envelope_fields(
     assert result["max_turns"] == 7
     assert result["limitations"] == ["only 3 samples"]
     assert result["artifacts"] == []
+    # No durable frame: the evidence key is omitted rather than invented.
+    assert "artifact_evidence" not in result
     # Environment is reported even for the CLI default (no selection, no
     # durable generation): every key present, honestly None.
     assert result["environment"] == {
@@ -389,9 +394,11 @@ def test_cancelled_child_keeps_the_stopped_shape_without_task_status(monkeypatch
 
     assert result["stop_reason"] == "stopped"
     assert "task_status" not in result
+    assert "artifact_evidence" not in result
     child = store.delegation_tree(parent)["children"][0]
     assert child["status"] == "stopped"
     assert child["task_status"] is None
+    assert "artifact_evidence" not in child
 
 
 # --------------------------------------------------------------------------
@@ -574,3 +581,802 @@ def test_collect_carries_task_status(monkeypatch):
     assert result["task_status"] == "partial"
     assert result["turns"] == 2
     assert "environment" in result
+
+
+# --------------------------------------------------------------------------
+# bounded artifact_evidence: store records, never the child's pointers
+# --------------------------------------------------------------------------
+
+_SHA = "a" * 64
+
+
+def _plant(
+    frame_id,
+    tmp_path,
+    filename,
+    *,
+    status="ok",
+    snapshot=True,
+    size_bytes=None,
+    checksum=_SHA,
+    delete=False,
+    cell=True,
+):
+    """One version attributed to ``frame_id``. The checksum is not the file hash."""
+    store = get_store(get_config().db_path)
+    payload = b"evidence-bytes"
+    path = tmp_path / filename
+    path.write_bytes(payload)
+    cell_id = None
+    if cell:
+        if status == "ok":
+            logged = {}
+        elif status == "interrupted":
+            logged = {"interrupted": True}
+        else:
+            logged = {"error": "failed"}
+        cell_id = store.log_cell(
+            frame_id=frame_id,
+            code="value = 1\n",
+            result=logged,
+            origin="delegate",
+        )
+    recorded = len(payload) if size_bytes is None else size_bytes
+    saved = store.save_artifact(
+        path=str(path),
+        filename=filename,
+        content_type="text/plain",
+        size_bytes=recorded,
+        checksum=checksum,
+        producing_cell_id=cell_id,
+        frame_id=frame_id,
+        snapshot_path=str(path) if snapshot else None,
+    )
+    if delete:
+        path.unlink()
+    return saved, path
+
+
+def _stamp_versions(store, stamps):
+    repo = store._artifacts
+    with repo._lock:
+        for version_id, created_at in stamps.items():
+            repo._connection.execute(
+                "UPDATE artifact_versions SET created_at=? WHERE version_id=?",
+                (created_at, version_id),
+            )
+        repo._connection.commit()
+
+
+def _item(result, version_id):
+    items = result["artifact_evidence"]["items"]
+    return next(item for item in items if item["version_id"] == version_id)
+
+
+@pytest.mark.parametrize(
+    ("filename", "public_filename"),
+    [
+        ("/Users/private/research/report.csv", None),
+        (r"C:\Private\research\report.csv", None),
+        ("C:/Private/research/report.csv", None),
+        (r"\\research-host\private\report.csv", None),
+        ("reports/report.csv", "reports/report.csv"),
+        ("report.csv", "report.csv"),
+    ],
+)
+def test_saved_artifact_evidence_omits_absolute_filenames(
+    tmp_path, filename, public_filename
+):
+    """A real Host save may carry a path-shaped display filename."""
+    from openai4s.host_dispatch import build_dispatcher
+
+    cfg = get_config()
+    store = get_store(cfg.db_path)
+    frame_id = store.new_frame(kind="delegate")
+    dispatcher = build_dispatcher(cfg, workspace=tmp_path, frame_id=frame_id)
+    store.set_permission_rule(
+        scope="conversation",
+        scope_id=frame_id,
+        tool="save_artifact",
+        pattern="*",
+        decision="allow",
+    )
+    (tmp_path / "report.csv").write_text("value\n1\n", encoding="utf-8")
+    cell_id = store.log_cell(
+        frame_id=frame_id, code="value = 1\n", result={}, origin="delegate"
+    )
+    saved = dispatcher(
+        "save_artifact",
+        [{"path": "report.csv", "filename": filename, "producing_cell_id": cell_id}],
+    )
+    assert "version_id" in saved
+    rows = store.artifact_evidence_rows_for_frame(frame_id, limit=12)
+    before = json.dumps(rows, sort_keys=True)
+
+    evidence = _project_artifact_evidence(rows, frame_id)
+
+    assert evidence["items"][0]["filename"] == public_filename
+    assert evidence["items"][0]["version_id"] == saved["version_id"]
+    assert evidence["items"][0]["verdict"] == "verified_version_and_producer"
+    assert rows["versions"][0]["filename"] == filename
+    assert json.dumps(rows, sort_keys=True) == before
+
+
+def test_other_frame_artifact_is_excluded_from_child_evidence(monkeypatch, tmp_path):
+    """A same-name version from another frame is not this child's evidence.
+
+    A row the reader leaked anyway stays insufficient: attribution is part of
+    the verdict, so a native write on another frame cannot be verified.
+    """
+    planted = {}
+
+    def run(self, task):
+        other = planted["other"]
+        foreign, _path = _plant(other, tmp_path, "shared.csv", cell=False)
+        own, _path = _plant(self.frame_id, tmp_path, "shared.csv")
+        planted["foreign"] = foreign["version_id"]
+        planted["own"] = own["version_id"]
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, store, parent = _runner_with_store(child_max_turns=3)
+    other = store.new_frame(parent_id=parent, kind="delegate")
+    planted["parent"] = parent
+    planted["other"] = other
+    try:
+        result = runner({"request": "produce"})
+    finally:
+        runner.close()
+
+    assert result["artifacts"] == ["shared.csv"]
+    assert result["task_status"] == "completed"
+    ids = [item["version_id"] for item in result["artifact_evidence"]["items"]]
+    assert planted["foreign"] not in ids
+    own = _item(result, planted["own"])
+    assert own["verdict"] == "verified_version_and_producer"
+
+    leaked = tmp_path / "leaked.txt"
+    leaked.write_bytes(b"foreign-native")
+    projected = _project_artifact_evidence(
+        {
+            "versions": [
+                {
+                    "version_id": "v-foreign",
+                    "artifact_id": "a-foreign",
+                    "filename": "shared.csv",
+                    "checksum": _SHA,
+                    "size_bytes": leaked.stat().st_size,
+                    "snapshot_path": str(leaked),
+                    "producing_cell_id": None,
+                    "frame_id": "frame-other",
+                }
+            ],
+            "observations": [],
+            "cells": {},
+            "total": 1,
+        },
+        "frame-child",
+    )
+    leaked_item = projected["items"][0]
+    assert leaked_item["verdict"] == "insufficient_evidence"
+    assert "other_frame" in leaked_item["reasons"]
+
+
+def test_metadata_without_a_snapshot_is_insufficient(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, _path = _plant(self.frame_id, tmp_path, "bare.txt", snapshot=False)
+        planted["version_id"] = saved["version_id"]
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "meta"})
+    finally:
+        runner.close()
+
+    item = _item(result, planted["version_id"])
+    assert item["verdict"] == "insufficient_evidence"
+    assert item["reasons"] == ["no_snapshot"]
+    assert item["checksum"] == _SHA
+    assert item["capture_kind"] is None
+
+
+def test_uppercase_checksum_is_not_a_sha256_record(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, _path = _plant(self.frame_id, tmp_path, "upper.txt", checksum="A" * 64)
+        planted["version_id"] = saved["version_id"]
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "upper"})
+    finally:
+        runner.close()
+
+    item = _item(result, planted["version_id"])
+    assert item["checksum"] is None
+    assert item["verdict"] == "insufficient_evidence"
+    assert "no_checksum" in item["reasons"]
+
+
+def test_missing_or_resized_snapshot_is_insufficient(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        missing, _path = _plant(self.frame_id, tmp_path, "gone.txt", delete=True)
+        resized, path = _plant(self.frame_id, tmp_path, "resized.txt", size_bytes=1)
+        planted["missing"] = missing["version_id"]
+        planted["resized"] = resized["version_id"]
+        planted["resized_bytes"] = path.read_bytes()
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "files"})
+    finally:
+        runner.close()
+
+    missing = _item(result, planted["missing"])
+    resized = _item(result, planted["resized"])
+    assert missing["verdict"] == "insufficient_evidence"
+    assert "snapshot_missing" in missing["reasons"]
+    assert resized["verdict"] == "insufficient_evidence"
+    assert "size_mismatch" in resized["reasons"]
+    assert hashlib.sha256(planted["resized_bytes"]).hexdigest() != resized["checksum"]
+
+
+def test_reused_head_is_verified_for_the_observing_child(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        store = get_store(get_config().db_path)
+        other = planted["other"]
+        payload = b"reuse-bytes"
+        path = tmp_path / "result.csv"
+        path.write_bytes(payload)
+        other_cell = store.log_cell(
+            frame_id=other,
+            code="value = 1\n",
+            result={"error": "failed"},
+            origin="delegate",
+        )
+        child_cell = store.log_cell(
+            frame_id=self.frame_id,
+            code="value = 2\n",
+            result={},
+            origin="delegate",
+        )
+        original = store.record_cell_artifact(
+            path=str(path),
+            filename="result.csv",
+            content_type="text/csv",
+            size_bytes=len(payload),
+            checksum=_SHA,
+            producing_cell_id=other_cell,
+            frame_id=other,
+            snapshot_path=str(path),
+            reuse_matching_head=True,
+        )
+        reused = store.record_cell_artifact(
+            path=str(path),
+            filename="result.csv",
+            content_type="text/csv",
+            size_bytes=len(payload),
+            checksum=_SHA,
+            producing_cell_id=child_cell,
+            frame_id=self.frame_id,
+            snapshot_path=str(tmp_path / "not-retained.csv"),
+            reuse_matching_head=True,
+        )
+        planted["version_id"] = reused["version_id"]
+        planted["original"] = original["version_id"]
+        planted["capture_kind"] = reused["capture_kind"]
+        planted["digest"] = hashlib.sha256(payload).hexdigest()
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, store, parent = _runner_with_store(child_max_turns=3)
+    planted["other"] = store.new_frame(parent_id=parent, kind="delegate")
+    try:
+        result = runner({"request": "reuse"})
+    finally:
+        runner.close()
+
+    assert planted["version_id"] == planted["original"]
+    assert planted["capture_kind"] == "head_checksum_reused"
+    assert planted["digest"] != _SHA
+    rows = store.artifact_evidence_rows_for_frame(result["frame_id"], limit=12)
+    version = next(
+        row for row in rows["versions"] if row["version_id"] == planted["version_id"]
+    )
+    assert version["frame_id"] == planted["other"]
+    item = _item(result, planted["version_id"])
+    assert item["verdict"] == "verified_version_and_producer"
+    assert item["capture_kind"] == "head_checksum_reused"
+    assert item["cell_status"] == "ok"
+    assert item["checksum"] == _SHA
+    assert item["reasons"] == []
+
+
+def test_failed_producing_cell_is_insufficient(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, _path = _plant(self.frame_id, tmp_path, "bad.txt", status="error")
+        planted["version_id"] = saved["version_id"]
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "fail cell"})
+    finally:
+        runner.close()
+
+    item = _item(result, planted["version_id"])
+    assert item["verdict"] == "insufficient_evidence"
+    assert item["cell_status"] == "error"
+    assert "cell_failed" in item["reasons"]
+
+
+def test_evidence_keeps_twelve_newest_versions(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        store = get_store(get_config().db_path)
+        ids = []
+        for index in range(13):
+            saved, _path = _plant(self.frame_id, tmp_path, f"f{index:02d}.txt")
+            ids.append(saved["version_id"])
+        _stamp_versions(
+            store, {version_id: index + 1 for index, version_id in enumerate(ids)}
+        )
+        planted["ids"] = ids
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "many"})
+    finally:
+        runner.close()
+
+    evidence = result["artifact_evidence"]
+    assert evidence["total"] == 13
+    assert evidence["truncated"] is True
+    assert len(evidence["items"]) == 12
+    kept = [item["version_id"] for item in evidence["items"]]
+    assert planted["ids"][0] not in kept
+    assert kept[0] == planted["ids"][-1]
+    assert set(kept) == set(planted["ids"][1:])
+    assert result["task_status"] == "completed"
+    assert len(result["artifacts"]) == 13
+
+
+def test_evidence_does_not_change_task_status_or_artifact_names(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        loop_mod.Agent,
+        "run",
+        lambda self, task: _submitted(task_status="completed"),
+    )
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        missing = runner({"request": "produce", "require_artifacts": ["results.csv"]})
+    finally:
+        runner.close()
+    assert missing["task_status"] == "partial"
+    assert missing["missing_artifacts"] == ["results.csv"]
+    assert missing["artifacts"] == []
+    assert missing["artifact_evidence"]["items"] == []
+
+    def run(self, task):
+        _save_child_artifact(self, "results.csv")
+        return _submitted(task_status="completed")
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        present = runner({"request": "produce", "require_artifacts": ["results.csv"]})
+    finally:
+        runner.close()
+    assert present["task_status"] == "completed"
+    assert present["missing_artifacts"] == []
+    assert present["artifacts"] == ["results.csv"]
+    item = present["artifact_evidence"]["items"][0]
+    assert item["filename"] == "results.csv"
+    assert item["verdict"] == "insufficient_evidence"
+    assert "no_checksum" in item["reasons"]
+    assert "no_snapshot" in item["reasons"]
+
+
+def test_child_reported_evidence_is_ignored(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, _path = _plant(self.frame_id, tmp_path, "real.txt", cell=False)
+        planted["version_id"] = saved["version_id"]
+        return _submitted(
+            {
+                "ok": True,
+                "artifact_evidence": {
+                    "scope": "version_and_producer",
+                    "items": [
+                        {
+                            "version_id": "forged",
+                            "verdict": "verified_version_and_producer",
+                        }
+                    ],
+                },
+                "artifact_refs": [{"version_id": "forged"}],
+            }
+        )
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "forge"})
+    finally:
+        runner.close()
+
+    assert result["artifact_refs"] == []
+    assert result["task_status"] == "completed"
+    ids = [item["version_id"] for item in result["artifact_evidence"]["items"]]
+    assert ids == [planted["version_id"]]
+    assert "forged" not in ids
+    assert result["output"]["artifact_refs"][0]["version_id"] == "forged"
+
+
+def test_truncated_result_keeps_artifact_evidence(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, _path = _plant(self.frame_id, tmp_path, "kept.txt", cell=False)
+        planted["version_id"] = saved["version_id"]
+        output = {f"k{index:02d}": "y" * 500 for index in range(60)}
+        return _submitted(output)
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, store, parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "huge"})
+    finally:
+        runner.close()
+
+    assert result["output"]["k00"] == "y" * 500
+    assert _item(result, planted["version_id"])["verdict"] == (
+        "verified_version_and_producer"
+    )
+    row = store._conn.execute(
+        "SELECT result_json FROM delegation_children WHERE root_frame_id=?",
+        (parent,),
+    ).fetchone()
+    assert len(row["result_json"]) <= 16_000
+    decoded = json.loads(row["result_json"])
+    assert decoded["truncated"] is True
+    assert decoded["task_status"] == "completed"
+    assert (
+        decoded["artifact_evidence"]["items"][0]["version_id"] == planted["version_id"]
+    )
+    child = store.delegation_tree(parent)["children"][0]
+    assert child["artifact_evidence"]["items"][0]["version_id"] == planted["version_id"]
+    assert child["task_status"] == "completed"
+
+
+def test_native_write_without_a_cell_can_be_verified(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, path = _plant(self.frame_id, tmp_path, "native.txt", cell=False)
+        planted["version_id"] = saved["version_id"]
+        planted["digest"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return _submitted()
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "native"})
+    finally:
+        runner.close()
+
+    item = _item(result, planted["version_id"])
+    assert planted["digest"] != _SHA
+    assert item["verdict"] == "verified_version_and_producer"
+    assert item["reasons"] == ["no_cell_receipt"]
+    assert item["cell_status"] is None
+    assert item["producing_cell_id"] is None
+
+
+def test_evidence_read_failure_does_not_fail_the_child(monkeypatch):
+    def explode(_frame_id, *, limit):
+        raise RuntimeError("evidence read failed")
+
+    monkeypatch.setattr(loop_mod.Agent, "run", lambda self, task: _submitted())
+    runner, store, _parent = _runner_with_store(child_max_turns=3)
+    monkeypatch.setattr(store, "artifact_evidence_rows_for_frame", explode)
+    try:
+        result = runner({"request": "still finishes"})
+    finally:
+        runner.close()
+
+    assert result["task_status"] == "completed"
+    evidence = result["artifact_evidence"]
+    assert evidence["unavailable"] is True
+    assert evidence["items"] == []
+    assert evidence["total"] == 0
+    assert evidence["truncated"] is False
+    assert isinstance(evidence["checked_at"], float)
+
+
+def test_output_schema_failure_still_carries_evidence(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, _path = _plant(self.frame_id, tmp_path, "typed.txt", cell=False)
+        planted["version_id"] = saved["version_id"]
+        return _submitted({"wrong": 1})
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner(
+            {
+                "request": "typed",
+                "output_schema": {"type": "object", "required": ["x"]},
+            }
+        )
+    finally:
+        runner.close()
+
+    assert "output_schema violation" in result["error"]
+    assert result["task_status"] == "failed"
+    assert _item(result, planted["version_id"])["verdict"] == (
+        "verified_version_and_producer"
+    )
+
+
+def test_exception_path_still_carries_evidence(monkeypatch, tmp_path):
+    planted = {}
+
+    def run(self, task):
+        saved, _path = _plant(self.frame_id, tmp_path, "boom.txt", cell=False)
+        planted["version_id"] = saved["version_id"]
+        raise RuntimeError("kernel exploded")
+
+    monkeypatch.setattr(loop_mod.Agent, "run", run)
+    runner, _store, _parent = _runner_with_store(child_max_turns=3)
+    try:
+        result = runner({"request": "boom"})
+    finally:
+        runner.close()
+
+    assert result["task_status"] == "failed"
+    assert result["stop_reason"] == "error"
+    assert _item(result, planted["version_id"])["verdict"] == (
+        "verified_version_and_producer"
+    )
+
+
+def _cell_less_version_with_observation(tmp_path, *, cell_result: dict):
+    """An owned version whose producing_cell_id stays empty, plus one observation."""
+
+    store = get_store(get_config().db_path)
+    parent = store.new_frame(kind="turn", project_id="science")
+    child = store.new_frame(parent_id=parent, kind="delegate", project_id="science")
+    payload = b"evidence-bytes"
+    path = tmp_path / "reused.txt"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    first = store.record_cell_artifact(
+        path=str(path),
+        filename="reused.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id=None,
+        frame_id=child,
+        snapshot_path=str(path),
+        reuse_matching_head=True,
+    )
+    cell_id = store.log_cell(
+        frame_id=child,
+        code="value = 1\n",
+        result=cell_result,
+        origin="delegate",
+    )
+    second = store.record_cell_artifact(
+        path=str(path),
+        filename="reused.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id=cell_id,
+        frame_id=child,
+        snapshot_path=str(path),
+        reuse_matching_head=True,
+    )
+    assert second["version_id"] == first["version_id"]
+    assert second["capture_kind"] == "head_checksum_reused"
+    rows = store.artifact_evidence_rows_for_frame(child, limit=12)
+    version = next(
+        row for row in rows["versions"] if row["version_id"] == first["version_id"]
+    )
+    assert not version["producing_cell_id"]
+    return rows, child, first["version_id"]
+
+
+@pytest.mark.parametrize(
+    ("cell_result", "status"),
+    [({"error": "failed"}, "error"), ({"interrupted": True}, "interrupted")],
+)
+def test_owned_version_without_a_cell_adopts_a_failed_observation(
+    tmp_path, cell_result, status
+):
+    """A cell-less owned version used to ignore the observation and verify.
+
+    The latest same-frame observation is the producer. A Cell that is not ok
+    blocks the verdict.
+    """
+
+    rows, child, version_id = _cell_less_version_with_observation(
+        tmp_path, cell_result=cell_result
+    )
+    evidence = _project_artifact_evidence(rows, child)
+    item = next(row for row in evidence["items"] if row["version_id"] == version_id)
+    assert item["verdict"] == "insufficient_evidence"
+    assert item["cell_status"] == status
+    assert "cell_failed" in item["reasons"]
+    assert isinstance(evidence["checked_at"], float)
+
+
+def test_a_parent_cell_on_a_child_version_is_other_frame(tmp_path):
+    store = get_store(get_config().db_path)
+    parent = store.new_frame(kind="turn", project_id="science")
+    child = store.new_frame(parent_id=parent, kind="delegate", project_id="science")
+    parent_cell = store.log_cell(
+        frame_id=parent,
+        code="value = 1\n",
+        result={},
+        origin="agent",
+    )
+    payload = b"evidence-bytes"
+    path = tmp_path / "owned.txt"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    saved = store.record_cell_artifact(
+        path=str(path),
+        filename="owned.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id=parent_cell,
+        frame_id=child,
+        snapshot_path=str(path),
+    )
+    rows = store.artifact_evidence_rows_for_frame(child, limit=12)
+    evidence = _project_artifact_evidence(rows, child)
+    item = next(
+        row for row in evidence["items"] if row["version_id"] == saved["version_id"]
+    )
+    assert item["verdict"] == "insufficient_evidence"
+    assert "cell_other_frame" in item["reasons"]
+
+
+def test_an_unknown_cell_id_is_not_recorded(tmp_path):
+    store = get_store(get_config().db_path)
+    parent = store.new_frame(kind="turn", project_id="science")
+    child = store.new_frame(parent_id=parent, kind="delegate", project_id="science")
+    payload = b"evidence-bytes"
+    path = tmp_path / "unknown.txt"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    saved = store.record_cell_artifact(
+        path=str(path),
+        filename="unknown.txt",
+        content_type="text/plain",
+        size_bytes=len(payload),
+        checksum=digest,
+        producing_cell_id="cell-does-not-exist",
+        frame_id=child,
+        snapshot_path=str(path),
+    )
+    rows = store.artifact_evidence_rows_for_frame(child, limit=12)
+    evidence = _project_artifact_evidence(rows, child)
+    item = next(
+        row for row in evidence["items"] if row["version_id"] == saved["version_id"]
+    )
+    assert item["verdict"] == "insufficient_evidence"
+    assert "cell_not_recorded" in item["reasons"]
+
+
+def test_the_worker_injects_the_running_cell_into_prov_record():
+    import openai4s.kernel.worker as worker_mod
+
+    previous = worker_mod._ACTIVE_CELL_ID[0]
+    worker_mod._ACTIVE_CELL_ID[0] = "cell-from-worker"
+    try:
+        enriched = worker_mod._attach_cell_context(
+            "prov_record",
+            [{"path": "out.txt", "producing_cell_id": "cell-forged"}],
+        )
+        assert enriched[0]["executionCellId"] == "cell-from-worker"
+        assert enriched[0]["producing_cell_id"] == "cell-forged"
+        untouched = worker_mod._attach_cell_context("query", [{"sql": "select 1"}])
+        assert untouched == [{"sql": "select 1"}]
+        worker_mod._ACTIVE_CELL_ID[0] = ""
+        plain = worker_mod._attach_cell_context(
+            "prov_record",
+            [{"path": "out.txt", "producing_cell_id": "cell-forged"}],
+        )
+        assert plain == [{"path": "out.txt", "producing_cell_id": "cell-forged"}]
+    finally:
+        worker_mod._ACTIVE_CELL_ID[0] = previous
+
+
+def test_provenance_record_prefers_the_injected_cell_and_keeps_a_direct_claim(tmp_path):
+    from types import SimpleNamespace
+
+    from openai4s.host.data import HostDataService
+
+    class _Store:
+        def __init__(self) -> None:
+            self.fields = None
+
+        def record_cell_artifact(self, **fields):
+            self.fields = fields
+            return {"version_id": "v-1", "artifact_id": "a-1"}
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "out.bin").write_bytes(b"bytes")
+    store = _Store()
+    config = SimpleNamespace(
+        data_dir=tmp_path / "data",
+        artifacts_dir=tmp_path / "artifacts",
+        roadmap_features=SimpleNamespace(stage1_trusted_delivery=False),
+    )
+
+    def resolve(path, *, must_exist=False):
+        result = (workspace / path).resolve()
+        if must_exist and not result.exists():
+            raise FileNotFoundError(result)
+        return result
+
+    service = HostDataService(
+        store=store,
+        config=config,
+        frame_id="frame-1",
+        resolve_path=resolve,
+    )
+    service.provenance_record(
+        {
+            "path": "out.bin",
+            "filename": "out.bin",
+            "producing_cell_id": "cell-forged",
+            "execution_cell_id": "cell-injected",
+        }
+    )
+    assert store.fields["producing_cell_id"] == "cell-injected"
+    service.provenance_record(
+        {
+            "path": "out.bin",
+            "filename": "out.bin",
+            "producing_cell_id": "cell-legacy",
+        }
+    )
+    assert store.fields["producing_cell_id"] == "cell-legacy"
+    service.provenance_record(
+        {
+            "path": "out.bin",
+            "filename": "out.bin",
+            "producing_cell_id": "cell-legacy",
+            "execution_cell_id": "",
+        }
+    )
+    assert store.fields["producing_cell_id"] == "cell-legacy"

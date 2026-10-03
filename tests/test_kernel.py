@@ -709,6 +709,280 @@ def test_save_artifact_host_call_carries_canonical_and_declared_cell_ids():
     ]
 
 
+_STAMP_METHODS = ("save_artifact", "materialise_artifact", "prov_record")
+
+
+def test_execution_cell_stamp_trusts_only_an_agreeing_claim():
+    """The three version-writing calls carry the host's Cell, or none.
+
+    The host writes the id of the execute in flight when the worker's own
+    claim is absent or the same id. A different claim (a rewritten global, a
+    late call), a snake-case spelling smuggled beside it, or no execute in
+    flight records ``unattributed``. ``producingCellId`` stays the caller's
+    claim; other methods are untouched; a malformed frame still gets exactly
+    one response.
+    """
+
+    seen: list[tuple[str, list]] = []
+    sent: list[dict] = []
+
+    def dispatcher(method, args):
+        seen.append((method, args))
+        return {"ok": True}
+
+    def stamped(kernel, spec, method="save_artifact"):
+        seen.clear()
+        kernel._service_host_call(
+            {"id": "hc-1", "method": method, "args": [dict(spec)]}
+        )
+        assert len(seen) == 1
+        return seen[0][1][0]
+
+    with Kernel(dispatcher=dispatcher) as kernel:
+        kernel._send = sent.append
+        for method in _STAMP_METHODS:
+            idle = stamped(
+                kernel,
+                {"path": "x", "executionCellId": "forged", "producingCellId": "caller"},
+                method,
+            )
+            assert idle["executionCellId"] == "unattributed", method
+            assert idle["producingCellId"] == "caller"
+        other = stamped(kernel, {"executionCellId": "leave-me"}, "llm")
+        assert other["executionCellId"] == "leave-me"
+
+        kernel._inflight_execute_cell_id = "cell-live"
+        try:
+            assert (
+                stamped(kernel, {"executionCellId": "cell-live"})["executionCellId"]
+                == "cell-live"
+            )
+            assert stamped(kernel, {"path": "x"})["executionCellId"] == "cell-live"
+            assert (
+                stamped(kernel, {"executionCellId": "forged"})["executionCellId"]
+                == "unattributed"
+            )
+            smuggled = stamped(
+                kernel,
+                {"executionCellId": "cell-live", "execution_cell_id": "cell-ok"},
+            )
+            assert smuggled == {"executionCellId": "unattributed"}
+
+            sent.clear()
+            kernel._service_host_call({"id": "hc-bad", "method": ["x"], "args": []})
+            assert [frame["id"] for frame in sent] == ["hc-bad"]
+            assert sent[0]["type"] == "host_response" and sent[0]["error"]
+        finally:
+            kernel._inflight_execute_cell_id = None
+
+
+def _evidence_kernel_setup(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-only"),
+    )
+    dispatcher = build_dispatcher(cfg, workspace=workspace)
+    frame_id = dispatcher.store.new_frame(kind="delegate")
+    dispatcher.frame_id = frame_id
+    dispatcher.store.set_permission_rule(
+        scope="conversation",
+        scope_id=frame_id,
+        tool="save_artifact",
+        pattern="*",
+        decision="allow",
+    )
+    return workspace, dispatcher, dispatcher.store, frame_id
+
+
+def _evidence_for(store, frame_id, filename):
+    from openai4s.agent.delegation import _project_artifact_evidence
+
+    rows = store.artifact_evidence_rows_for_frame(frame_id, limit=12)
+    evidence = _project_artifact_evidence(rows, frame_id)
+    version = next(row for row in rows["versions"] if row["filename"] == filename)
+    item = next(item for item in evidence["items"] if item["filename"] == filename)
+    return version, item
+
+
+def test_a_failed_cell_cannot_borrow_an_earlier_cells_id(tmp_path):
+    """A real kernel does not let a Cell borrow an earlier Cell's id.
+
+    The cell sets ``sys.modules['__main__']._ACTIVE_CELL_ID`` to the earlier
+    successful cell, then writes a version. That claim disagrees with the
+    Cell the host is executing, so the stored producer is ``unattributed``
+    and the version is not verified. The successful cell's own version stays
+    verified.
+    """
+
+    from openai4s.agent.delegation import _project_artifact_evidence
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-only"),
+    )
+    dispatcher = build_dispatcher(cfg, workspace=workspace)
+    frame_id = dispatcher.store.new_frame(kind="delegate")
+    dispatcher.frame_id = frame_id
+    dispatcher.store.set_permission_rule(
+        scope="conversation",
+        scope_id=frame_id,
+        tool="save_artifact",
+        pattern="*",
+        decision="allow",
+    )
+    store = dispatcher.store
+    attack = (
+        "import sys\n"
+        "sys.modules['__main__']._ACTIVE_CELL_ID[0] = 'cell-ok'\n"
+        "open('bad.txt', 'w', encoding='utf-8').write('stolen')\n"
+        "host.save_artifact('bad.txt')\n"
+        "raise RuntimeError('cell failed after the write')\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        ok = kernel.execute(
+            "open('ok.txt', 'w', encoding='utf-8').write('honest')\n"
+            "saved = host.save_artifact('ok.txt')\n"
+            "print(saved['version_id'])\n",
+            cell_id="cell-ok",
+        )
+        assert ok["error"] is None, ok.get("error")
+        assert ok["id"] == "cell-ok"
+        store.log_cell(
+            frame_id=frame_id,
+            code="open('ok.txt')\n",
+            result=ok,
+            origin="delegate",
+        )
+        bad = kernel.execute(attack, cell_id="cell-bad")
+        assert bad["error"]
+        assert bad["id"] == "cell-bad"
+        store.log_cell(
+            frame_id=frame_id,
+            code=attack,
+            result=bad,
+            origin="delegate",
+        )
+
+    rows = store.artifact_evidence_rows_for_frame(frame_id, limit=12)
+    evidence = _project_artifact_evidence(rows, frame_id)
+    bad_version = next(row for row in rows["versions"] if row["filename"] == "bad.txt")
+    ok_version = next(row for row in rows["versions"] if row["filename"] == "ok.txt")
+    assert bad_version["producing_cell_id"] == "unattributed"
+    assert ok_version["producing_cell_id"] == "cell-ok"
+    bad_item = next(item for item in evidence["items"] if item["filename"] == "bad.txt")
+    ok_item = next(item for item in evidence["items"] if item["filename"] == "ok.txt")
+    assert bad_item["producing_cell_id"] == "unattributed"
+    assert bad_item["verdict"] != "verified_version_and_producer"
+    assert "cell_not_recorded" in bad_item["reasons"]
+    assert ok_item["producing_cell_id"] == "cell-ok"
+    assert ok_item["verdict"] == "verified_version_and_producer"
+
+
+def test_a_snake_case_cell_id_cannot_override_the_host_stamp(tmp_path):
+    """``decode_args`` keeps the last spelling of a key, so a smuggled
+    ``execution_cell_id`` used to win over the stamped ``executionCellId``."""
+
+    workspace, dispatcher, store, frame_id = _evidence_kernel_setup(tmp_path)
+    smuggle = (
+        "import sys\n"
+        "open('snake.txt', 'w', encoding='utf-8').write('stolen')\n"
+        "sys.modules['__main__'].host_call('save_artifact', [{\n"
+        "    'path': 'snake.txt', 'executionCellId': 'x',\n"
+        "    'execution_cell_id': 'cell-ok'}])\n"
+        "raise RuntimeError('cell failed after the write')\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        ok = kernel.execute("x = 1\n", cell_id="cell-ok")
+        store.log_cell(frame_id=frame_id, code="x = 1\n", result=ok, origin="delegate")
+        bad = kernel.execute(smuggle, cell_id="cell-snake")
+        assert bad["error"]
+        store.log_cell(frame_id=frame_id, code=smuggle, result=bad, origin="delegate")
+
+    version, item = _evidence_for(store, frame_id, "snake.txt")
+    assert version["producing_cell_id"] == "unattributed"
+    assert item["verdict"] != "verified_version_and_producer"
+
+
+def test_a_call_a_thread_sends_after_its_cell_is_not_given_the_next_cell(tmp_path):
+    """A failed Cell's thread writes after the Cell returned.
+
+    The frame waits in the pipe and is read during the next execute. The
+    worker's claim is still the failed Cell, the host is executing the next
+    one, so the version is ``unattributed`` -- not the next Cell, whose
+    verified evidence it would otherwise borrow.
+    """
+
+    import time
+
+    workspace, dispatcher, store, frame_id = _evidence_kernel_setup(tmp_path)
+    late = (
+        "import threading, time\n"
+        "def later():\n"
+        "    time.sleep(0.3)\n"
+        "    open('late.txt', 'w', encoding='utf-8').write('late')\n"
+        "    open('late-called.flag', 'w').write('1')\n"
+        "    host.save_artifact('late.txt')\n"
+        "    open('late-done.flag', 'w').write('1')\n"
+        "threading.Thread(target=later, daemon=True).start()\n"
+        "raise RuntimeError('this cell fails before its thread writes')\n"
+    )
+    wait_for_late_call = (
+        "import os, time\n"
+        "deadline = time.time() + 20\n"
+        "while not os.path.exists('late-done.flag') and time.time() < deadline:\n"
+        "    time.sleep(0.05)\n"
+        "print(os.path.exists('late-done.flag'))\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        bad = kernel.execute(late, cell_id="cell-bad-thread")
+        assert bad["error"]
+        store.log_cell(frame_id=frame_id, code=late, result=bad, origin="delegate")
+        deadline = time.monotonic() + 20
+        while not (workspace / "late-called.flag").exists():
+            assert time.monotonic() < deadline, "the thread never sent its call"
+            time.sleep(0.05)
+        nxt = kernel.execute(wait_for_late_call, cell_id="cell-next")
+        assert nxt["error"] is None, nxt.get("error")
+        assert nxt["stdout"].strip() == "True"
+        store.log_cell(
+            frame_id=frame_id, code=wait_for_late_call, result=nxt, origin="delegate"
+        )
+
+    version, item = _evidence_for(store, frame_id, "late.txt")
+    assert version["producing_cell_id"] == "unattributed"
+    assert item["verdict"] != "verified_version_and_producer"
+
+
+def test_a_cleared_cell_global_cannot_name_another_cell(tmp_path):
+    """With the worker's global cleared there is no claim, and the host
+    stamps the Cell it is executing; the caller's ``producing_cell_id`` is
+    not used."""
+
+    workspace, dispatcher, store, frame_id = _evidence_kernel_setup(tmp_path)
+    cleared = (
+        "import sys\n"
+        "sys.modules['__main__']._ACTIVE_CELL_ID[0] = None\n"
+        "open('cleared.txt', 'w', encoding='utf-8').write('stolen')\n"
+        "host.save_artifact('cleared.txt', producing_cell_id='cell-ok')\n"
+        "raise RuntimeError('cell failed after the write')\n"
+    )
+    with Kernel(dispatcher=dispatcher, cwd=str(workspace)) as kernel:
+        ok = kernel.execute("x = 1\n", cell_id="cell-ok")
+        store.log_cell(frame_id=frame_id, code="x = 1\n", result=ok, origin="delegate")
+        bad = kernel.execute(cleared, cell_id="cell-bad-cleared")
+        assert bad["error"]
+        store.log_cell(frame_id=frame_id, code=cleared, result=bad, origin="delegate")
+
+    version, item = _evidence_for(store, frame_id, "cleared.txt")
+    assert version["producing_cell_id"] == "cell-bad-cleared"
+    assert item["verdict"] != "verified_version_and_producer"
+    assert "cell_failed" in item["reasons"]
+
+
 def _require_matplotlib_in_the_kernel() -> None:
     # `find_spec`, not `importorskip`: importing matplotlib into the test
     # process is exactly the cost these tests are about, and not theirs to pay.
@@ -1658,3 +1932,166 @@ def test_one_print_cannot_put_an_unbounded_frame_on_the_protocol_pipe():
     # The captured result stays bounded too, and says what it counted.
     assert len(result["stdout"]) <= 1_000_000 + 64
     assert "characters" in result["stdout"]
+
+
+def _degraded_kernel_sandbox(tmp_path):
+    from openai4s.security.sandbox import KernelSandbox, SandboxStatus
+
+    private = tmp_path / "private"
+    private.mkdir()
+    return KernelSandbox(
+        status=SandboxStatus(
+            mode="off",
+            state="disabled",
+            backend=None,
+            enforced=False,
+            self_test_passed=None,
+            network_policy="not_enforced",
+            workspace=str(tmp_path),
+            temp_dir=str(private),
+            detail="injected",
+        ),
+        temp_dir=str(private),
+    )
+
+
+def test_off_mode_does_not_read_sandbox_status_before_the_cell(monkeypatch, tmp_path):
+    """The admission gate reads posture only after it knows the mode is allowlist."""
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    events: list[str] = []
+    real = Kernel.sandbox_status.fget
+
+    def counting(self):
+        events.append("status")
+        return real(self)
+
+    monkeypatch.setattr(Kernel, "sandbox_status", property(counting))
+    monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+    kernel = Kernel(
+        dispatcher=_echo_dispatcher,
+        cwd=str(tmp_path),
+        sandbox=_degraded_kernel_sandbox(tmp_path),
+    )
+    real_write = kernel._transport.write_line
+
+    def spy_write(line: str) -> None:
+        events.append("write")
+        real_write(line)
+
+    kernel._transport.write_line = spy_write
+    try:
+        events.clear()
+        result = kernel.execute("print(1)", origin="agent")
+        assert result["error"] is None
+        assert events[0] == "write"
+        assert "status" not in events[: events.index("write")]
+        monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+        events.clear()
+        with pytest.raises(EgressBoundaryUnavailable):
+            kernel.execute("print(2)", origin="agent")
+        assert events == ["status"]
+    finally:
+        kernel.shutdown()
+
+
+def test_allowlist_refuses_every_origin_before_a_frame_or_fifo(monkeypatch, tmp_path):
+    """The gate sits after the liveness check and before any worker byte."""
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    kernel = Kernel(
+        dispatcher=_echo_dispatcher,
+        cwd=str(tmp_path),
+        sandbox=_degraded_kernel_sandbox(tmp_path),
+        capture_sinks=True,
+    )
+    writes: list[str] = []
+    opened: list[bool] = []
+    real_write = kernel._transport.write_line
+    real_open = kernel._sinks.open
+
+    def spy_write(line: str) -> None:
+        writes.append(line)
+        real_write(line)
+
+    def spy_open(*args, **kwargs):
+        opened.append(True)
+        return real_open(*args, **kwargs)
+
+    kernel._transport.write_line = spy_write
+    kernel._sinks.open = spy_open
+    try:
+        for origin in ("agent", "user", "system", "recovery", "sidecar_recovery"):
+            with pytest.raises(EgressBoundaryUnavailable) as caught:
+                kernel.execute("print('refused')", origin=origin)
+            assert caught.value.code == "egress_boundary_unavailable"
+            assert caught.value.decision["sandbox"]["network_policy"] == "not_enforced"
+        assert writes == []
+        assert opened == []
+        monkeypatch.delenv("OPENAI4S_EGRESS", raising=False)
+        kernel._transport.write_line = real_write
+        kernel._sinks.open = real_open
+        result = kernel.execute("print('after-off')", origin="agent")
+        assert result["error"] is None
+        assert result["stdout"] == "after-off\n"
+    finally:
+        kernel.shutdown()
+
+
+def test_allowlist_refuses_a_remote_kernel_without_writing(monkeypatch, tmp_path):
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    monkeypatch.delenv("OPENAI4S_KERNEL_SANDBOX", raising=False)
+
+    class _Remote:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+            self.stderr_tail = None
+            self.process = None
+            self.closed = False
+
+        def write_line(self, line: str) -> None:
+            self.writes.append(line)
+
+        def read_line(self) -> str:
+            return ""
+
+        def alive(self) -> bool:
+            return not self.closed
+
+        def interrupt(self) -> bool:
+            return False
+
+        def kill(self) -> None:
+            self.closed = True
+
+        def close(self, *, graceful: bool = True) -> None:
+            self.closed = True
+
+    transport = _Remote()
+    kernel = Kernel(
+        cwd=str(tmp_path),
+        argv=["/bin/true"],
+        sandbox=_degraded_kernel_sandbox(tmp_path),
+        capture_sinks=True,
+        transport_factory=lambda: transport,
+    )
+    opened: list[bool] = []
+    kernel._sinks.open = lambda *args, **kwargs: opened.append(True)
+    try:
+        status = kernel.sandbox_status
+        assert status["backend"] == "remote"
+        assert status["network_policy"] == "unproven"
+        with pytest.raises(EgressBoundaryUnavailable) as caught:
+            kernel.execute("print('remote')", origin="agent")
+        assert caught.value.code == "egress_boundary_unavailable"
+        assert caught.value.decision["sandbox"]["backend"] == "remote"
+        assert "reason" not in caught.value.decision["sandbox"]
+        assert transport.writes == []
+        assert opened == []
+    finally:
+        kernel.shutdown()

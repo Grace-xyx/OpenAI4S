@@ -421,6 +421,18 @@ def rank_artifacts(items: list[dict], query: str) -> list[dict]:
     return scored
 
 
+def _recorded_cell_id(spec: dict) -> Any:
+    """Prefer the worker-injected cell id over the caller's claim.
+
+    A call with no injected id still honors ``producing_cell_id``. That is
+    the direct host API and the legacy tests. Inside a cell the worker sets
+    ``execution_cell_id``, so a delegated child cannot override the running
+    cell by naming a different ``producing_cell_id``.
+    """
+
+    return spec.get("execution_cell_id") or spec.get("producing_cell_id")
+
+
 class HostDataService:
     """Implement store-backed host capabilities behind narrow providers."""
 
@@ -1887,7 +1899,7 @@ class HostDataService:
                 content_type=spec.get("content_type"),
                 size_bytes=size_bytes,
                 checksum=checksum,
-                producing_cell_id=spec.get("producing_cell_id"),
+                producing_cell_id=_recorded_cell_id(spec),
                 frame_id=self._frame_id(),
                 input_version_ids=input_version_ids,
                 **(

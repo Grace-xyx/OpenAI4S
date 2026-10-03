@@ -19,7 +19,14 @@ class SubmitBackgroundExecTool(Tool):
 
     name = "exec_background"
     host_method = "exec_background"
-    description = "Submit a long-running Python cell to an independent background job."
+    description = (
+        "Submit a long-running Python cell to an independent background job. "
+        "A Web session writes a persistent receipt (code SHA-256, not the "
+        "source) before the worker starts and reports persistent true. A CLI or "
+        "sub-agent job reports persistent false and stays in memory. After a "
+        "daemon restart an unfinished Web job reads as outcome_unknown and is "
+        "not replayed."
+    )
     parameters = {
         "properties": {
             "code": {
@@ -50,7 +57,13 @@ class ListBackgroundExecsTool(Tool):
 
     name = "exec_list"
     host_method = "exec_list"
-    description = "List background execution jobs and their current states."
+    description = (
+        "List background execution jobs and their current states. A Web "
+        "session merges in-memory jobs with this session's persistent "
+        "receipts. outcome_unknown means no live job holds an unfinished "
+        "receipt: the daemon restarted, or this process no longer holds the "
+        "job. It was not re-run."
+    )
     parameters = {"properties": {}, "required": []}
     requires_approval = False
     resource_key_prefix = "background"
@@ -66,7 +79,12 @@ class PeekBackgroundExecTool(Tool):
 
     name = "exec_peek"
     host_method = "exec_peek"
-    description = "Read accumulated stdout and status for one background job."
+    description = (
+        "Read accumulated stdout and status for one background job. "
+        "persistent true is the session receipt, including outcome_unknown "
+        "when no live job holds it. persistent false is an in-process job (CLI "
+        "or sub-agent)."
+    )
     parameters = {
         "properties": {"exec_id": {"type": "string", "minLength": 1, "maxLength": 256}},
         "required": ["exec_id"],
@@ -97,7 +115,11 @@ class InterruptBackgroundExecTool(Tool):
 
     name = "exec_interrupt"
     host_method = "exec_interrupt"
-    description = "Interrupt one running background job by exact execution ID."
+    description = (
+        "Interrupt one running background job by exact execution ID. A "
+        "receipt with no live process returns interrupt_undelivered and does "
+        "not claim the stop was delivered."
+    )
     parameters = {
         "properties": {"exec_id": {"type": "string", "minLength": 1, "maxLength": 256}},
         "required": ["exec_id"],

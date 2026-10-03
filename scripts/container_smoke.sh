@@ -6,9 +6,9 @@
 # A Dockerfile that no gate builds is not evidence of anything, and "the image
 # built" is not the claim worth making — the claim is that the daemon boots
 # unprivileged, answers its probe, refuses an unauthenticated caller, accepts
-# the token it minted, and comes back after being killed. Each of those is a
-# way containerization has broken this program specifically, so each is checked
-# here rather than assumed.
+# the token it minted, keeps that token out of container logs, and comes back
+# after being killed. Each of those is a way containerization has broken this
+# program specifically, so each is checked here rather than assumed.
 #
 # Needs a Docker daemon and a host `python3` (the probe speaks HTTP with it, so
 # that nothing here depends on curl). Both are checked before the build, since
@@ -26,11 +26,40 @@ VOLUME="${OPENAI4S_SMOKE_VOLUME:-openai4s-container-smoke-data}"
 HOST_PORT="${OPENAI4S_SMOKE_PORT:-18760}"
 BASE="http://127.0.0.1:${HOST_PORT}"
 
+# A failure reprints the container logs. Any sign-in URL in them is redacted,
+# and so is the minted token once it is known, so a red run cannot publish the
+# credential this smoke exists to keep out of the logs.
+redact_logs() {
+  if [ -n "${token:-}" ]; then
+    sed -E -e 's/([?&]token=)[^&[:space:]]+/\1<redacted>/g' -e "s/${token}/<redacted>/g"
+  else
+    sed -E 's/([?&]token=)[^&[:space:]]+/\1<redacted>/g'
+  fi
+}
+
 fail() {
   echo "container smoke: FAIL — $*" >&2
-  echo "--- container logs ---" >&2
-  docker logs "$CONTAINER" >&2 2>&1 || true
+  echo "--- container logs (sign-in tokens redacted) ---" >&2
+  docker logs "$CONTAINER" 2>&1 | redact_logs >&2 || true
   exit 1
+}
+
+# Startup and daemon logs must not carry the access token. A substring test on
+# the captured text, not `printf | grep -q`: under pipefail grep's early exit
+# SIGPIPEs printf once the logs outgrow the pipe buffer, and the check would
+# then pass exactly when the token sits near the top, where a banner prints it.
+assert_logs_omit_token() {
+  local logs
+  logs="$(docker logs "$CONTAINER" 2>&1)" || {
+    echo "container smoke: FAIL — could not read container logs" >&2
+    exit 1
+  }
+  case "$logs" in
+    *"$token"*)
+      echo "container smoke: FAIL — container logs contain the access token ($1)" >&2
+      exit 1
+      ;;
+  esac
 }
 
 ok() { echo "container smoke: ok — $*"; }
@@ -142,6 +171,9 @@ case "$url" in
   *) fail "\`openai4s url\` printed '${url}', which does not carry the minted token" ;;
 esac
 
+assert_logs_omit_token "first start"
+ok "container logs do not contain the access token"
+
 # The science stack is what makes the default image worth its size. Import it
 # rather than trusting that pip reported success.
 docker exec "$CONTAINER" python -c "import numpy, pandas, matplotlib, sklearn" \
@@ -194,6 +226,8 @@ token_after="$(docker exec "$CONTAINER" cat /data/access-token)" \
   || fail "could not read the access token after the restart"
 [ "$token_after" = "$token" ] || fail "the access token changed across a restart"
 ok "the access token survived the restart"
+assert_logs_omit_token "after the restart"
+ok "container logs still do not contain the access token after the restart"
 
 # --- graceful shutdown ---------------------------------------------------------
 #

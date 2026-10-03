@@ -571,3 +571,75 @@ def test_a_wildcard_bind_is_rendered_as_an_address_a_client_can_dial():
     assert _reachable_host("::") == "localhost"
     assert _reachable_host("127.0.0.1") == "127.0.0.1"
     assert _reachable_host("192.168.1.10") == "192.168.1.10"
+
+
+# --- container_smoke.sh log checks ---------------------------------------------
+#
+# The smoke itself needs a Docker daemon, so its two credential helpers are run
+# here on their own, sourced from the script, against a stand-in `docker`.
+
+_SMOKE_TOKEN = "tok-smoke-1234567890abcdef"
+
+
+def _smoke_helpers() -> str:
+    text = (ROOT / "scripts" / "container_smoke.sh").read_text(encoding="utf-8")
+    start = text.index("redact_logs() {")
+    end = text.index("\n}\n", text.index("assert_logs_omit_token() {")) + 3
+    return text[start:end]
+
+
+def _run_smoke_helper(tmp_path: Path, logs: str, call: str):
+    (tmp_path / "logs.txt").write_text(logs, encoding="utf-8")
+    fake = tmp_path / "docker"
+    fake.write_text(f'#!/bin/bash\ncat "{tmp_path / "logs.txt"}"\n', encoding="utf-8")
+    fake.chmod(0o755)
+    program = (
+        "set -euo pipefail\nCONTAINER=smoke\n"
+        f'token="{_SMOKE_TOKEN}"\n' + _smoke_helpers() + call
+    )
+    return subprocess.run(
+        ["/bin/bash", "-c", program],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+        timeout=60,
+    )
+
+
+def test_the_log_check_catches_a_token_above_a_pipe_buffer_of_output(tmp_path):
+    """`printf | grep -q` under pipefail let this through: grep exits on the
+    first line, printf takes SIGPIPE writing the rest, and the pipeline's 141
+    reads as "no match" -- exactly when the banner sits at the top."""
+    logs = (
+        f"open: http://localhost:8760/?token={_SMOKE_TOKEN}\n"
+        + ("x" * 120 + "\n") * 4000
+    )
+    done = _run_smoke_helper(
+        tmp_path, logs, 'assert_logs_omit_token "first start"\necho clean\n'
+    )
+    assert done.returncode == 1, done.stdout
+    assert "contain the access token (first start)" in done.stderr
+    assert _SMOKE_TOKEN not in done.stdout + done.stderr
+
+
+def test_the_log_check_passes_logs_without_the_token(tmp_path):
+    done = _run_smoke_helper(
+        tmp_path,
+        "listening\n" * 10,
+        'assert_logs_omit_token "first start"\necho clean\n',
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "clean"
+
+
+def test_a_failure_dump_redacts_the_token_and_sign_in_urls(tmp_path):
+    logs = (
+        f"a http://h:1/?token={_SMOKE_TOKEN}&x=1\n"
+        f"bare {_SMOKE_TOKEN}\n"
+        "b http://h:1/?token=another-token-value\n"
+    )
+    done = _run_smoke_helper(tmp_path, logs, "docker logs smoke 2>&1 | redact_logs\n")
+    assert done.returncode == 0, done.stderr
+    assert _SMOKE_TOKEN not in done.stdout
+    assert "another-token-value" not in done.stdout
+    assert "?token=<redacted>&x=1" in done.stdout

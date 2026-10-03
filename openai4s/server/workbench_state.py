@@ -61,7 +61,34 @@ _DELEGATION_EVENT_CHILD_KEYS = (
     "started_at",
     "finished_at",
     "stop_reason",
+    "artifact_evidence",
 )
+
+
+def _bounded_artifact_evidence(value: Any) -> Any:
+    """Copy evidence and keep at most ``EVIDENCE_ITEM_CAP`` items on the socket.
+
+    The REST projection already caps at that same constant. A snapshot that
+    arrives with more must not put the rest on the wire. ``total`` stays the
+    caller's count when it is at least the original length.
+    """
+
+    from openai4s.agent.delegation import EVIDENCE_ITEM_CAP
+    from openai4s.storage.delegation import project_browser_artifact_evidence
+
+    if not isinstance(value, Mapping):
+        return value
+    items = value.get("items")
+    if not isinstance(items, list) or len(items) <= EVIDENCE_ITEM_CAP:
+        return project_browser_artifact_evidence(value)
+    bounded = dict(value)
+    bounded["items"] = list(items[:EVIDENCE_ITEM_CAP])
+    total = value.get("total")
+    if isinstance(total, bool) or not isinstance(total, int) or total < len(items):
+        total = len(items)
+    bounded["total"] = total
+    bounded["truncated"] = True
+    return project_browser_artifact_evidence(bounded)
 
 
 def delegation_event_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -81,7 +108,11 @@ def delegation_event_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     projected: dict[str, Any] = {}
     if isinstance(child, Mapping):
         for key in _DELEGATION_EVENT_CHILD_KEYS:
-            if key in child:
+            if key not in child:
+                continue
+            if key == "artifact_evidence":
+                projected[key] = _bounded_artifact_evidence(child[key])
+            else:
                 projected[key] = child[key]
         progress = child.get("progress")
         if isinstance(progress, Mapping):

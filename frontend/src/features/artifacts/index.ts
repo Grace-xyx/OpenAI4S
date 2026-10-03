@@ -1,4 +1,13 @@
-export { API, ApiError, api, apiErrorText, bytes, looksBinary, setArtifactsFetch } from "./api";
+export {
+  API,
+  ApiError,
+  api,
+  apiErrorText,
+  bytes,
+  fetchArtifactIndexPage,
+  looksBinary,
+  setArtifactsFetch,
+} from "./api";
 export { artifactCacheKey, artifactRendererVersion, artUrl, syncArtifactVersion } from "./cache";
 export { scientificRenderers } from "./catalog";
 export {
@@ -37,6 +46,7 @@ export {
   MOL_EXT,
   TEXT_EXT,
 } from "./types";
+export type { ArtifactIndexQuery } from "./api";
 export type {
   ArtifactDeepLink,
   ArtifactIndexPage,

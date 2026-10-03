@@ -15,6 +15,7 @@ import {
   sanitizeBranches,
   sanitizeComputeTasks,
   sanitizeContext,
+  sanitizeArtifactEvidence,
   sanitizeDelegations,
   sanitizeExecutionQueue,
   sanitizeRecovery,
@@ -559,5 +560,169 @@ describe("unchanged projections keep their identity", () => {
     const next = sanitizeContext({ token_count: 4, layers: [{ name: "system" }] });
     expect(keepUnchanged(previous, next)).toBe(next);
     expect(keepUnchanged(null, next)).toBe(next);
+  });
+});
+
+const SHA = "ab".repeat(32);
+
+function evidenceItem(overrides: Record<string, unknown> = {}) {
+  return {
+    filename: "kept.csv",
+    artifact_id: "a-kept",
+    version_id: "v-kept",
+    checksum: SHA,
+    size_bytes: 14,
+    capture_kind: "version_created",
+    producing_cell_id: "c-cell",
+    cell_status: "ok",
+    verdict: "verified_version_and_producer",
+    reasons: ["no_cell_receipt"],
+    ...overrides,
+  };
+}
+
+describe("sanitizeArtifactEvidence", () => {
+  it("keeps a bounded version-and-producer record", () => {
+    const clean = sanitizeArtifactEvidence({
+      scope: "version_and_producer",
+      items: [evidenceItem()],
+      total: 1,
+      truncated: false,
+    });
+    expect(clean).toEqual({
+      scope: "version_and_producer",
+      items: [
+        {
+          filename: "kept.csv",
+          artifact_id: "a-kept",
+          version_id: "v-kept",
+          checksum: SHA,
+          size_bytes: 14,
+          capture_kind: "version_created",
+          producing_cell_id: "c-cell",
+          cell_status: "ok",
+          verdict: "verified_version_and_producer",
+          reasons: ["no_cell_receipt"],
+        },
+      ],
+      total: 1,
+      truncated: false,
+    });
+    expect(clean && "unavailable" in clean).toBe(false);
+  });
+
+  it("drops a bad verdict, an unknown reason, and a checksum that is not lowercase sha256", () => {
+    const clean = sanitizeArtifactEvidence({
+      scope: "version_and_producer",
+      items: [
+        evidenceItem({ verdict: "trusted" }),
+        evidenceItem({
+          version_id: "v-bad",
+          verdict: "insufficient_evidence",
+          checksum: "A".repeat(64),
+          cell_status: "crashed",
+          capture_kind: "guessed",
+          reasons: ["no_checksum", "invented", "no_snapshot", "cell_failed", "size_mismatch", "other_frame"],
+        }),
+      ],
+      total: 2,
+      truncated: 1,
+      unavailable: "yes",
+    });
+    expect(clean?.items.map((item) => item.version_id)).toEqual(["v-bad"]);
+    expect(clean?.items[0]).toMatchObject({
+      checksum: null,
+      cell_status: null,
+      capture_kind: null,
+      reasons: ["no_checksum", "no_snapshot", "cell_failed", "size_mismatch"],
+      verdict: "insufficient_evidence",
+    });
+    expect(clean?.truncated).toBe(false);
+    expect(clean && "unavailable" in clean).toBe(false);
+  });
+
+  it("caps items at 12, reasons at 4, and strings at 200", () => {
+    const items = Array.from({ length: 13 }, (_, index) =>
+      evidenceItem({ version_id: `v-${index}`, filename: "n".repeat(250) }),
+    );
+    const clean = sanitizeArtifactEvidence({
+      scope: "version_and_producer",
+      items,
+      total: 40,
+      truncated: true,
+    });
+    expect(clean?.items).toHaveLength(12);
+    expect(clean?.items.some((item) => item.version_id === "v-12")).toBe(false);
+    expect(clean?.total).toBe(40);
+    expect(clean?.truncated).toBe(true);
+    expect(clean?.items[0]?.filename).toHaveLength(200);
+    expect(clean?.items[0]?.filename.endsWith("…")).toBe(true);
+  });
+
+  it("drops an empty version id and downgrades a verified item with a bad checksum", () => {
+    const clean = sanitizeArtifactEvidence({
+      scope: "version_and_producer",
+      items: [
+        evidenceItem({ version_id: "  ", verdict: "verified_version_and_producer" }),
+        evidenceItem({ version_id: "", verdict: "insufficient_evidence" }),
+        evidenceItem({
+          version_id: "v-forged",
+          verdict: "verified_version_and_producer",
+          checksum: "not-a-sha",
+          reasons: [],
+        }),
+      ],
+      total: 3,
+      truncated: false,
+      checked_at: "yesterday",
+    });
+    expect(clean?.items.map((item) => item.version_id)).toEqual(["v-forged"]);
+    expect(clean?.items[0]).toMatchObject({
+      checksum: null,
+      verdict: "insufficient_evidence",
+      reasons: ["no_checksum"],
+    });
+    expect(clean && "checked_at" in clean).toBe(false);
+    const stamped = sanitizeArtifactEvidence({
+      scope: "version_and_producer",
+      items: [evidenceItem()],
+      total: 1,
+      truncated: false,
+      checked_at: 1_700_000_000.5,
+    });
+    expect(stamped?.checked_at).toBe(1_700_000_000.5);
+  });
+
+  it("rejects a record whose scope is not the version-and-producer literal", () => {
+    expect(sanitizeArtifactEvidence({ scope: "bytes", items: [evidenceItem()] })).toBeUndefined();
+    expect(sanitizeArtifactEvidence(null)).toBeUndefined();
+  });
+
+  it("omits the key when the child payload has no artifact_evidence", () => {
+    const absent = sanitizeDelegations({
+      children: [{ child_id: "c1", status: "done" }],
+    });
+    expect(absent.children[0] && "artifact_evidence" in absent.children[0]).toBe(false);
+
+    const invalid = sanitizeDelegations({
+      children: [{ child_id: "c1", status: "done", artifact_evidence: { scope: "bytes", items: [] } }],
+    });
+    expect(invalid.children[0] && "artifact_evidence" in invalid.children[0]).toBe(false);
+
+    const present = sanitizeDelegations({
+      children: [
+        {
+          child_id: "c1",
+          status: "done",
+          artifact_evidence: {
+            scope: "version_and_producer",
+            items: [evidenceItem()],
+            total: 1,
+            truncated: false,
+          },
+        },
+      ],
+    });
+    expect(present.children[0]?.artifact_evidence?.items[0]?.version_id).toBe("v-kept");
   });
 });

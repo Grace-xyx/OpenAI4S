@@ -12,8 +12,23 @@ import { ApiError } from "../sessions/api";
 export const MESSAGE_PAGE_SIZE = 300;
 export const MESSAGE_WALK_MAX_PAGES = 200;
 
+/** One stored transcript row. Fork ids ride along with every other field. */
+export type HistoryMessage = {
+  role?: string;
+  content?: unknown;
+  created_at?: string;
+  seq?: number;
+  message_id?: string;
+  fork_checkpoint_id?: string | null;
+  failure?: { request_id?: string } | null;
+  cancelled?: { request_id?: string; execution_id?: string; reason?: string } | null;
+  review_status?: unknown;
+  metadata?: Record<string, unknown>;
+  artifact_refs?: unknown[];
+};
+
 export type MessagePage = {
-  messages: Array<Record<string, unknown>>;
+  messages: HistoryMessage[];
   next_before_seq?: unknown;
   has_earlier?: unknown;
   complete?: boolean;
@@ -79,7 +94,10 @@ function messagePage(value: unknown): MessagePage {
   if (record.has_earlier != null && typeof record.has_earlier !== "boolean") {
     throw new ApiError({ error: "Invalid message paging response", code: "invalid_history_response" }, 200);
   }
-  return { ...value as MessagePage, messages: [...rows].sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0)) };
+  const messages = ([...rows] as HistoryMessage[]).sort(
+    (a, b) => Number(a.seq || 0) - Number(b.seq || 0),
+  );
+  return { ...(value as MessagePage), messages };
 }
 
 /** Newest page, then sorted back into reading order. app.js:6928-6932. */

@@ -571,6 +571,19 @@ class DelegationProjectionRepository:
         with self._lock:
             return self._project_locked(root, include_text=False)
 
+    def read_child(self, root_frame_id: str, child_id: str) -> dict[str, Any] | None:
+        """One child with its stored result, for in-process restore.
+
+        ``project`` is the browser read and drops result bodies. A runner
+        that has to rebuild a child which is not already in memory needs
+        the text this returns.
+        """
+
+        root = _required("root_frame_id", root_frame_id)
+        target = _required("child_id", child_id)
+        with self._lock:
+            return self._child_locked(root, target, include_text=True)
+
     def budget(self, root_frame_id: str) -> dict[str, Any] | None:
         root = _required("root_frame_id", root_frame_id)
         with self._lock:
@@ -649,7 +662,7 @@ class DelegationProjectionRepository:
             if "no such table" not in str(error).lower():
                 raise
             identity = {}
-        return {
+        normalized = {
             "child_id": row["child_id"],
             "name": row["name"],
             "status": row["status"],
@@ -685,6 +698,13 @@ class DelegationProjectionRepository:
                 "messages": messages,
             },
         }
+        if isinstance(result, dict):
+            evidence = result.get("artifact_evidence")
+            if evidence is not None:
+                normalized["artifact_evidence"] = evidence
+        if include_text:
+            return normalized
+        return project_browser_child(normalized)
 
     def _persist_message_locked(
         self,
@@ -825,8 +845,219 @@ def _encode(value: Any, limit: int) -> str:
     )
 
 
+_BROWSER_REF_KEYS = frozenset(
+    {"artifact_id", "version_id", "filename", "checksum", "frame_id", "path"}
+)
+_STEERING_TEXT_KEYS = frozenset({"text", "text_preview", "message"})
+_TRUNCATION_MARK = "...[host truncated]"
+
+
+def _absolute_path(value: str) -> bool:
+    """True for a POSIX absolute path or a Windows drive path."""
+
+    if value.startswith(("/", "\\")):
+        return True
+    return (
+        len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in "/\\"
+    )
+
+
+def host_absolute_path(value: str) -> bool:
+    """True for a POSIX absolute path or a Windows drive path.
+
+    The predicate ``project_browser_artifact_refs`` uses for ``path`` and
+    ``filename``. Callers outside this module use this name so the rule stays
+    in one place.
+    """
+
+    return _absolute_path(value)
+
+
+def project_browser_artifact_refs(refs: list[Any]) -> list[dict[str, Any]]:
+    """Browser-safe artifact refs.
+
+    The one rule shared by ``project_browser_child`` and the delegate step
+    card. Unknown keys, including ``durable_path``, are dropped. An absolute
+    ``path`` or ``filename`` is dropped. A non-mapping entry is skipped.
+    """
+
+    safe_refs: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, Mapping):
+            continue
+        item: dict[str, Any] = {}
+        for key, value in ref.items():
+            if key not in _BROWSER_REF_KEYS:
+                continue
+            if (
+                key in ("filename", "path")
+                and isinstance(value, str)
+                and _absolute_path(value)
+            ):
+                continue
+            item[str(key)] = value
+        safe_refs.append(item)
+    return safe_refs
+
+
+def project_browser_artifact_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy evidence without absolute filenames, including persisted envelopes.
+
+    The filename is display metadata supplied when an Artifact is saved, so
+    it may contain a host path even though the evidence has no path field.
+    Keep its existing nullable shape and the other evidence fields intact.
+    """
+
+    projected = dict(evidence)
+    items = evidence.get("items")
+    if isinstance(items, list):
+        safe_items: list[Any] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                safe_items.append(item)
+                continue
+            safe_item = dict(item)
+            filename = item.get("filename")
+            if isinstance(filename, str) and host_absolute_path(filename):
+                safe_item["filename"] = None
+            safe_items.append(safe_item)
+        projected["items"] = safe_items
+    return projected
+
+
+#: The keys a browser sees on a delegation child. An allowlist, not a list
+#: of keys to drop: a child-shaped value can also be a run envelope
+#: (``final_message``, bullets, ``environment`` with interpreter paths), and
+#: dropping only ``result``/``output`` let all of that through.
+_BROWSER_CHILD_KEYS = (
+    "child_id",
+    "name",
+    "status",
+    "task_status",
+    "error",
+    "depth",
+    "parent_child_id",
+    "parent_frame_id",
+    "frame_id",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "stop_reason",
+    "request_id",
+    "attempt_id",
+    "overrides",
+    "progress",
+    "steering",
+    "artifact_refs",
+    "artifact_evidence",
+)
+
+
+def project_browser_child(child: Mapping[str, Any]) -> dict[str, Any]:
+    """The REST browser projection of a delegation child.
+
+    Only ``_BROWSER_CHILD_KEYS`` pass; ``result`` and ``output`` are absent,
+    not null. Steering message bodies are omitted. ``artifact_refs`` keep
+    identity and a relative name through ``project_browser_artifact_refs``:
+    ``durable_path`` is dropped, and an absolute ``path`` or ``filename`` is
+    dropped. ``artifact_evidence`` keeps its stored fields but replaces an
+    absolute filename with null; a missing evidence key remains absent.
+    ``GET /frames/{id}/delegations`` and the stop/continue responses use this
+    function. The WebSocket ``delegation_child_event`` keeps its own narrower
+    allowlist in ``workbench_state.delegation_event_projection``.
+    """
+
+    projected = {key: child[key] for key in _BROWSER_CHILD_KEYS if key in child}
+    refs = projected.get("artifact_refs")
+    if isinstance(refs, list):
+        projected["artifact_refs"] = project_browser_artifact_refs(refs)
+    evidence = projected.get("artifact_evidence")
+    if isinstance(evidence, Mapping):
+        projected["artifact_evidence"] = project_browser_artifact_evidence(evidence)
+    steering = projected.get("steering")
+    if isinstance(steering, Mapping):
+        safe_steering = dict(steering)
+        messages = steering.get("messages")
+        if isinstance(messages, list):
+            safe_messages: list[dict[str, Any]] = []
+            for message in messages:
+                if not isinstance(message, Mapping):
+                    continue
+                safe_messages.append(
+                    {
+                        key: value
+                        for key, value in message.items()
+                        if key not in _STEERING_TEXT_KEYS
+                    }
+                )
+            safe_steering["messages"] = safe_messages
+        projected["steering"] = safe_steering
+    return projected
+
+
 def _encode_result(value: Any) -> str:
-    return _encode(value, 16_000)
+    """Encode a child result, keeping evidence when the public JSON is too long.
+
+    Under the cap this is ``_encode(value, 16_000)``. Over the cap the stored
+    object is ``{truncated, preview, artifact_evidence, task_status}``.
+    Evidence and ``task_status`` come from the single ``_public`` pass, so a
+    secret inside evidence is redacted the same way as on the short path.
+    The preview is that public value with those two keys removed, then sliced.
+    The slice does not re-run the redaction patterns. Evidence is kept even
+    when it alone exceeds the cap.
+    """
+    limit = 16_000
+    public = _public(value)
+    encoded = json.dumps(
+        public, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(encoded) <= limit:
+        return encoded
+    evidence = None
+    task_status = None
+    preview_source: Any = public
+    if isinstance(public, Mapping):
+        evidence = public.get("artifact_evidence")
+        task_status = public.get("task_status")
+        preview_source = {
+            key: item
+            for key, item in public.items()
+            if key not in ("artifact_evidence", "task_status")
+        }
+    redacted = json.dumps(
+        preview_source, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+    def pack(preview: str) -> str:
+        return json.dumps(
+            {
+                "artifact_evidence": evidence,
+                "preview": preview,
+                "task_status": task_status,
+                "truncated": True,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    if len(pack("")) > limit:
+        return pack("")
+    if len(pack(redacted)) <= limit:
+        return pack(redacted)
+    lo = 0
+    hi = len(redacted)
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        preview = "" if mid == 0 else redacted[:mid] + _TRUNCATION_MARK
+        if len(pack(preview)) <= limit:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    preview = "" if best == 0 else redacted[:best] + _TRUNCATION_MARK
+    return pack(preview)
 
 
 def _decode(value: str | None) -> Any:

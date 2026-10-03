@@ -62,6 +62,27 @@ def _tree(root: Path) -> dict[str, tuple[int, int]]:
     }
 
 
+@pytest.fixture(scope="module")
+def module_scope_data_dir() -> Path:
+    """The data directory a module-scoped fixture resolves, which is set up
+    before the per-test fixture redirects OPENAI4S_DATA_DIR."""
+
+    return Path(Config().data_dir).resolve()
+
+
+def test_module_scope_never_resolves_the_real_data_dir(
+    module_scope_data_dir: Path,
+) -> None:
+    """A module-scoped fixture runs before the per-test redirect, so only
+    conftest's suite-wide floor keeps it off the developer's ~/.openai4s. The
+    evaluation's SkillLoader was once built in exactly that window, and a later
+    search migrated the real database to an unreleased schema.
+    """
+    real = (Path.home() / ".openai4s").resolve()
+    assert module_scope_data_dir != real
+    assert real not in module_scope_data_dir.parents
+
+
 def test_dataset_schema_and_counts(cases: list[dict]) -> None:
     assert 180 <= len(cases) <= 220
     zh = [c for c in cases if c["lang"] == "zh"]

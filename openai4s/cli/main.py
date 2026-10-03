@@ -49,6 +49,7 @@ def _statefile_payload(cfg) -> str:
             "started_at": int(time.time()),
             "version": __version__,
             "bundle_id": os.environ.get("OPENAI4S_BUNDLE_ID", ""),
+            "team_mode": bool(getattr(cfg, "team_mode", False)),
         }
     )
 
@@ -439,6 +440,33 @@ def _live_endpoint(cfg) -> tuple[str, int] | None:
     return _recorded_endpoint(cfg, pid)
 
 
+def _live_team_mode(cfg) -> bool:
+    """Whether the live daemon was started in team mode.
+
+    ``openai4s url`` is a separate process and only sees its own
+    ``OPENAI4S_TEAM_MODE``. The statefile is the daemon's record. An old
+    statefile with no ``team_mode`` key, a non-bool value, a pid that is not
+    the live one, or no live daemon at all falls back to this process's
+    config. A JSON bool is required: ``bool("false")`` is True.
+    """
+    fallback = bool(getattr(cfg, "team_mode", False))
+    if getattr(cfg, "pidfile", None) is None:
+        return fallback
+    pid = _read_pid(cfg)
+    if not pid or not _daemon_alive(cfg, pid):
+        return fallback
+    payload = _recorded_state(cfg)
+    if payload is None:
+        return fallback
+    recorded = payload.get("pid")
+    if not isinstance(recorded, int) or isinstance(recorded, bool) or recorded != pid:
+        return fallback
+    mode = payload.get("team_mode", None)
+    if not isinstance(mode, bool):
+        return fallback
+    return mode
+
+
 def _reachable_host(host: str) -> str:
     """A bind address, rendered as somewhere a client can actually connect.
 
@@ -448,9 +476,9 @@ def _reachable_host(host: str) -> str:
     both were being given a URL that is wrong on macOS and merely peculiar on
     Linux. Containers made it the common case rather than the exotic one —
     `OPENAI4S_HOST=0.0.0.0` is the only way a published port reaches the
-    daemon — so the startup banner a container operator reads, and the
-    `openai4s url` they run to recover their token, both printed an address
-    they then had to know to translate.
+    daemon — so the address a container operator reads, and the `openai4s url`
+    they run for a sign-in link, both printed an address they then had to
+    know to translate. Startup logs do not include the token.
 
     Loopback is the honest rendering: it is reachable from inside the
     namespace that is listening, and it is what the operator's own port
@@ -476,6 +504,9 @@ def _url(
 
     `with_token=False` is for anywhere the string is not being handed to a
     person to open — a credential does not belong in a log line or a title.
+    `serve` startup, the already-running line, and daemon logs pass it.
+    A browser open and `openai4s url` go through `_sign_in_url`, which keeps
+    the token in single-user mode and points at `/login` in team mode.
     """
     host, port = endpoint if endpoint is not None else (cfg.host, cfg.port)
     reachable_host = _reachable_host(host)
@@ -490,6 +521,40 @@ def _url(
     except Exception:  # noqa: BLE001 — never let this break `serve`
         token = None
     return f"{base}?token={token}" if token else base
+
+
+def _sign_in_url(cfg, *, endpoint=None, team_mode=None) -> str:
+    """The URL a person opens to sign in.
+
+    Single-user mode is the tokenized `_url`. Team mode is `/login`: a
+    `?token=` link does not authenticate a browser there, and it would only
+    land in history. ``team_mode=None`` reads ``cfg.team_mode`` when the
+    attribute exists. Callers that talk to an already-running daemon pass
+    `_live_team_mode(cfg)` so a separate `url` process follows the daemon.
+    """
+    if team_mode is None:
+        team_mode = bool(getattr(cfg, "team_mode", False))
+    if team_mode:
+        return _url(cfg, with_token=False, endpoint=endpoint) + "login"
+    return _url(cfg, endpoint=endpoint)
+
+
+def _sign_in_hint(cfg, *, endpoint=None, team_mode=None) -> str:
+    """The line printed under a token-free origin."""
+    if team_mode is None:
+        team_mode = bool(getattr(cfg, "team_mode", False))
+    if team_mode:
+        return "sign in: " + _sign_in_url(cfg, endpoint=endpoint, team_mode=True)
+    return "sign in: run `openai4s url` to print a sign-in link"
+
+
+def _print_already_running(cfg, pid: int) -> None:
+    endpoint = _live_endpoint(cfg)
+    print(
+        f"daemon already running (pid {pid}) at "
+        f"{_url(cfg, with_token=False, endpoint=endpoint)}"
+    )
+    print(_sign_in_hint(cfg, endpoint=endpoint, team_mode=_live_team_mode(cfg)))
 
 
 def _sigterm_to_keyboard_interrupt(signum, frame):
@@ -740,8 +805,11 @@ def _cmd_serve_detached(args, cfg) -> int:
             exited = process.poll()
             if exited is not None or _read_pid(cfg) != process.pid:
                 break
-            app_url = _url(cfg)
-            print(f"daemon started (pid {process.pid}) at {app_url}")
+            print(
+                f"daemon started (pid {process.pid}) at "
+                f"{_url(cfg, with_token=False)}"
+            )
+            print(_sign_in_hint(cfg))
             print(f"log: {log_path}")
             if not os.environ.get("OPENAI4S_NO_OPEN") and not getattr(
                 args, "no_open", False
@@ -749,7 +817,7 @@ def _cmd_serve_detached(args, cfg) -> int:
                 try:
                     import webbrowser
 
-                    webbrowser.open(app_url)
+                    webbrowser.open(_sign_in_url(cfg))
                 except Exception:
                     pass
             return 0
@@ -855,10 +923,7 @@ def cmd_serve(args) -> int:
         # peek keeps the common "already running" answer immediate.
         existing = _read_pid(cfg)
         if existing and _daemon_alive(cfg, existing):
-            print(
-                f"daemon already running (pid {existing}) at "
-                f"{_url(cfg, endpoint=_live_endpoint(cfg))}"
-            )
+            _print_already_running(cfg, existing)
             return 1
         return _cmd_serve_detached(args, cfg)
     # Atomically claim the singleton, covering the whole boot. A plain
@@ -869,10 +934,7 @@ def cmd_serve(args) -> int:
     if not _acquire_singleton(cfg):
         existing = _read_pid(cfg)
         if existing and _daemon_alive(cfg, existing):
-            print(
-                f"daemon already running (pid {existing}) at "
-                f"{_url(cfg, endpoint=_live_endpoint(cfg))}"
-            )
+            _print_already_running(cfg, existing)
         else:
             print(
                 "another `openai4s serve` is starting on this data dir; "
@@ -889,7 +951,8 @@ def cmd_serve(args) -> int:
     previous_sigterm = signal.signal(signal.SIGTERM, _sigterm_to_keyboard_interrupt)
     # Bind before the banner: "listening" printed ahead of the actual bind made
     # a port collision look like a crash after a successful start. Binding also
-    # mints the access token, so the URL printed below actually opens.
+    # mints the access token, so a following `openai4s url` or browser open can
+    # include it. The listening line itself does not.
     try:
         httpd = build_server(cfg)
     except MigrationError as exc:
@@ -913,7 +976,11 @@ def cmd_serve(args) -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
         _clear_state(cfg, only_if_owned_by=my_pid)
         raise
-    print(f"openai4s listening at {_url(cfg)} (model={cfg.llm.model})")
+    print(
+        f"openai4s listening at {_url(cfg, with_token=False)} "
+        f"(model={cfg.llm.model})"
+    )
+    print(_sign_in_hint(cfg))
     print("web UI ready. Ctrl-C to stop.")
     if cfg.team_mode:
         # First boot of team mode with no accounts: print the bootstrap
@@ -936,7 +1003,7 @@ def cmd_serve(args) -> int:
             try:
                 import webbrowser
 
-                webbrowser.open(_url(cfg))
+                webbrowser.open(_sign_in_url(cfg))
             except Exception:
                 pass
 
@@ -1258,7 +1325,14 @@ def cmd_stop(args) -> int:
 
 
 def cmd_url(args) -> int:
-    print(_url(cfg := get_config(), endpoint=_live_endpoint(cfg)))
+    cfg = get_config()
+    print(
+        _sign_in_url(
+            cfg,
+            endpoint=_live_endpoint(cfg),
+            team_mode=_live_team_mode(cfg),
+        )
+    )
     return 0
 
 
@@ -2051,8 +2125,10 @@ def _daemon_credential_hint(cfg) -> str:
     if path.exists():
         return (
             f"error: cannot read the daemon's access token at {path} "
-            "(it is owner-only). Run this as the user the daemon runs as, or "
-            "set OPENAI4S_TOKEN to the token that daemon printed at startup."
+            "(it is owner-only). The token lives in that file on the host the "
+            "daemon runs on; in single-user mode, `openai4s url` run as the "
+            "daemon's user prints a sign-in link that includes it. Run this "
+            "as that user, or set OPENAI4S_TOKEN to the contents of that file."
         )
     return (
         f"error: no daemon access token at {path}. Start the daemon with "

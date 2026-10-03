@@ -24,11 +24,13 @@ import {
   rememberExecutionState,
   renderActionTimeline,
   renderBranchPanel,
+  renderDelegationPanel,
 } from "./island";
 import { renderQueueStrip } from "./queue";
 import { installTimeline } from "./index";
 import { S } from "./s";
 import { sanitizeActionTimeline, sanitizeBranches, sanitizeContext } from "./sanitize";
+import { provenanceT } from "../execution/copy";
 import { LANG, setLang, t } from "../../i18n/runtime";
 
 type Listener = (event: FakeEvent) => void;
@@ -814,6 +816,149 @@ describe("signal writes publish new objects", () => {
     expect(S.delegationState.stats).toMatchObject({ total: 2, done: 1, running: 1 });
     // The object subscribers already hold is left as it was.
     expect(initial.children).toEqual([{ child_id: "c-1", status: "running" }]);
+  });
+
+  it("a socket child without evidence does not erase evidence already loaded", () => {
+    const sha = "ab".repeat(32);
+    S.delegationState = {
+      root_frame_id: "frame-d",
+      initialized: true,
+      budget: null,
+      stats: { total: 1, pending: 0, running: 0, done: 1, failed: 0, stopped: 0 },
+      children: [
+        {
+          child_id: "c-1",
+          status: "done",
+          artifact_evidence: {
+            scope: "version_and_producer",
+            items: [
+              {
+                filename: "kept.csv",
+                artifact_id: "a-kept",
+                version_id: "v-kept",
+                checksum: sha,
+                size_bytes: 4,
+                capture_kind: null,
+                producing_cell_id: null,
+                cell_status: null,
+                verdict: "verified_version_and_producer",
+                reasons: ["no_cell_receipt"],
+              },
+            ],
+            total: 1,
+            truncated: false,
+          },
+        },
+      ],
+    };
+    mergeDelegationChildEvent({ child: { child_id: "c-1", status: "done", name: "scout" } });
+    expect(S.delegationState.children[0].artifact_evidence.items[0].version_id).toBe("v-kept");
+  });
+});
+
+describe("delegation evidence panel", () => {
+  const scope =
+    "仅核对版本记录、sha256 记录、快照文件存在与大小，以及生产者为该子代理。若记录了生产 Cell，则要求该 Cell 成功；没有 Cell 回执的版本仍可能通过。核对发生在子代理完成时，面板打开期间不会重新核对。未重新计算内容哈希；不代表科学结论或统计有效性。";
+
+  it("renders both verdicts, truncation, unavailable, and the scope note once", async () => {
+    mountDocument();
+    const original = LANG;
+    const sha = "cd".repeat(32);
+    try {
+      await setLang("en");
+      expect(provenanceT("evidenceScope")).toContain("not recomputed");
+      expect(provenanceT("evidenceScope")).toContain("without a Cell receipt can still pass");
+      await setLang("zh");
+      expect(provenanceT("evidenceScope")).toBe(scope);
+      S.delegationState = {
+        root_frame_id: "frame-e",
+        initialized: true,
+        budget: null,
+        stats: { total: 3, pending: 0, running: 0, done: 3, failed: 0, stopped: 0 },
+        children: [
+          {
+            child_id: "c-checked",
+            name: "checked",
+            status: "done",
+            artifact_evidence: {
+              scope: "version_and_producer",
+              total: 13,
+              truncated: true,
+              items: [
+                {
+                  filename: "ok.csv",
+                  artifact_id: "a-ok",
+                  version_id: "v-ok",
+                  checksum: sha,
+                  size_bytes: 8,
+                  capture_kind: "head_checksum_reused",
+                  producing_cell_id: "cell-ok",
+                  cell_status: "ok",
+                  verdict: "verified_version_and_producer",
+                  reasons: ["no_cell_receipt"],
+                },
+                {
+                  filename: "bad.csv",
+                  artifact_id: "a-bad",
+                  version_id: "v-bad",
+                  checksum: null,
+                  size_bytes: null,
+                  capture_kind: null,
+                  producing_cell_id: null,
+                  cell_status: null,
+                  verdict: "insufficient_evidence",
+                  reasons: ["no_checksum"],
+                },
+              ],
+            },
+          },
+          {
+            child_id: "c-down",
+            name: "down",
+            status: "done",
+            artifact_evidence: {
+              scope: "version_and_producer",
+              items: [],
+              total: 0,
+              truncated: false,
+              unavailable: true,
+            },
+          },
+          { child_id: "c-plain", name: "plain", status: "done" },
+        ],
+      };
+      const panel = renderDelegationPanel();
+      const text = panel.textContent ?? "";
+      expect(panel.querySelectorAll(".delegation-evidence-scope")).toHaveLength(1);
+      expect(panel.querySelector(".delegation-evidence-scope")?.textContent).toBe(scope);
+      expect(text.split(scope).length - 1).toBe(1);
+      expect(panel.querySelectorAll(".delegation-evidence")).toHaveLength(2);
+      expect(text).toContain("版本与归属已核对 1 · 证据不足 1");
+      expect(text).toContain("仅显示前 2 项 / 共 13 项");
+      expect(text).toContain("复用已有版本");
+      expect(text).toContain("Cell 成功");
+      expect(panel.querySelector(".delegation-evidence-list")?.getAttribute("data-details-key")).toBe(
+        "delegation-evidence:c-checked",
+      );
+      expect(
+        panel.querySelector(".delegation-evidence-list summary")?.getAttribute("data-focus-key"),
+      ).toBe("summary:delegation-evidence:c-checked");
+      expect(text).toContain("证据不可用");
+      expect(text).toContain("ok.csv");
+      expect(text).toContain("v-ok");
+      expect(text).toContain("sha256 " + sha.slice(0, 12));
+      expect(text).toContain("版本与归属已核对");
+      expect(text).toContain("证据不足");
+      expect(text).toContain("无 sha256 记录");
+      expect(text).toContain("无 Cell 回执");
+      expect(text).not.toContain("原生写入");
+      const unavailable = panel.querySelectorAll(".delegation-evidence")[1];
+      expect(unavailable?.textContent).toContain("证据不可用");
+      expect(unavailable?.querySelectorAll(".delegation-evidence-row")).toHaveLength(0);
+      expect(unavailable?.textContent).not.toContain("版本与归属已核对 0");
+    } finally {
+      await setLang(original);
+    }
   });
 });
 

@@ -19,6 +19,8 @@ instead of green.  Mapping (delegate-specific — the generic
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from openai4s.config import Config, LLMConfig
@@ -254,3 +256,189 @@ def test_a_failed_child_projects_error_end_to_end(dispatcher):
     assert end["status"] == "error"
     assert end["summary"] == "failed"
     assert "child raised" in end["output"]["error"]
+
+
+def _leaky_child(data_dir: str) -> dict:
+    """A child result whose host paths would fill the card's raw budget.
+
+    ``environment`` is first, and its interpreter path is longer than the
+    2000-character raw bound, so truncating before scrubbing keeps the path
+    and drops the conclusion. The prose itself does not mention the data
+    directory or ``durable_path``.
+    """
+
+    prefix = str(data_dir)
+    return {
+        "environment": {
+            "python": f"{prefix}/envs/sci/bin/python" + ("p" * 4000),
+            "env_name": "sci",
+            "env_root": f"{prefix}/envs/sci",
+            "windows": "C:/Host/python.exe",
+            "r_env": None,
+            "generation_id": "g-1",
+        },
+        "artifact_refs": [
+            {
+                "artifact_id": "art-1",
+                "version_id": "ver-1",
+                "filename": "report.md",
+                "checksum": "abc",
+                "frame_id": "f-child",
+                "path": "reports/report.md",
+                "durable_path": f"{prefix}/delegation/c-1/report.md",
+            },
+            {
+                "artifact_id": "art-2",
+                "version_id": "ver-2",
+                "filename": f"{prefix}/secret.txt",
+                "checksum": "def",
+                "frame_id": "f-child",
+                "path": f"{prefix}/ws/out.txt",
+                "durable_path": f"{prefix}/scratch/out.txt",
+            },
+        ],
+        "artifacts": ["report.md", f"{prefix}/leak.txt"],
+        "output": "BODY_MARKER the child kept this paragraph",
+        "completion_bullets": ["BULLET_MARKER"],
+        "final_message": "CONCLUSION_MARKER",
+        "task_status": "completed",
+        "name": "helper",
+        "child_id": "c-1",
+        "frame_id": "f-child",
+        "stop_reason": "submitted",
+        "turns": 2,
+        "max_turns": 8,
+    }
+
+
+def _assert_no_host_paths(output: dict, data_dir: str) -> None:
+    rendered = json.dumps(output)
+    assert data_dir not in rendered
+    assert "durable_path" not in rendered
+    assert "C:/Host" not in rendered
+    assert "BODY_MARKER the child kept this paragraph" in output["raw"]
+    assert "BULLET_MARKER" in output["raw"]
+    assert "CONCLUSION_MARKER" in rendered
+    assert "reports/report.md" in rendered
+    assert "report.md" in rendered
+    assert output["environment"]["env_name"] == "sci"
+    assert "python" not in output["environment"]
+    assert "env_root" not in output["environment"]
+
+
+def test_delegate_step_card_drops_host_paths_before_truncation(tmp_path):
+    data_dir = str(tmp_path / "data")
+    child = _leaky_child(data_dir)
+
+    output, summary, status = _delegate_step_projection(child, True)
+
+    assert status == "done"
+    assert summary == "completed"
+    assert output["summary"] == "CONCLUSION_MARKER"
+    _assert_no_host_paths(output, data_dir)
+    assert len(output["raw"]) <= 2000
+    # The original child is what materialize still reads. The card must not
+    # scrub it in place.
+    assert "durable_path" in child["artifact_refs"][0]
+
+    fanout, _summary, fanout_status = _delegate_step_projection([child, child], True)
+    assert fanout_status == "done"
+    rendered = json.dumps(fanout)
+    assert data_dir not in rendered
+    assert "durable_path" not in rendered
+    assert "BODY_MARKER the child kept this paragraph" in fanout["raw"]
+    assert fanout["children"][0]["environment"]["env_name"] == "sci"
+    assert "python" not in fanout["children"][0]["environment"]
+
+
+class _Hub:
+    def emitter(self, root_frame_id):
+        return lambda event: None
+
+    def broadcast(self, root_frame_id, event):
+        return None
+
+
+@pytest.mark.stubbed_backend
+def test_steps_route_returns_the_scrubbed_delegate_card(tmp_path):
+    """GET /frames/{fid}/steps is the handler the workbench reopens.
+
+    The child result is injected. The route, the store row, and the step
+    projection are the ones a session uses. ``stubbed_backend`` keeps this
+    fabricated child out of the frozen response schema.
+    """
+
+    from openai4s.server import gateway as gateway_mod
+    from openai4s.server import local_auth
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    try:
+        store = runner.store
+        store.create_project(name="p", description="", context="")
+        project_id = store.list_projects()[0]["project_id"]
+        frame_id = runner.create_session(project_id)
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        dispatcher = build_dispatcher(cfg, frame_id=frame_id, workspace=workspace)
+        dispatcher.store.set_permission_rule(
+            scope="conversation",
+            scope_id=frame_id,
+            tool="delegate",
+            pattern="*",
+            decision="allow",
+        )
+        data_dir = str(cfg.data_dir)
+
+        def sink(ev: dict) -> None:
+            if ev.get("phase") == "begin":
+                store.add_step(
+                    step_id=ev["step_id"],
+                    frame_id=frame_id,
+                    kind=ev.get("kind"),
+                    title=ev.get("title"),
+                    input=ev.get("input"),
+                    status="running",
+                )
+            else:
+                store.update_step(
+                    ev["step_id"],
+                    status=ev.get("status"),
+                    output=ev.get("output"),
+                    summary=ev.get("summary"),
+                )
+
+        dispatcher.on_step = sink
+        dispatcher._delegate_fn = lambda spec: _leaky_child(data_dir)
+        dispatcher("delegate", [{"request": "do it", "name": "helper", "wait": True}])
+
+        handler_class = gateway_mod.make_handler(cfg, _Hub(), runner)
+        handler = object.__new__(handler_class)
+        sent: dict = {}
+
+        def _send(code, payload, ctype, extra=None):
+            sent["code"] = code
+            sent["body"] = json.loads(payload.decode("utf-8"))
+
+        handler._send = _send
+        handler.command = "GET"
+        handler.path = f"/api/v1/frames/{frame_id}/steps"
+        handler.headers = {
+            "Content-Length": "0",
+            local_auth.TOKEN_HEADER: local_auth.read_token(cfg.data_dir) or "",
+        }
+        handler._route("GET")
+    finally:
+        runner.close()
+
+    assert sent["code"] == 200
+    rendered = json.dumps(sent["body"])
+    assert data_dir not in rendered
+    assert "durable_path" not in rendered
+    assert "BODY_MARKER the child kept this paragraph" in rendered
+    assert "BULLET_MARKER" in rendered
+    assert "CONCLUSION_MARKER" in rendered
+    assert "reports/report.md" in rendered

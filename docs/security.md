@@ -142,7 +142,7 @@ inside the sandbox.
 | **`dlopen` audit hook** | `OPENAI4S_SAFETY_AUDIT_HOOK` (on) | `sys.addaudithook` refuses `ctypes.dlopen` of a `.so` from an agent-writable path |
 | **Biosecurity screener** | `OPENAI4S_BIOSECURITY` (on) | trajectory screener (ALLOW / ESCALATE / BLOCK) on biosecurity-relevant content |
 | **Injection detector** | `OPENAI4S_INJECTION_SCAN` (on) | annotates tool-returned content (web / PDF / MCP) so the model treats it as **data, not instructions** |
-| **Egress allowlist** | `OPENAI4S_EGRESS` (`off`) | application policy for `web_fetch` / `web_search` and authorized `host.bash`; the OS sandbox is the separate raw-network boundary |
+| **Egress allowlist** | `OPENAI4S_EGRESS` (`off`) | application policy for `web_fetch` / `web_search` and authorized `host.bash`; the OS sandbox is the separate raw-network boundary. Under allowlist a new Cell is admitted only when that sandbox has proven it blocks raw network (`enforced`, self-test passed, and `network_policy` `blocked`); otherwise the Cell is refused before it runs, with `egress_boundary_unavailable`. A remote kernel is always refused |
 | **Fake-IP DNS bridge** | `OPENAI4S_ALLOW_FAKE_IP_DNS` (`off`) | accepts RFC 2544 `198.18.0.0/15` proxy answers only for a hostname in the built-in/user-approved egress catalog; IP literals and every other private/metadata range remain blocked |
 | **Remote-compute confinement** | `OPENAI4S_COMPUTE_CONFINEMENT` (`auto`) | the provider helper runs inside a real OS boundary — Seatbelt on macOS, bubblewrap on Linux — that puts the user's home out of reach — a `tmpfs` over it on Linux; on macOS a denial of `file-read-data` *and* `file-read-xattr`, since an xattr on macOS routinely holds the file's own bytes and `getxattr` was serving what `open` refused — confines writes to the job's stage directory, and (macOS) denies the keychain services, because the credential is read *by securityd* and no file rule covers that. `available()` proves it by establishing a boundary and probing it, not by `which`; the helper re-checks from inside before reading a credential and exits 71 without acting if it does not hold. **The network is deliberately not isolated** (`network_isolated: false`) — calling a provider's REST API is the helper's whole job, so outbound egress is a separate capability and is not enabled. `enforce` refuses `byoc:*` ops only where no boundary can be established: no `bwrap`/`sandbox-exec` on `PATH`, a host that fails the self-test (e.g. unprivileged user namespaces disabled), or a platform with no backend — and it refuses on *every* op, not just submit. `auto` degrades visibly in those same cases; `off` skips the wrapping entirely (see [`docs/compute.md`](compute.md)) |
 | **Secret store** | `OPENAI4S_SECRET_STORE` (`auto`) | credentials behind an opaque reference in the system keychain (after a real round-trip self-test) or the process environment; `auto` **fails closed** when neither is available. Plaintext is reachable only by asking for it by name, and no obfuscated-file fallback exists |
@@ -212,6 +212,73 @@ persist the selected standing rule. A `once` choice instead creates one exact
 `root_frame_id` + tool + permission-target grant, expires after 15 minutes, and
 is consumed atomically only when a fresh matching action reaches an `ask`
 decision. Stored/redacted approval payloads are never executed as arguments.
+
+### Egress allowlist requires a proven kernel boundary
+
+`OPENAI4S_EGRESS=allowlist` keeps host-side `web_fetch`, `web_search`, and the
+authorized `host.bash` preflight on the domain allowlist. It also refuses a
+new Python or R Cell unless that Cell's kernel has already measured a raw
+network block. The measurement is three facts together: `enforced` is true,
+`self_test_passed` is true, and `network_policy` is `blocked`. A remote kernel
+reports `network_policy` `unproven` and is refused for as long as allowlist
+stays on. The same check runs for every origin, including `system`,
+`recovery`, and `sidecar_recovery`, because skill sidecar bootstrap is
+third-party code.
+
+The refusal code is `egress_boundary_unavailable`. The gate does not require
+`OPENAI4S_KERNEL_SANDBOX=enforce`. `auto` admits the Cell when the self-test
+passes and still reports `network_policy=blocked`. `enforce` is the mode that
+refuses to start a kernel instead of degrading. The projected reason says the
+same thing: proof is the three facts above, and `enforce` is how an operator
+chooses fail-closed startup. On a supported platform the remedy is macOS
+Seatbelt or Linux bubblewrap. `OPENAI4S_EGRESS=off`, the default, does not add
+this gate. A Cell that is already running is left alone; the mode is read
+again at the next Cell. `host.bash` inside a Cell is a subprocess of that
+kernel, so it inherits the kernel's network block. The host process's own
+domain check still applies before that subprocess is started.
+
+An R Cell is refused in a different shape from a Python Cell. Python bootstrap
+that fails before the worker is published raises
+`kernel bootstrap failed: egress_boundary_unavailable: …`. A new R worker's
+environment probe is caught, shut down, and returned to the Cell service as
+the string `R kernel unavailable: R kernel bootstrap failed:
+egress_boundary_unavailable: …`, before the ordinary posture precheck runs.
+Both exact prefixes are recognized only while allowlist is on, and both end
+the Cell as `egress_boundary_refused` with the stable code, reason, and
+remedy. The worker they name was never published (Python) or was already
+shut down by its failed bootstrap (R), so the decision's `sandbox` fields
+are null. They are not borrowed from whatever worker the session's slot
+still holds, which may be an earlier worker that passed. A refusal raised
+by the execute gate itself carries the posture of the worker that refused.
+An Agent Cell returns the decision as `egress_boundary` on its result. The
+Notebook REPL route returns only the Cell's `error`, which starts with
+`egress_boundary_unavailable:`. A user Stop or a timeout that happens to
+wrap a refusal stays a cancellation or a timeout.
+
+In an unprivileged container, bubblewrap cannot create its namespaces, so
+`auto` degrades and the self-test does not report a raw-network block.
+Allowlist then refuses every new Python and R Cell with
+`egress_boundary_unavailable`. Admitting Cells there means
+`OPENAI4S_EGRESS=off`, or a container privileged enough for `enforce` to
+establish the boundary. See [docker.md](docker.md) for the namespace limits.
+
+These limits are known and left for a later version:
+
+- Lifecycle entry points do not project `egress_boundary_refused`.
+  `start_kernel` and `set_env` answer a boundary refusal with a generic
+  HTTP 500. `restart_kernel` on a live worker reports success, and the next
+  Cell is refused. A pending environment change applied at the start of an
+  Agent turn fails that turn.
+- Recovery replay, the Jupyter bridge, and benchmark steps let the typed
+  `EgressBoundaryUnavailable` propagate as an ordinary error rather than
+  projecting it.
+- A cluster allocation is released the first time a Cell is refused for this
+  boundary.
+- A delegated sub-agent inside the Web daemon may write the refusal line to
+  stderr. That line is diagnostic noise beside the stable stop reason.
+- The gate runs once per Cell. Code the interpreter runs while the worker
+  process starts, including `.pth` files and `sitecustomize`, is outside
+  the Cell admission check.
 
 ### Executable Artifact previews use a scoped alternate origin
 
@@ -357,7 +424,7 @@ it:
   still trips it.
 - Because the denylist is a table-name match, a query that reads the unrelated `agents.connectors` *column* is also refused; no bundled skill relies on that read.
 
-Credential values passed to `host.credentials.set(name, value)` are held only in an in-memory vault (never persisted). To keep that true end to end, the **RPC audit log** redacts them: `credentials_get` / `credentials_list` are not logged at all, and `credentials_set` is logged for audit **with its args redacted** — the plaintext value never enters `host_call_log`. The replay tape recorder likewise skips `credentials_set`, so an exported notebook cannot carry a plaintext credential.
+Credential values passed to `host.credentials.set(name, value)` are held only in an in-memory vault (never persisted). To keep that true end to end, the **RPC audit log** redacts them: `credentials_get` / `credentials_list` are not logged at all, and `credentials_set` is logged for audit **with its args redacted** — the plaintext value never enters `host_call_log`. The replay tape recorder likewise skips `credentials_set`, so an exported notebook cannot carry a plaintext credential. `host.judge` is a different projection on the same log: `args_preview` keeps a template id only when the judgment registry resolves it and replaces state and params with fixed markers (`<redacted judge state>`, `<redacted judge params>`). The call stays on the replay tape, and `result_preview` stays. `result_digest` stays too, except for a soft-fail error, which is stored without one.
 
 ### Correlation IDs and structured logs
 
@@ -418,9 +485,11 @@ word and a URL has no spaces, so the whole thing arrives as one word — and
 `http://`, because fingerprinting every URL would gut the log. The secret is
 *inside*, in a query value or a path segment, so URL-shaped words go through
 `observability.redact_url`, which keeps the parameter name as provenance and
-fingerprints the value. The daemon's own startup banner is exactly this shape —
-`listening at http://127.0.0.1:8760/?token=…`, printed to stdout, which the
-launchers redirect into `app.out`, which the bundle collects.
+fingerprints the value. Daemon startup no longer prints that shape: the
+listening line and the gateway notice omit the access token. The packaged
+launchers still redirect stdout and stderr into `app.out`, which the bundle
+collects. A `?token=` URL in the log, from an older line or from a cell, is
+still fingerprinted.
 
 What leaves in the bundle is decided **deny-by-default**, and that is a
 different layer from the redaction above. `redact`/`redact_text`/
@@ -680,6 +749,10 @@ connector and model-profile responses are allowlist projections (`env_keys` /
 `tests/test_secret_canary.py` that assert on the secret's bytes rather than on
 field names.
 
+### Background-cell receipts
+
+A Web session's background cell (`host.exec_background` / `exec_background`) writes a row to `background_exec_receipts` before the worker starts. The row keeps the code's SHA-256 and character count. The submitted source is not stored, although a failed cell's stored traceback, like its printed output, can quote lines of it. Stdout is a head of at most 256 KiB per job, written at least once a second while the job prints. A cleanup pass runs the first time a session runtime in a daemon process uses background execution (`exec_background`, `exec_peek`, `exec_list`, or `exec_interrupt`). After a terminal receipt is written, another pass runs, at most once every ten minutes in that process. Each pass clears the output of each owner's oldest terminal rows until that owner's stored output is within 128 MiB, and deletes terminal rows that ended more than seven days ago. The output quota is per `owner_user_id`, not per table, so in team mode one member's background jobs cannot clear another member's stored output. Between passes the table can run over either limit. The table is on `QUERY_DENYLIST`, so agent SQL cannot select it, and session deletion removes the rows with the session. The data directory is mode `0700` and the database file is mode `0600`, which is the file-permission boundary for this output. A CLI or sub-agent job stays in process memory and reports `persistent: false`. A restarted daemon does not resume, reattach, or replay the worker. An unfinished row reads as `outcome_unknown` when another daemon recorded it, and also when this process no longer holds the job. A worker that outlives a crashed daemon, which can happen where the sandbox does not tie its lifetime to the daemon, is not reattached and its later output is not recorded.
+
 ### A delegated child's model credential follows its endpoint
 
 A delegation spec may override a child's model -- `model` as a model id, or a
@@ -922,9 +995,54 @@ $0.042 / million tokens. Do not enable this for sensitive data. Kill switch:
 Named audit event `judgment` records purpose, template, status, usage,
 latency, `state_sha256`, and full probabilities. Raw state is omitted unless
 `experimental.judgment.audit_raw_state` is true. Shadow events
-(`judgment_shadow`) carry hashes and verdict labels, not the code. The
-dispatcher envelope `log_host_call(method="judge")` still records the RPC
-spec, including state.
+(`judgment_shadow`) carry hashes and verdict labels, not the code. That
+setting does not open a second copy in the generic RPC audit.
+
+`host_call_log.args_preview` for `method="judge"` is projected by
+`HostCallRepository.log` on every path that reaches it (success, soft
+failure, early return, and exception). A template id is kept only when the
+judgment registry resolves it. A string that matches
+`^[A-Za-z0-9_.:-]{1,100}$` but is not registered is stored as
+`<unknown template>`. Any other template string is stored as
+`<invalid template>`. State is always `<redacted judge state>`. When the
+call carried params, those are `<redacted judge params>`. A call whose
+arguments are not a one-element list of an object stores only the state
+marker. `result_preview` is unchanged. `result_digest` is unchanged
+except for a soft-fail error result, which is stored without a digest: the
+error text can repeat the caller's template id or params, and a short id
+can be recovered from its SHA-256 by trying candidates. The call stays on
+the replay tape.
+
+Schema migration 33 does not project new rows. It rewrites `judge` rows
+already stored. For that rewrite the migration sets `PRAGMA secure_delete = ON`
+and restores the connection's previous mode by name (`OFF` / `ON` / `FAST`)
+before the migration transaction commits, so the bytes that `UPDATE` replaced
+are zeroed in those pages. A preview that is byte for byte what a new write
+stores is left unchanged, including a params marker and `<invalid template>`
+or `<unknown template>`. A raw preview that still begins with a registered
+template id keeps that id and the state marker and drops params. A raw
+preview that begins with a charset-safe id the registry does not resolve
+becomes `<unknown template>`. Every other raw preview becomes the
+state-only marker.
+
+Stop the daemon before upgrading. A process still running the previous
+release keeps writing raw `judge` rows, and migration 33 does not run again
+once `user_version` is 33. Those rows stay raw.
+
+Copies of the original state can remain outside that row:
+
+- The pre-upgrade backup `<data_dir>/openai4s.db.v32.bak` holds the original
+  text. A successful migration deletes it. A failed migration keeps it.
+- SQLite's rollback journal or WAL, and free pages the secure-delete pass
+  did not overwrite. `secure_delete` zeros pages the `UPDATE` touches. A
+  `judge` row deleted before the upgrade still occupies free pages, and this
+  migration does not read them. Stop the daemon and run `VACUUM` when those
+  leftover bytes have to be gone.
+- Any backup taken outside this process.
+- `openai4s_tape.json`, written while `OPENAI4S_RECORD_TAPE` is set. The
+  recorder stores the raw arguments.
+- A session package exported before the upgrade. The export copies
+  `args_preview` as stored and is not rewritten later.
 
 `safety_shadow` never changes `classify_code` / `scan_tool_result` /
 `screen_trajectory`. The existing function computes the verdict, the shadow
@@ -948,11 +1066,13 @@ token gate below still applies to it. Details:
 [Windows / WSL2 guide](windows-wsl.md).
 
 The server requires an access token by default, on loopback too. It is minted
-once under the data dir (`access-token`, mode 0600), survives restarts, and is
-printed at startup as a URL you open once to set the cookie. Scripts send it as
-`Authorization: Bearer <token>` or `X-OpenAI4S-Token`.
+once under the data dir (`access-token`, mode 0600) and survives restarts.
+Startup logs do not include it. Run `openai4s url` on the daemon's host to
+print the sign-in URL — `http://<host>:<port>/?token=…` in single-user mode,
+`/login` in team mode — and open that single-user URL once to set the cookie.
+Scripts send the token as `Authorization: Bearer <token>` or `X-OpenAI4S-Token`.
 
-The `?token=` form in that startup URL works for one thing only: opening the
+The `?token=` form in that sign-in URL works for one thing only: opening the
 app at `/`. Every other path refuses it — including `/preview/<id>`, which
 answers with artifact bytes and used to be bootstrappable because the rule was
 written as "not `/api/v1/*` and not `/static/*`" rather than as an allowlist. A

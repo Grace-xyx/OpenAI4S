@@ -21,6 +21,14 @@
 // seeded data beyond the example session's two messages: a check whose fixture
 // is whatever the developer's database happens to hold passes for reasons that
 // have nothing to do with the code.
+//
+// Three later scenes drive the live daemon the CI browser job already starts:
+// delegation evidence through the workbench load (sanitize, then the timeline
+// renderer), fork-from-message on a history-loaded user row, and `@` completion
+// against artifact-index. `@playwright/test` is not installed, so visibility
+// uses locator.waitFor with the same "visible" and "hidden" states as
+// expect().toBeVisible() / toBeHidden(). The workbench CSP still forbids
+// page.waitForFunction.
 
 let playwright;
 try {
@@ -31,6 +39,7 @@ try {
   playwright = await import(fallback);
 }
 const { chromium } = playwright;
+import { execFileSync } from "node:child_process";
 import { authenticate, waitUntil } from "./browser_auth.mjs";
 
 const baseUrl = process.env.OPENAI4S_BROWSER_URL || "http://127.0.0.1:8760/";
@@ -1116,6 +1125,655 @@ try {
     );
   }
   await page.unroute(frameCreateRoute);
+
+  // ---- W1: fork from a history-loaded user message, @ completion, evidence --
+  // These three run after the New session clicks so that check still sees the
+  // project id this file created. Each scene opens its own frame.
+  // `@playwright/test` is not a dependency of this repo. locator.waitFor uses
+  // the same visibility states as expect().toBeVisible() / toBeHidden().
+  // toBeHidden also passes for a missing node, so a capability-off button is
+  // required to be attached first.
+  async function toBeVisible(locator, timeout = 15000) {
+    await locator.waitFor({ state: "visible", timeout });
+  }
+  async function toBeHidden(locator, timeout = 15000) {
+    await locator.waitFor({ state: "hidden", timeout });
+  }
+  async function toBeAttached(locator, timeout = 15000) {
+    await locator.waitFor({ state: "attached", timeout });
+  }
+
+  function messageBody(message) {
+    if (Array.isArray(message.content)) {
+      return message.content.map((block) => (block && block.text) || "").join("");
+    }
+    return String(message.content || "");
+  }
+
+  // `wait:false` answers 202 before the cursor checkpoint is visible. The
+  // button exists only on a history row, and a live bubble is not replaced
+  // until the turn has stopped and the session is opened again.
+  async function checkpointedUserMessage(frameId, text) {
+    let finishedWithoutCheckpoint = "";
+    const row = await waitUntil(
+      `a stored user message with a cursor checkpoint on ${frameId}`,
+      async () => {
+        const [messages, status] = await Promise.all([
+          api(`/frames/${encodeURIComponent(frameId)}/messages?limit=20`),
+          api(`/frames/${encodeURIComponent(frameId)}/status`),
+        ]);
+        const user = (messages.messages || []).find(
+          (item) => item.role === "user" && messageBody(item).includes(text),
+        );
+        if (!user || !user.message_id || status.running !== false) return null;
+        if (!user.fork_checkpoint_id) {
+          finishedWithoutCheckpoint = user.message_id;
+          return { missing: user.message_id };
+        }
+        return user;
+      },
+      30000,
+    );
+    if (row.missing) {
+      throw new Error(
+        `user message ${finishedWithoutCheckpoint || row.missing} on ${frameId} ` +
+          "finished with no fork_checkpoint_id; the history fork button cannot be real",
+      );
+    }
+    return row;
+  }
+
+  async function openFrame(frameId) {
+    await page.evaluate(async (fid) => {
+      await openConversation(fid);
+    }, frameId);
+  }
+
+  function forkButton(messageId) {
+    return page.locator(`.msg-fork-btn[data-fork-message-id="${messageId}"]`);
+  }
+
+  async function forkFlag(expected) {
+    await waitUntil(
+      `data-fork-from-message=${expected}`,
+      () => page.evaluate(
+        (value) => document.documentElement.dataset.forkFromMessage === value ? value : null,
+        expected,
+      ),
+      15000,
+    );
+  }
+
+  // The server turns fork_from_message off only while a revert-recovery
+  // setting exists. There is no HTTP route that sets that marker without
+  // starting a revert. The write goes straight at this package's data dir
+  // (never ~/.openai4s) and is checked with GET /branches before the UI opens.
+  function setRevertRecoveryMarker(frameId) {
+    const dataDir = process.env.OPENAI4S_DATA_DIR;
+    if (!dataDir) {
+      throw new Error(
+        "OPENAI4S_DATA_DIR is not set; refusing to write a recovery marker into the default data dir",
+      );
+    }
+    execFileSync("python3", ["-c", `
+import hashlib, os, sqlite3, sys, time
+frame_id, data_dir = sys.argv[1], sys.argv[2]
+key = "session:revert-recovery:" + hashlib.sha256(frame_id.encode("utf-8")).hexdigest()
+db = os.path.join(data_dir, "openai4s.db")
+if not os.path.isfile(db):
+    sys.exit("no daemon database at " + db + "; OPENAI4S_DATA_DIR must be the daemon's own data dir")
+conn = sqlite3.connect(db, timeout=10)
+conn.execute("PRAGMA busy_timeout=10000")
+conn.execute(
+    "INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?) "
+    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+    (key, '{"state":"recovery_required"}', int(time.time() * 1000)),
+)
+conn.commit()
+conn.close()
+`, frameId, dataDir], { encoding: "utf8" });
+  }
+
+  async function runForkMessageScenes() {
+    const capable = await api("/frames", { method: "POST", data: { project_id: projectId } });
+    const capableId = capable.id || capable.frame_id;
+    const capableText = "fork this exact question";
+    await api(`/frames/${encodeURIComponent(capableId)}/message`, {
+      method: "POST",
+      data: { request: capableText, wait: false },
+    });
+    const capableMessage = await checkpointedUserMessage(capableId, capableText);
+    const capableMessageId = capableMessage.message_id;
+
+    await openFrame(capableId);
+    await waitUntil(
+      "fork capability for the checkpointed session",
+      () => page.evaluate((fid) => {
+        const state = S.branchState;
+        if (!state || state.root_frame_id !== fid) return null;
+        return state.capabilities && state.capabilities.fork_from_message === true ? true : null;
+      }, capableId),
+      15000,
+    );
+    await forkFlag("on");
+    const capableBtn = forkButton(capableMessageId);
+    await toBeVisible(capableBtn);
+
+    const branchesBefore = await api(`/frames/${encodeURIComponent(capableId)}/branches`);
+    const branchIdsBefore = new Set((branchesBefore.branches || []).map((branch) => branch.branch_id));
+
+    const forkPosts = [];
+    let releaseFork = () => {};
+    let forkEntered = () => {};
+    const forkEnteredPromise = new Promise((resolve) => { forkEntered = resolve; });
+    const forkGate = new Promise((resolve) => { releaseFork = resolve; });
+    const forkPattern = new RegExp(`/api/v1/frames/${capableId}/branches/fork(?:\\?|$)`);
+    const holdFork = async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      forkPosts.push(route.request().postDataJSON());
+      forkEntered();
+      await forkGate;
+      await route.continue();
+    };
+    await page.route(forkPattern, holdFork);
+    try {
+      await capableBtn.click();
+      await Promise.race([
+        forkEnteredPromise,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error("POST /branches/fork did not start")),
+          10000,
+        )),
+      ]);
+      await waitUntil(
+        "the fork button to be busy",
+        () => capableBtn.getAttribute("aria-busy").then((value) => value === "true" ? true : null),
+        5000,
+      );
+      const busyText = (await capableBtn.textContent()) || "";
+      const disabled = await capableBtn.getAttribute("aria-disabled");
+      check(
+        "the in-flight fork button is busy and disabled",
+        disabled === "true" && (busyText === "Creating a branch…" || busyText === "正在创建分支…"),
+        `aria-disabled=${disabled} text=${busyText}`,
+      );
+      await capableBtn.click({ force: true });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      check(
+        "one fork POST, body exactly {from_message_id}",
+        forkPosts.length === 1 &&
+          forkPosts[0] &&
+          Object.keys(forkPosts[0]).length === 1 &&
+          forkPosts[0].from_message_id === capableMessageId,
+        JSON.stringify(forkPosts),
+      );
+      if (forkPosts.length !== 1) {
+        throw new Error(`fork POST count ${forkPosts.length}: ${JSON.stringify(forkPosts)}`);
+      }
+    } finally {
+      releaseFork();
+    }
+    await waitUntil(
+      "the fork POST to finish",
+      () => capableBtn.getAttribute("aria-busy").then((value) => value !== "true" ? true : null),
+      15000,
+    );
+    check("still one fork POST after it settled", forkPosts.length === 1, JSON.stringify(forkPosts));
+    await page.unroute(forkPattern, holdFork);
+
+    const created = await waitUntil(
+      "a new inactive branch",
+      async () => {
+        const projection = await api(`/frames/${encodeURIComponent(capableId)}/branches`);
+        const added = (projection.branches || []).filter((branch) => !branchIdsBefore.has(branch.branch_id));
+        if (added.length !== 1 || added[0].active !== false) return null;
+        return added[0];
+      },
+      15000,
+    );
+    check(
+      "the new branch is inactive and view-only",
+      created.view_only === true && created.active === false,
+      JSON.stringify(created),
+    );
+    await page.evaluate(() => {
+      setActiveTab("timeline");
+      renderActionTimeline();
+    });
+    await waitUntil(
+      "an inactive branch row",
+      async () => {
+        const count = await page.locator("#dock-timeline .branch-row:not(.current)").count();
+        return count >= 1 ? count : null;
+      },
+      15000,
+    );
+    const inactiveText = await page.locator("#dock-timeline .branch-row:not(.current)").last().innerText();
+    check(
+      "the branch list shows the new branch as view-only",
+      inactiveText.includes("inactive · view only") || inactiveText.includes("未激活 · 仅查看"),
+      inactiveText.slice(0, 200),
+    );
+
+    const blocked = await api("/frames", { method: "POST", data: { project_id: projectId } });
+    const blockedId = blocked.id || blocked.frame_id;
+    const blockedText = "capability off question";
+    await api(`/frames/${encodeURIComponent(blockedId)}/message`, {
+      method: "POST",
+      data: { request: blockedText, wait: false },
+    });
+    const blockedMessage = await checkpointedUserMessage(blockedId, blockedText);
+    setRevertRecoveryMarker(blockedId);
+    // No fallback: the marker is written synchronously into the daemon's own
+    // database, so a GET /branches that still says true is a server regression.
+    await waitUntil(
+      "GET /branches to report fork_from_message false",
+      async () => {
+        const projection = await api(`/frames/${encodeURIComponent(blockedId)}/branches`);
+        return projection.capabilities &&
+          projection.capabilities.fork &&
+          projection.capabilities.fork.fork_from_message === false
+          ? true
+          : null;
+      },
+      5000,
+    );
+    {
+      await openFrame(blockedId);
+      await waitUntil(
+        "the blocked session's branch state",
+        () => page.evaluate((fid) => {
+          const state = S.branchState;
+          if (!state || state.root_frame_id !== fid) return null;
+          return state.capabilities && state.capabilities.fork_from_message === false ? true : null;
+        }, blockedId),
+        15000,
+      );
+      await forkFlag("off");
+      const blockedBtn = forkButton(blockedMessage.message_id);
+      await toBeAttached(blockedBtn);
+      await toBeHidden(blockedBtn);
+
+      await openFrame(capableId);
+      await waitUntil(
+        "the capable session's branch state after switching back",
+        () => page.evaluate((fid) => {
+          const state = S.branchState;
+          if (!state || state.root_frame_id !== fid) return null;
+          return state.capabilities && state.capabilities.fork_from_message === true ? true : null;
+        }, capableId),
+        15000,
+      );
+      await forkFlag("on");
+      await toBeVisible(forkButton(capableMessageId));
+    }
+  }
+
+  async function runArtifactCompletionScene() {
+    const frame = await api("/frames", { method: "POST", data: { project_id: projectId } });
+    const frameId = frame.id || frame.frame_id;
+    for (let index = 0; index < 25; index += 1) {
+      const filename = `nvw3b-ac-${String(index).padStart(2, "0")}.txt`;
+      await api("/uploads", {
+        method: "POST",
+        data: {
+          filename,
+          content_text: "nvw3b",
+          frame_id: frameId,
+          project_id: projectId,
+        },
+      });
+    }
+    await openFrame(frameId);
+    await waitUntil(
+      "at least eight session artifacts with the completion prefix",
+      () => page.evaluate(() => {
+        const rows = (S.artifacts || []).filter((row) => String(row.filename || "").startsWith("nvw3b-ac"));
+        return rows.length >= 8 ? rows.length : null;
+      }),
+      15000,
+    );
+    const composer = page.locator("#composer");
+    await toBeVisible(composer);
+
+    const indexUrls = [];
+    const arrayUrls = [];
+    const messagePosts = [];
+    const onRequest = (request) => {
+      const url = new URL(request.url());
+      if (url.pathname.includes("/artifact-index")) indexUrls.push(request.url());
+      if (url.pathname.endsWith(`/projects/${projectId}/artifacts`)) arrayUrls.push(url.pathname);
+      if (request.method() === "POST" && /\/frames\/[^/]+\/message$/.test(url.pathname)) {
+        messagePosts.push(url.pathname);
+      }
+    };
+    page.on("request", onRequest);
+
+    const completed = /^@nvw3b-ac-\d{2}\.txt#v-[0-9a-f]{12} $/;
+    const indexPattern = new RegExp(`/api/v1/projects/${projectId}/artifact-index(?:\\?|$)`);
+    let releaseIndex = () => {};
+    let indexSeen = () => {};
+    const armIndexHold = () => {
+      const seen = new Promise((resolve) => { indexSeen = resolve; });
+      const gate = new Promise((resolve) => { releaseIndex = resolve; });
+      return { seen, gate };
+    };
+    let hold = armIndexHold();
+    const holdIndex = async (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      if (params.get("q") === "nvw3b-ac") indexSeen();
+      await hold.gate;
+      await route.continue();
+    };
+    await page.route(indexPattern, holdIndex);
+    try {
+      await composer.click();
+      await composer.fill("");
+      // Type, so the caret stays on the @ token. fill() alone can leave the
+      // caret where acDetect does not see the token.
+      await composer.pressSequentially("@nvw3b-ac", { delay: 10 });
+      await Promise.race([
+        hold.seen,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error("artifact-index query for nvw3b-ac did not start")),
+          10000,
+        )),
+      ]);
+      const matched = indexUrls.some((url) => {
+        const params = new URL(url).searchParams;
+        return params.get("q") === "nvw3b-ac" && params.get("limit") === "20";
+      });
+      check(
+        "completion queries artifact-index with q and limit 20",
+        matched,
+        JSON.stringify(indexUrls),
+      );
+      check(
+        "completion does not call the project artifact array",
+        arrayUrls.length === 0,
+        JSON.stringify(arrayUrls),
+      );
+      const items = page.locator("#composer-ac .ac-list .ac-item");
+      await waitUntil(
+        "the completion popup to cap at eight rows",
+        async () => {
+          const count = await items.count();
+          return count > 7 && count <= 8 ? count : null;
+        },
+        10000,
+      );
+      const hint = page.locator("#composer-ac > .ac-hint");
+      await toBeVisible(hint);
+      const hintText = (await hint.innerText()) || "";
+      check(
+        "the in-flight completion hint is the searching line",
+        hintText === "Searching project files…" || hintText === "正在搜索项目文件…",
+        hintText,
+      );
+      const popupBox = await page.locator("#composer-ac").boundingBox();
+      const hintBox = await hint.boundingBox();
+      const inside = !!(popupBox && hintBox &&
+        hintBox.y >= popupBox.y - 1 &&
+        hintBox.y + hintBox.height <= popupBox.y + popupBox.height + 1 &&
+        hintBox.x >= popupBox.x - 1 &&
+        hintBox.x + hintBox.width <= popupBox.x + popupBox.width + 1);
+      check(
+        "the completion hint stays inside the popup border",
+        inside,
+        JSON.stringify({ popupBox, hintBox }),
+      );
+      releaseIndex();
+      await waitUntil(
+        "the completion page to settle",
+        () => hint.count().then((count) => count === 0 ? true : null),
+        10000,
+      );
+      await items.first().click();
+      const picked = await composer.inputValue();
+      check(
+        "picking a row inserts filename#version and a trailing space",
+        completed.test(picked),
+        picked,
+      );
+
+      hold = armIndexHold();
+      // A session of the same project with no local nvw3b-ac rows: the popup
+      // has nothing to pick until the index page lands, so Enter can only be
+      // held by the pending-search guard.
+      await composer.fill("");
+      const bare = await api("/frames", { method: "POST", data: { project_id: projectId } });
+      const bareId = bare.id || bare.frame_id;
+      await openFrame(bareId);
+      await composer.click();
+      await composer.fill("");
+      const postsBefore = messagePosts.length;
+      await composer.pressSequentially("@nvw3b-ac", { delay: 10 });
+      await Promise.race([
+        hold.seen,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error("the second artifact-index query did not start")),
+          10000,
+        )),
+      ]);
+      check("no completion row exists before the index page lands", (await items.count()) === 0, String(await items.count()));
+      await composer.press("Enter");
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      check(
+        "Enter while the completion page is in flight does not send",
+        messagePosts.length === postsBefore,
+        JSON.stringify(messagePosts),
+      );
+      releaseIndex();
+      const accepted = await waitUntil(
+        "the armed completion to land",
+        () => composer.inputValue().then((value) => completed.test(value) ? value : null),
+        10000,
+      );
+      check(
+        "the in-flight Enter completes to filename#version",
+        completed.test(accepted),
+        accepted,
+      );
+      check(
+        "no message POST anywhere in the completion scene",
+        messagePosts.length === postsBefore,
+        JSON.stringify(messagePosts),
+      );
+      check(
+        "completion never calls the project artifact array",
+        arrayUrls.length === 0,
+        JSON.stringify(arrayUrls),
+      );
+    } finally {
+      releaseIndex();
+      await page.unroute(indexPattern, holdIndex);
+      page.off("request", onRequest);
+    }
+  }
+
+  function evidencePayload(total) {
+    const sha = "ab".repeat(32);
+    return {
+      root_frame_id: "frame-evidence",
+      initialized: true,
+      children: [
+        {
+          child_id: "c-checked",
+          name: "checked",
+          status: "done",
+          artifact_evidence: {
+            scope: "version_and_producer",
+            total,
+            truncated: true,
+            items: [
+              {
+                filename: "ok.csv",
+                artifact_id: "a-ok",
+                version_id: "v-ok",
+                checksum: sha,
+                size_bytes: 8,
+                capture_kind: "head_checksum_reused",
+                producing_cell_id: "cell-ok",
+                cell_status: "ok",
+                verdict: "verified_version_and_producer",
+                reasons: ["no_cell_receipt"],
+              },
+              {
+                filename: "bad.csv",
+                artifact_id: "a-bad",
+                version_id: "v-bad",
+                checksum: "NOT-A-SHA",
+                size_bytes: 4,
+                verdict: "verified_version_and_producer",
+                reasons: [],
+              },
+              {
+                filename: "<script>alert(1)</script>.csv",
+                artifact_id: "a-xss",
+                version_id: "",
+                checksum: sha,
+                verdict: "verified_version_and_producer",
+                reasons: [],
+              },
+            ],
+          },
+        },
+        {
+          child_id: "c-down",
+          name: "down",
+          status: "done",
+          artifact_evidence: {
+            scope: "version_and_producer",
+            items: [],
+            total: 0,
+            truncated: false,
+            unavailable: true,
+          },
+        },
+        { child_id: "c-plain", name: "plain", status: "done" },
+      ],
+    };
+  }
+
+  async function runDelegationEvidenceScene() {
+    // No route records a delegate child, or its artifact_evidence, without an
+    // LLM turn. The fixture is served on this frame's real GET /delegations
+    // so loadWorkbenchState's sanitize runs before the timeline renderer.
+    const frame = await api("/frames", { method: "POST", data: { project_id: projectId } });
+    const frameId = frame.id || frame.frame_id;
+    let evidenceTotal = 13;
+    const delegationPattern = new RegExp(`/api/v1/frames/${frameId}/delegations(?:\\?|$)`);
+    const serveEvidence = async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(evidencePayload(evidenceTotal)),
+      });
+    };
+    await page.route(delegationPattern, serveEvidence);
+    try {
+      await openFrame(frameId);
+      await page.evaluate(async (fid) => {
+        setActiveTab("timeline");
+        await loadWorkbenchState(fid, true, ["delegations"]);
+        renderActionTimeline();
+      }, frameId);
+      const panel = page.locator("#dock-timeline .delegation-panel");
+      await toBeVisible(panel);
+      const scope = panel.locator(".delegation-evidence-scope");
+      await waitUntil(
+        "one delegation evidence scope note",
+        () => scope.count().then((count) => count === 1 ? true : null),
+        10000,
+      );
+      const evidence = panel.locator(".delegation-evidence");
+      check(
+        "evidence renders for the checked child and the unavailable child",
+        (await evidence.count()) === 2,
+        `${await evidence.count()} blocks`,
+      );
+      const verified = panel.locator(".delegation-evidence-row .dlg-chip.completed");
+      const insufficient = panel.locator(".delegation-evidence-row .dlg-chip.warning");
+      check(
+        "sanitize keeps one verified row and downgrades the bad checksum",
+        (await verified.count()) === 1 && (await insufficient.count()) === 1,
+        `verified=${await verified.count()} insufficient=${await insufficient.count()}`,
+      );
+      // Closed <details> omit their rows from innerText. textContent still
+      // has the verdict, the checksum reason, and the dropped filename.
+      const panelText = await panel.evaluate((node) => node.textContent || "");
+      const truncation = panelText.includes("Showing the first 2 of 13") ||
+        panelText.includes("仅显示前 2 项 / 共 13 项");
+      const noChecksum = panelText.includes("No sha256 record") || panelText.includes("无 sha256 记录");
+      check("the truncation note appears once", truncation && panelText.split(/Showing the first 2 of 13|仅显示前 2 项 \/ 共 13 项/).length === 2, panelText.slice(0, 400));
+      check(
+        "the downgraded row names the missing checksum",
+        noChecksum,
+        panelText.slice(0, 400),
+      );
+      check(
+        "an item with no version id is dropped",
+        !panelText.includes("alert(1)"),
+        panelText.slice(0, 400),
+      );
+      const scopeCount = panelText.split(await scope.innerText()).length - 1;
+      check("the scope note appears once", scopeCount === 1, `scope copies=${scopeCount}`);
+      const details = panel.locator('details.delegation-evidence-list[data-details-key="delegation-evidence:c-checked"]');
+      await toBeAttached(details);
+      check(
+        "the evidence details key names the child",
+        (await details.getAttribute("data-details-key")) === "delegation-evidence:c-checked",
+        await details.getAttribute("data-details-key"),
+      );
+      const summaryKey = await details.locator("summary").getAttribute("data-focus-key");
+      check(
+        "the evidence summary focus key names the child",
+        summaryKey === "summary:delegation-evidence:c-checked",
+        summaryKey,
+      );
+      await details.locator("summary").click();
+      await waitUntil(
+        "the evidence details to open",
+        () => details.evaluate((node) => node.open ? true : null),
+        5000,
+      );
+      evidenceTotal = 14;
+      await page.evaluate(async (fid) => {
+        await loadWorkbenchState(fid, true, ["delegations"]);
+        renderActionTimeline();
+      }, frameId);
+      const rebuilt = panel.locator('details.delegation-evidence-list[data-details-key="delegation-evidence:c-checked"]');
+      await waitUntil(
+        "the rebuilt evidence details to stay open",
+        () => rebuilt.evaluate((node) => node.open ? true : null),
+        10000,
+      );
+      check(
+        "the rebuilt details keep the child key",
+        (await rebuilt.getAttribute("data-details-key")) === "delegation-evidence:c-checked",
+        await rebuilt.getAttribute("data-details-key"),
+      );
+      const rebuiltText = await panel.evaluate((node) => node.textContent || "");
+      check(
+        "the rebuilt panel shows the new truncation total",
+        rebuiltText.includes("Showing the first 2 of 14") || rebuiltText.includes("仅显示前 2 项 / 共 14 项"),
+        rebuiltText.slice(0, 400),
+      );
+    } finally {
+      await page.unroute(delegationPattern, serveEvidence);
+    }
+  }
+
+  await runForkMessageScenes();
+  await runArtifactCompletionScene();
+  await runDelegationEvidenceScene();
 
   if (pageErrors.length) failures.push(`page errors: ${pageErrors.join(" | ")}`);
   if (failures.length) {

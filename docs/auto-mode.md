@@ -496,3 +496,438 @@ digest, run context, generation, expiry, and `max_uses=1`.
 See [Architecture](architecture.md), [Configuration](configuration.md), and
 the [Web App API contract](webapp-api.md) for the Stage 1 implementation
 boundary.
+
+## Workbench status surface (specification — not shipped)
+
+This section specifies how the default workbench will show Auto Mode. It is
+not implemented. This version adds no control, no menu row, and no call to
+`/auto-mode` or `/auto-audits`. The session options menu in
+`frontend/src/features/sessions/actions.ts` (`sessionOptionsMenu`) and the
+legacy `app.js` hatch still talk only to `/frames/{id}/review-settings`.
+
+The surface, when a later version builds it, is three stacked lines in that
+session options menu. A successful `GET /frames/{id}/auto-mode` fills all
+three. The lines stay separate. Their headings do not change to match the
+preset.
+
+| Line | English heading | Chinese heading | What it answers |
+| --- | --- | --- | --- |
+| Availability | Availability | 可用性 | Can this conversation use Auto Mode storage, and may a later editor write? |
+| Saved selection | Saved selection | 已保存的选择 | Which preset and sub-modes are in force, and which source won? |
+| Run | Run | 运行 | Is there an Auto Run on the active logical branch, and what state is it in? |
+
+`schema_version` on this route is `1`. A later client that sees any other
+version shows the same copy as HTTP 503 and does not guess a layout.
+`last_event_id` and `last_event_ordinal` are the refresh cursor. They are not
+a fourth status. `deployment` explains the deployment source. It is not a
+second on/off switch.
+
+### 1. Non-goals
+
+| Non-goal | What this version keeps |
+| --- | --- |
+| No new control | No preset picker, no sub-mode picker, no clear button, no audit button, and no budget editor. The three lines above are the later layout. They are not added now. |
+| No automatic run | Reading or, later, saving a selection does not start a Reviewer, a Repair Agent, a Permission Guardian, or a model call. There is no transition route. `PATCH /frames/{id}/auto-mode` writes configuration only. |
+| `review-settings` keeps its meaning | `PATCH /frames/{id}/review-settings` with `{auto_review}` still writes the old post-completion Reviewer switch. This surface does not reinterpret that switch, remove it, or rename it to Auto Mode. |
+
+A saved `autonomous` preset is a bounded configuration (`auto_fix` plus
+`auto_review` plus the hard ceilings below). The availability line and the
+run line do not inherit that word as “started” or “已开启”.
+
+### 2. Status model
+
+Keys below are the JSON keys `AutoModeService.get` returns. Enumerations are
+the closed sets in `openai4s/server/auto_mode.py` and
+`openai4s/config.py`.
+
+| Group | API key | Closed values | How the line uses it |
+| --- | --- | --- | --- |
+| Envelope | `schema_version` | `1` | Gate the layout. |
+| Availability | `feature_enabled` | `true`, `false` | True only when `OPENAI4S_STAGE2_AUTO_RUN_STORAGE` is on. It is not the preset. |
+| Availability | `writable` | `true`, `false` | True only when `feature_enabled` is true and the session is not quarantined. A later editor is offered only then. |
+| Availability | `disabled_reason` | `import_quarantine`, `stage2_feature_disabled`, or JSON `null` | Null when `writable` is true. Quarantine wins over a disabled flag. There is no third reason. |
+| Scope | `root_frame_id`, `branch_id` | identifiers | The GET for any frame in the conversation resolves to the root and the active logical branch. The lines show that scope. |
+| Selection | `selection.preset` | `off`, `autonomous` | Saved-selection value. `autonomous` is the product preset name. |
+| Selection | `selection.result_review_mode` | `off`, `review_only`, `auto_fix` | Saved-selection value. |
+| Selection | `selection.approvals_reviewer` | `user`, `auto_review` | Saved-selection value. `auto_review` here is who resolves an `ask`. It is not the menu switch. |
+| Selection | `selection.source` | `import_quarantine`, `frame`, `project`, `deployment_explicit`, `legacy_result_review`, `built_in_defaults` | Which row won. Precedence is the list in *Scope and precedence*. |
+| Selection | `selection.explicit` | `true`, `false` | False only for `built_in_defaults`. True means some source won, including quarantine and the legacy switch. It does not by itself mean the user saved a frame override. |
+| Selection | `selection.revision` | integer `≥ 0` | Frame-row revision. A later PATCH sends this, including when the winning source is not `frame`. |
+| Selection | `selection.source_revision` | integer `≥ 0` | Revision of the winning row. The editor does not send it as `revision`. |
+| Deployment | `deployment.explicit` | `true`, `false` | True when at least one of `OPENAI4S_AUTO_MODE`, `OPENAI4S_RESULT_REVIEW_MODE`, `OPENAI4S_APPROVALS_REVIEWER` is set in the process environment. An explicit `off` is different from an unset variable. |
+| Deployment | `deployment.explicit_fields` | subset of `preset`, `result_review_mode`, `approvals_reviewer` | The fields whose variables were actually set. Forced normalization is visible on `selection`, not by inventing an entry here. |
+| Ceilings | `budgets` | the thirteen ceiling fields in *Frozen bounded budgets* | Read-only deployment ceilings. The budget block labels them as ceilings. |
+| Run | `run` | object or JSON `null` | Null means no public run on the active logical branch. An object is the sanitized run, plus `legacy`, and when `legacy` is false also `budget_usage` and `circuit`. |
+| Cursor | `last_event_id`, `last_event_ordinal` | identifier or null; integer or null | Compared after a hint or a reconnect. Not shown as the run state. |
+
+`run` public fields used by the run line are `status`, `user_truth`,
+`terminal_reason`, `result_review_mode`, `approvals_reviewer`,
+`review_round`, and `repair_round`. `run_id`, `turn_id`, and `execution_id`
+stay on a secondary detail row. Digests stay in that detail row.
+
+`run.status` is one of `running`, `candidate`, `reviewing`, `repairing`,
+`verified`, `completed_with_issues`, `review_unavailable`,
+`blocked_by_guardian`, `cancelled`, `failed`, `paused`, `unverified_import`.
+The first four are in progress. The rest are finished. Terminal wording for
+the finished states and for `terminal_reason` stays the user-truth sentences
+already fixed in *State vocabulary and sole entry conditions*. When
+`run.user_truth` is present, the run line shows that string unchanged.
+
+`run.budget_usage.<field>` is a meter `{limit, used, reserved, remaining,
+exhausted, authority}` for each ceiling field. `authority` is `auto_budget`
+or `guardian`. `run.circuit` is `{state, reason, last_delta_cursor}` with
+`state` of `closed` or `tripped`. `last_delta_cursor` is not shown.
+`run.legacy: true` means the store returned no budget projection: `budget_usage`
+is empty and the circuit is the closed placeholder. The run line can still
+show `status`.
+
+| Situation | Availability line | Saved-selection line | Run line |
+| --- | --- | --- | --- |
+| `feature_enabled` false, and `disabled_reason` is `stage2_feature_disabled` | Storage is off. `writable` is false. The preset is not described as started. | Still shows `selection`, including a deployment `autonomous` preset when that is the winner. The value is a saved or inherited configuration. | Independent. Null `run` reads as no Auto Run. A stored run, if the projection has one, still shows its own `status`. |
+| `writable` false, `disabled_reason` `stage2_feature_disabled` | Same as the row above. This is the only non-quarantine reason. | Same as the row above. | Same as the row above. |
+| `writable` false, `disabled_reason` `import_quarantine` | Imported session, read only. Quarantine wins even when the stage flag is also off, so `feature_enabled` may be false while the reason remains `import_quarantine`. | `preset` `off`, `result_review_mode` `off`, `approvals_reviewer` `user`, `source` `import_quarantine`. `explicit` is true. The line says the safe triple is held because the session was imported. | Historical run facts stay visible as read-only provenance. The line does not offer resume. `unverified_import` stays unverified. |
+| `writable` true, `disabled_reason` null | Storage is available. A later editor may be offered. Availability still does not say a run is in progress. | Follows `source` and the triple. | Follows `run` only. |
+| `selection.explicit` false | Unchanged. | `source` is `built_in_defaults`: preset off, result review off, approvals `user`. The value says this is the built-in default and that no override is saved. | Unchanged. |
+| `selection.explicit` true | Unchanged. | A source other than `built_in_defaults` won. The source label says which. `explicit` alone is not copied as “you saved this”. | Unchanged. |
+| `source` `frame` | Unchanged. | Saved on this conversation. | Unchanged. |
+| `source` `project` | Unchanged. | Saved on this project. | Unchanged. |
+| `source` `deployment_explicit` | Unchanged. | Set by deployment configuration. When `deployment.explicit_fields` is non-empty, the detail names those fields. | Unchanged. |
+| `source` `legacy_result_review` | Unchanged. | Inherited from the old Auto review switch. See section 5. The preset is `off` and approvals stay `user`. Result review is `review_only` only when the scoped setting is a legacy true spelling (`1`, `true`, `yes`, `on`); any other stored spelling, including `0`, is result review `off`. | Unchanged. |
+| `source` `built_in_defaults` | Unchanged. | Built-in default. `explicit` is false. | Unchanged. |
+| `source` `import_quarantine` | Read only, as above. | Safe triple, as above. | As the quarantine row above. |
+| `run` null | Unchanged. | Unchanged. | No Auto Run. Ceilings may still be listed. No meter is near its ceiling. |
+| `run` object, `status` in `running`, `candidate`, `reviewing`, `repairing` | Unchanged. | Unchanged. The selection triple is not rewritten to match the run. | In progress, then the status sentence. The line also shows this run's own `result_review_mode` and `approvals_reviewer` when those fields are present, plus `review_round` and `repair_round` when present. |
+| `run` object, any other `status` | Unchanged. | Unchanged. | Finished, then `user_truth` or the terminal sentence for `status` / `terminal_reason`. A paused budget stop uses **Paused · Budget exhausted**. It does not read as in progress. |
+| A meter is near its ceiling | Unchanged. | Unchanged. | The budget block, not the selection line, carries the warning. Rule below. |
+| HTTP 503 `auto_mode_storage_unavailable` | Status unavailable. | Status unavailable. The client does not invent an off preset. | Status unavailable. |
+| HTTP 404 `frame_not_found` | Session not found. | Session not found. | Session not found. |
+
+Budget block, under the run line:
+
+| Condition | What is shown |
+| --- | --- |
+| Always, after a successful GET | The `budgets` object as deployment ceilings, labelled ceilings. The block is read-only. Stage 2 accepts no budget PATCH. |
+| `run` null, or `run.legacy` true | Ceilings, plus “no usage recorded”. The near-ceiling rule does not apply. Empty `budget_usage` is not zero usage. |
+| `run.legacy` false | Each `budget_usage` meter as “`used` of `limit`, `remaining` remaining”. When `reserved` is greater than zero, the same meter includes the reserved count. `authority` `auto_budget` is labelled Auto Run. `authority` `guardian` is labelled Guardian. |
+| Near ceiling | Display rule only. The server sends no near-limit field. A meter is near its ceiling when `exhausted` is false, `limit` is a positive finite number, and `remaining * 5 <= limit`. The meter then adds “near ceiling”. |
+| At ceiling | `exhausted` true. The meter reads “at ceiling”. When `terminal_reason` or `circuit.reason` is `budget_exhausted`, the run line uses **Paused · Budget exhausted** and the block names the exhausted meters. |
+| Token ceiling not frozen | `extra_token_multiplier` with `limit` `0` and `exhausted` false. The meter reads “token ceiling not frozen”. It is not described as near or at its ceiling. |
+| Circuit | `circuit.state` `closed` shows no circuit warning. `tripped` shows `circuit.reason` with the user-truth string when `user_truth` carries one. `budget_measurement_unavailable` is shown as the server string `无法验证 token 预算`, in either UI language. `quota_exceeded` is **Paused · Team quota exhausted**. `loop_detected` is **Paused/Blocked · Loop detected**. |
+
+Worked example, stage flag off, deployment preset `autonomous`, no run. The
+three lines read as storage off, saved selection autonomous with the forced
+`auto_fix` and `auto_review` pair and source deployment, and no Auto Run.
+None of the three reads “已开启” or “On”.
+
+### 3. Copy
+
+Headings are the table in the introduction. Values:
+
+| Slot | English | Chinese | When |
+| --- | --- | --- | --- |
+| Availability | Storage off | 存储未开启 | `disabled_reason` is `stage2_feature_disabled` |
+| Availability | Imported session, read only | 导入会话，只读 | `disabled_reason` is `import_quarantine` |
+| Availability | Storage available | 存储可用 | `feature_enabled` true and `disabled_reason` null |
+| Availability | Status unavailable | 状态不可用 | HTTP 503, or `schema_version` other than `1` |
+| Availability | Session not found | 找不到会话 | HTTP 404 `frame_not_found` |
+| Preset `off` | Off | 关闭 | `selection.preset` |
+| Preset `autonomous` | Autonomous | 自主 | `selection.preset`. The heading above it remains “Saved selection”. |
+| Result `off` | Off | 关闭 | `selection.result_review_mode` |
+| Result `review_only` | Review only | 仅审核 | `selection.result_review_mode` |
+| Result `auto_fix` | Auto-fix | 自动修复 | `selection.result_review_mode` |
+| Approvals `user` | You | 由你 | `selection.approvals_reviewer` |
+| Approvals `auto_review` | Auto review of asks | 自动复核询问 | `selection.approvals_reviewer`. This string is not the menu item “Auto review” / “自动审核”. |
+| Source `frame` | Saved on this conversation | 已保存在此会话 | |
+| Source `project` | Saved on this project | 已保存在此项目 | |
+| Source `deployment_explicit` | Set by deployment | 由部署配置指定 | |
+| Source `legacy_result_review` | Inherited from Auto review | 继承自自动审核 | |
+| Source `built_in_defaults` | Built-in default, no saved override | 内置默认，没有已保存的覆盖 | `explicit` false |
+| Source `import_quarantine` | Held at the safe default after import | 导入后固定为安全默认 | |
+| Run null | No Auto Run | 没有自动运行 | |
+| Run in progress | In progress | 进行中 | The four non-terminal statuses |
+| Run finished | Finished | 已结束 | Every other `run.status` |
+| Budget ceilings | Deployment ceilings | 部署上限 | The `budgets` object |
+| No usage | No usage recorded | 尚未记录用量 | `run` null or `run.legacy` true |
+| Near ceiling | Near ceiling | 接近上限 | The display rule in section 2 |
+| At ceiling | At ceiling | 已到上限 | `exhausted` true |
+| Token meter | Token ceiling not frozen | 令牌上限尚未冻结 | `extra_token_multiplier` limit `0` and not exhausted |
+| Meter authority | Auto Run / Guardian | 自动运行 / 权限守护 | `authority` `auto_budget` / `guardian` |
+| Audit entry | Audit | 审计 | Later entry control. Not a mode switch. |
+| Audit empty | No audits | 没有审计记录 | Successful audit GET with an empty `audits` array |
+| Audit failure | Audits unavailable | 审计不可用 | Audit GET 503 |
+
+Selection value shape, under the saved-selection heading:
+
+`{preset}; result review {result_review_mode}; approvals {approvals_reviewer}. {source label}.`
+
+Chinese:
+
+`{预设}；结果审核 {result_review_mode}；审批 {approvals_reviewer}。{来源}。`
+
+Run value shape:
+
+`{In progress | Finished | No Auto Run}. {user_truth or status sentence}. This run: result review {run.result_review_mode}; approvals {run.approvals_reviewer}.`
+
+The “this run” clause is omitted when the run is null or those fields are
+absent. The status sentence is the frozen user truth from this document, or
+`run.user_truth` when the payload has it. The client does not translate
+`run.user_truth`.
+
+The words “On”, “Enabled”, and “已开启” are not values on these three lines.
+The existing composer on/off hint remains the legacy switch only.
+
+Later editor copy, unused until a version that implements section 4:
+
+| Slot | English | Chinese |
+| --- | --- | --- |
+| Revision conflict | This selection was saved elsewhere. Reloaded. Try again. | 选择已被另存，已重新读取。请再试一次。 |
+| Storage refused | Storage off | 存储未开启 |
+| Quarantine refused | Imported session, read only | 导入会话，只读 |
+| Clear control | Clear saved override | 清除已保存的覆盖 |
+| Autonomous confirm | Autonomous saves result review as auto-fix and approvals as auto review of asks. It does not start a run. | 自主会把结果审核存成自动修复，并把审批存成自动复核询问。这不会开始一次运行。 |
+| Preset-off confirm | Preset off keeps the result-review and approval choices shown here. | 预设关闭会保留此处显示的结果审核和审批选择。 |
+
+### 4. Interaction specification (later version)
+
+This version builds none of the controls in this section. A later editor
+follows these rules.
+
+| Rule | Behavior |
+| --- | --- |
+| Who may edit | The editor is present only when `writable` is true. `disabled_reason` is then null. Storage off and import quarantine show the availability copy and no editor. |
+| What is sent | The body always includes `revision` from `selection.revision`, plus the full triple `preset`, `result_review_mode`, and `approvals_reviewer`. The editor does not send `source_revision`, `budgets`, or `run`. |
+| Autonomous pair | The autonomous choice is offered only as the forced triple: `preset` `autonomous`, `result_review_mode` `auto_fix`, `approvals_reviewer` `auto_review`. The confirm copy in section 3 is shown before the request. The server stores that pair even if a client sends other sub-modes with `autonomous`. |
+| Preset off | Preset off is sent with the two sub-modes the user picked. Those sub-modes stay independent. Sending `preset` `off` alone would make the server store result review `off` and approvals `user`, so the editor does not send the preset alone. |
+| Omitted preset | If a request includes a sub-mode and omits `preset`, the server stores `preset` `off`. The editor avoids that path by sending the full triple. |
+| Success | PATCH returns the same object as GET. All three lines and the budget block are replaced from that object. A successful PATCH does not mean a run started. |
+| `409` `auto_mode_revision_conflict` | Discard the draft. GET again. Show the revision-conflict copy. Do not send the PATCH again automatically. |
+| `409` `auto_mode_storage_disabled` | Refetch. Show “Storage off”. The flag changed under the client. |
+| `423` `session_import_quarantined` | Refetch. Show “Imported session, read only”. Hide the editor. |
+| `503` `auto_mode_storage_unavailable` | Show “Status unavailable” on all three lines. Do not keep a stale “storage available”. |
+| Clear override | The clear control is shown only when `writable` is true and `source` is `frame`. It sends `revision` and all three selection fields as JSON null. A partial null is `400` `invalid_auto_mode_clear` and is not a control the editor offers. After success, the lines show whichever lower source now wins. |
+| Empty body | A PATCH with only `revision` is `400` `empty_auto_mode_patch`. The editor does not send it. |
+| Unknown fields | Anything outside `revision` and the triple is `400` `invalid_auto_mode_fields`. |
+| Bad revision | A missing revision is `400` `auto_mode_revision_required`. A non-integer or negative revision is `400` `invalid_auto_mode_revision`. |
+| Bad enum | An unknown preset, result mode, or reviewer is `400` `invalid_auto_mode`. The editor offers only the closed values. |
+
+Clearing a frame override does not delete a project row, a deployment
+setting, or the legacy `review:auto:<root>` setting.
+
+### 5. Relationship to the legacy Auto review switch
+
+The menu item labelled “Auto review” / “自动审核”
+(`composer.option.autoReview`) stays. Its checkmark is
+`GET /frames/{id}/review-settings` field `auto_review`. Clicking it still
+sends `PATCH /frames/{id}/review-settings` with `{auto_review}`. That route
+writes `review:auto:<frame id>` and means the old single-call Reviewer after
+the answer. `inherits_auto_review` true means the scoped key is absent and
+the checkmark may be coming from the global `auto_review_enabled` setting.
+
+Auto Mode reads a different key. `selection.source` becomes
+`legacy_result_review` only when `review:auto:<root_frame_id>` exists, and
+only when no quarantine, frame, project, or explicit deployment source wins.
+That mapping is `preset` `off`, `approvals_reviewer` `user`, and
+`result_review_mode` `review_only` or `off` as in section 2. It never selects
+`autonomous`, `auto_fix`, or `auto_review` approvals. The global setting is
+not an Auto Mode source. The menu's frame id and the root id are the same
+when the open session is the root. The status lines follow the GET
+`selection`, not the checkmark.
+
+| What the user can see | How it is presented |
+| --- | --- |
+| Auto review checkmark on, `source` `legacy_result_review` | The menu checkmark keeps the name Auto review. The saved-selection line reads inherited, result review only, approvals with you, preset off. There is one switch, the old one. The status line is not a second switch. |
+| Auto review checkmark on, `source` `built_in_defaults` | The checkmark is the old Reviewer, often inherited from the global setting. The saved-selection line stays “built-in default”. The two are labelled differently and are not merged into one on/off. |
+| Auto review checkmark off, `source` `frame` or `project` or `deployment_explicit` | The saved-selection line shows the Auto Mode source. The checkmark is not cleared to match it, and the Auto Mode line is not turned off to match the checkmark. |
+| `source` `import_quarantine` | The saved-selection line is the safe triple. The old checkmark, if still readable, keeps its own label and is not offered as a way out of quarantine. |
+
+A later read-only status block sits with the session options menu and does
+not replace the Auto review row.
+
+### 6. Audit entry
+
+A later version adds an Audit / 审计 control on the run line. It is not a
+mode switch. This version does not add it. The control calls
+`GET /frames/{id}/auto-audits`.
+
+| Query | Rule |
+| --- | --- |
+| `subject_kind` | Omitted for both kinds. Otherwise exactly `result_review` or `permission_review`. |
+| `limit` | Integer 1 through 500. Default 100. |
+| `before` | Omitted on the first page. The next page sends the previous response's `next_before`. |
+| Order | Newest first, as returned. The client does not re-sort a page into the middle of another page. |
+| Stop | `has_more` is true only when `next_before` is present. The client stops when `has_more` is false. |
+
+Response keys are `schema_version`, `root_frame_id`, `branch_id`,
+`subject_kind`, `audits`, `next_before`, and `has_more`.
+
+| HTTP | Code | Panel |
+| --- | --- | --- |
+| 200, empty `audits` | | No audits |
+| 400 | `invalid_subject_kind` | Reset the filter to both kinds. Do not retry the rejected value. |
+| 400 | `invalid_limit`, `invalid_cursor` | Show Audits unavailable for that request. Do not walk `before` with a cursor the user typed. |
+| 404 | `frame_not_found` | Session not found |
+| 503 | `auto_mode_storage_unavailable` | Audits unavailable |
+
+Each audit row shows these fields when present: `subject_kind`,
+`subject_entity_kind`, `status`, `verdict`, `outcome`, `decision`, `risk`,
+`round`, `attempt`, `finding_count`, `public_summary`, `error_kind`,
+`created_at`, `started_at`, `completed_at`, and `event_ordinal`.
+`subject_entity_kind` is only `candidate_evidence_snapshot` for
+`result_review` and `approval_action` for `permission_review`.
+
+The primary sentence is `public_summary`. `rationale_summary` is a bounded
+summary already truncated by the server. It may appear in the detail row
+under the label Summary / 摘要. It is not labelled as a prompt.
+
+Findings, when the sanitized row includes them, show `severity`, `category`,
+`status`, `claim`, `evidence_refs`, `version_ids`, `artifact_ids`, and
+`cell_ids`. `finding_id` and `fingerprint` stay on the detail row.
+
+Identity fields `audit_id` and `run_id`, plus `reviewer_profile_id` and
+`profile_revision`, stay on the detail row. Digests (`audit_request_digest`,
+`assessment_digest`, `action_digest`, `candidate_digest`) may be shown there
+as hashes. They are not the decision text.
+
+The panel does not show an assessment prompt, a system prompt, hidden
+rationale, a permission-request body, or a reusable authorization. Those
+values are not on the sanitized audit. A later payload that adds them is
+still omitted. The panel does not reconstruct them from a digest.
+
+`auto_audit_started` and `auto_audit_completed` refresh this list when the
+panel is open. The event is not inserted as a row. The list is replaced or
+paged from GET.
+
+### 7. WebSocket events and refresh
+
+SQLite is the source of the three lines. The socket is a hint that a
+transition already committed. A lost hint is recovered by GET. The client
+does not retry a side effect.
+
+| Event | What the client does |
+| --- | --- |
+| `auto_run_started` | GET `/auto-mode` for the open frame when `root_frame_id` matches. |
+| `candidate_ready` | GET `/auto-mode`. |
+| `auto_audit_started` | GET `/auto-mode`. If the audit panel is open, GET `/auto-audits` for that event's `subject_kind`. |
+| `auto_audit_completed` | Same as `auto_audit_started`. |
+| `repair_started` | GET `/auto-mode`. |
+| `repair_completed` | GET `/auto-mode`. |
+| `auto_run_terminal` | GET `/auto-mode`. If the audit panel is open, GET `/auto-audits` again. |
+
+Any other event type leaves the three lines alone. The client does not copy
+event fields onto the lines in place of the GET body. After GET, if
+`last_event_ordinal` is newer than the cursor the client stored, the GET body
+replaces the lines and the cursor.
+
+Reopen and reconnect use the same GET. They do not replay the socket buffer
+as authority.
+
+A selection PATCH does not emit these events. The lines change because the
+PATCH response is a GET body.
+
+There is no transition endpoint. The client does not call one in order to
+turn a hint into a run.
+
+### 8. Stage-flag checklist
+
+Verified from `RoadmapFeatureFlags` and `AutoModeConfig` in
+`openai4s/config.py`. Every stage flag uses `_strict_env_flag`, whose default
+is false when the variable is unset. Accepted true spellings are `1`,
+`true`, `yes`, `on`. Accepted false spellings are `0`, `false`, `no`,
+`off`. Any other spelling fails configuration load. Stage 12 does not turn
+on stages 1–11. The availability line reads `feature_enabled` from stage 2
+only. The other flags do not change that boolean.
+
+| Environment variable | Config field | Default when unset |
+| --- | --- | --- |
+| `OPENAI4S_STAGE1_TRUSTED_DELIVERY` | `roadmap_features.stage1_trusted_delivery` | false |
+| `OPENAI4S_STAGE2_AUTO_RUN_STORAGE` | `roadmap_features.stage2_auto_run_storage` | false |
+| `OPENAI4S_STAGE3_SCIENTIFIC_REVIEW_SHADOW` | `roadmap_features.stage3_scientific_review_shadow` | false |
+| `OPENAI4S_STAGE4_REVIEW_COMPLETION_GATE` | `roadmap_features.stage4_review_completion_gate` | false |
+| `OPENAI4S_STAGE5_AUTO_REPAIR` | `roadmap_features.stage5_auto_repair` | false |
+| `OPENAI4S_STAGE6_GUARDIAN_SHADOW` | `roadmap_features.stage6_guardian_shadow` | false |
+| `OPENAI4S_STAGE7_GUARDIAN_ENFORCEMENT` | `roadmap_features.stage7_guardian_enforcement` | false |
+| `OPENAI4S_STAGE8_LIVE_NOTEBOOK_LINEAGE` | `roadmap_features.stage8_live_notebook_lineage` | false |
+| `OPENAI4S_STAGE9_ARTIFACT_WORKBENCH` | `roadmap_features.stage9_artifact_workbench` | false |
+| `OPENAI4S_STAGE10_SCIENTIFIC_CONNECTORS` | `roadmap_features.stage10_scientific_connectors` | false |
+| `OPENAI4S_STAGE11_DURABLE_REMOTE_COMPUTE` | `roadmap_features.stage11_durable_remote_compute` | false |
+| `OPENAI4S_STAGE12_AUTO_MODE_GA` | `roadmap_features.stage12_auto_mode_ga` | false |
+
+Selection variables are not stage flags. They feed `selection` when the
+winning source is `deployment_explicit`. Unset is not the same as an explicit
+off: only a variable that is present is listed in `deployment.explicit_fields`.
+
+| Environment variable | Default when unset | Accepted values | Effect on the saved-selection line |
+| --- | --- | --- | --- |
+| `OPENAI4S_AUTO_MODE` | unset, so `enabled` false and preset `off` | `autonomous` or `1` / `true` / `yes` / `on` enable it; `0` / `false` / `no` / `off` disable it | Enabling forces the deployment pair to `auto_fix` and `auto_review`. The preset name on the wire is `autonomous` or `off`. |
+| `OPENAI4S_RESULT_REVIEW_MODE` | `off` | `off`, `review_only`, `auto_fix` | Ignored for the stored pair when the preset is enabled. Those two are forced. |
+| `OPENAI4S_APPROVALS_REVIEWER` | `user` | `user`, `auto_review` | Same force when the preset is enabled. |
+
+Ceiling variables are the budget block's deployment ceilings. Defaults and
+hard maximums match *Frozen bounded budgets* and `AutoModeBudgets`. A value
+outside the closed range fails configuration load. The surface never treats
+a tightened ceiling as a used meter.
+
+| Environment variable | Default | Closed range |
+| --- | --- | --- |
+| `OPENAI4S_AUTO_MAX_REVIEW_ROUNDS` | 2 | 1–2 |
+| `OPENAI4S_AUTO_MAX_REPAIR_ROUNDS` | 2 | 0–2 |
+| `OPENAI4S_AUTO_REPAIR_TURNS_PER_ROUND` | 12 | 0–12 |
+| `OPENAI4S_AUTO_MAX_EXTRA_CELLS` | 30 | 0–30 |
+| `OPENAI4S_AUTO_WALL_TIME_S` | 900 | 1–900 |
+| `OPENAI4S_AUTO_EXTRA_TOKEN_MULTIPLIER` | 1.5 | 0–1.5 |
+| `OPENAI4S_AUTO_REPEATED_FINDING_LIMIT` | 2 | 1–2 |
+| `OPENAI4S_AUTO_SAME_ACTION_NO_DELTA_LIMIT` | 3 | 1–3 |
+| `OPENAI4S_AUTO_NO_PROGRESS_TURN_LIMIT` | 5 | 1–5 |
+| `OPENAI4S_AUTO_GUARDIAN_TIMEOUT_S` | 90 | 1–90 |
+| `OPENAI4S_AUTO_GUARDIAN_CONSECUTIVE_DENIAL_LIMIT` | 3 | 1–3 |
+| `OPENAI4S_AUTO_GUARDIAN_WINDOW_SIZE` | 50 | 50–50 |
+| `OPENAI4S_AUTO_GUARDIAN_WINDOW_DENIAL_LIMIT` | 10 | 1–10 |
+
+### 9. Test plan for a later implementation
+
+This version adds no test. The implementation that builds the surface extends
+`tests/test_auto_mode_service.py` and adds menu coverage beside
+`frontend/src/features/sessions/actions.menu.test.ts`, which already mocks
+`openMenu`. `sessionOptionsMenu` is the function under test.
+
+Service assertions to keep or add, against the real handler or the service
+the route calls:
+
+| Case | Expected projection |
+| --- | --- |
+| Stage 2 flag off | GET `feature_enabled` false, `writable` false, `disabled_reason` `stage2_feature_disabled`. PATCH `409` `auto_mode_storage_disabled`. The selection is still resolved. |
+| Flag on, not quarantined | `writable` true, `disabled_reason` null. |
+| Quarantine, flag on or off | `disabled_reason` `import_quarantine`, `writable` false, safe triple, `source` `import_quarantine`, `explicit` true. PATCH `423` `session_import_quarantined`. |
+| Each `source` | The precedence order already covered, including legacy true and legacy false, and an unset deployment that does not erase legacy. |
+| `explicit` | False only for `built_in_defaults`. |
+| Autonomous PATCH | Stored triple is `autonomous` / `auto_fix` / `auto_review`. |
+| Preset off sent alone | Stored result review `off` and approvals `user`. |
+| Clear | All three fields null, with `revision`, removes the frame override. A mixed null is `400` `invalid_auto_mode_clear`. |
+| Stale `revision` | `409` `auto_mode_revision_conflict`, and the following GET returns the winner. |
+| Audits | `subject_kind` filter, `limit` outside 1–500 rejected, `has_more` only with `next_before`, and the body has no prompt field. |
+| Events | The seven event names are the only ones broadcast, and a broadcast failure does not roll back the committed row. |
+| Storage missing | The route returns `503` `auto_mode_storage_unavailable` without a selection body. |
+
+Menu cases, once the read-only block exists:
+
+| Case | What the test shows |
+| --- | --- |
+| Flag off, preset `autonomous`, `run` null | Three strings: storage off, saved autonomous selection, no Auto Run. The block does not contain “On” or “已开启”. |
+| Each `disabled_reason` | The availability string in section 3, and no editor control. |
+| `explicit` false and true | Built-in copy versus a source label. `explicit` true with source `legacy_result_review` is not labelled as saved on this conversation. |
+| Each `source` | The source string in section 3. |
+| `run` null, in progress, and finished | “No Auto Run”, “In progress”, and “Finished”, plus the run's own mode fields when present. |
+| Selection off while `run.status` is `reviewing` | The saved-selection line stays off. The run line says in progress. |
+| Budget | Ceilings with no usage when `run` is null or `legacy` is true. Near-ceiling and at-ceiling copy from the meter rule. The `无法验证 token 预算` string is shown as returned. |
+| Legacy versus Auto review | The existing Auto review row still patches `review-settings`. A `legacy_result_review` status line is not a second checkmark. A checked Auto review row with `built_in_defaults` does not flip the saved-selection line to on. |
+| Revision conflict | The handler shows the retry copy, issues a GET, and does not PATCH again. |
+| Quarantine | Read-only copy, no PATCH from the menu. |
+| Clear | The request body is `revision` plus three nulls, and only when `source` is `frame`. |
+| Autonomous confirm | The confirm copy names `auto_fix` and `auto_review` before the request. |
+| Socket hint | A canonical event triggers GET. The event object is not written into the three lines by itself. |
+| Audit panel | Paging uses `before` and `subject_kind`. Rendered text has no prompt field. |
+
+Acceptance for that implementation: a person can point at the menu and name
+which line is the saved selection, which line is availability, and which line
+is the actual run, including the worked example where the preset is
+`autonomous`, storage is off, and there is no run.

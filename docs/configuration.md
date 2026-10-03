@@ -170,7 +170,9 @@ paths share one seeder.
 
 `OPENAI4S_TOKEN` — the daemon access token, for CLI subcommands when the token
 file under the data dir is not readable by the calling user (a daemon running
-under another account). Normally unset: the CLI reads the file.
+under another account). The token lives in `<data_dir>/access-token` on the
+host the daemon runs on, and `openai4s url` prints a sign-in link that
+includes it. Normally unset: the CLI reads the file.
 
 `OPENAI4S_REQUIRE_TOKEN` — **removed in 0.3.0; ignored.** Up to 0.2.x, `0`
 turned the access-token gate off on a loopback bind. That opt-out was granted
@@ -179,6 +181,10 @@ token on every bind whatever this variable says; see [Security](security.md)
 for what the gate stands in front of.
 
 `OPENAI4S_NOTEBOOK_REPL` (`off`) — set to `1` to re-enable the web UI's in-Notebook developer REPL (arbitrary kernel code from the right panel); off by default, so the Notebook is a read-only execution trace (see [Security](security.md)).
+
+`OPENAI4S_EGRESS` (`off`) — `allowlist` applies the host domain allowlist to `web_fetch`, `web_search`, and authorized `host.bash`. In that mode a new Python or R Cell is also admitted only when the kernel sandbox is enforced, its self-test passed, and `network_policy` is `blocked`. Anything else, including a remote kernel, is refused before the Cell runs with `egress_boundary_unavailable`. `off` leaves Cell execution unchanged. See [Security](security.md).
+
+`OPENAI4S_KERNEL_SANDBOX` (`auto`) — `enforce` fails closed when Seatbelt or bubblewrap cannot prove the boundary; `auto` warns and continues unsandboxed; `off` disables the OS boundary. Under `OPENAI4S_EGRESS=allowlist`, Cell admission needs the enforced, self-tested, `network_policy=blocked` posture. `OPENAI4S_KERNEL_ALLOW_RAW_NETWORK=1` reports `raw_allowed` and is refused while allowlist is on.
 
 `OPENAI4S_WEBUI` — unset (the default) serves the committed Vite workbench (`openai4s/server/webui/dist/index.html`) as the SPA shell at `/` and at deep links such as `/projects/{pid}/frames/{fid}`. Set to exactly `legacy` to serve the frozen `webui/index.html` + `app.js` escape hatch. Any other value (including `1` / `next` / `true`) keeps the new UI, so a typo cannot silently fall back. `/static/dist/` is ordinary static files under `WEBUI_DIR` either way. The retired `OPENAI4S_WEBUI_NEXT` name is ignored.
 
@@ -315,7 +321,9 @@ the UI cannot override it. An environment enable treats the operator as
 informed and logs a warning; the UI path also requires a current-version
 disclosure acknowledgement (`experimental.judgment.disclosure_ack`). Optional
 `experimental.judgment.audit_raw_state` (default off) includes raw state in
-the named `judgment` audit event.
+the named `judgment` audit event. The generic `host_call_log` row for
+`judge` always stores the projected arguments; this setting is not a bypass
+into that table.
 
 `api.typesafe.ai` is **not** a built-in egress group. In allowlist mode grant
 it with `host.request_network_access(domain="api.typesafe.ai")`. Status:

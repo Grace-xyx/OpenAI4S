@@ -16,6 +16,9 @@ import type {
   BranchUndo,
   ComputeTasks,
   ContextState,
+  ArtifactEvidence,
+  ArtifactEvidenceItem,
+  DelegationChild,
   DelegationState,
   ExecutionQueue,
   ExecutionTicket,
@@ -848,6 +851,110 @@ export function sanitizeSecurity(payload: unknown): SecurityState {
   };
 }
 
+const EVIDENCE_VERDICTS = new Set([
+  "verified_version_and_producer",
+  "insufficient_evidence",
+]);
+const EVIDENCE_REASONS = new Set([
+  "other_frame",
+  "no_checksum",
+  "no_snapshot",
+  "snapshot_missing",
+  "size_mismatch",
+  "cell_not_recorded",
+  "cell_failed",
+  "cell_other_frame",
+  "no_cell_receipt",
+]);
+const EVIDENCE_CELL_STATUS = new Set(["ok", "error", "interrupted"]);
+const EVIDENCE_CAPTURE_KIND = new Set([
+  "version_created",
+  "same_cell_merge",
+  "head_checksum_reused",
+]);
+const EVIDENCE_SHA256 = /^[0-9a-f]{64}$/;
+
+function evidenceCount(value: unknown, fallback: number): number {
+  const number = typeof value === "number" ? value : Number.NaN;
+  if (!Number.isSafeInteger(number) || number < 0) return fallback;
+  return Math.min(number, 1000000);
+}
+
+function sanitizeEvidenceItem(raw: unknown): ArtifactEvidenceItem | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  if (typeof item.verdict !== "string" || !EVIDENCE_VERDICTS.has(item.verdict)) {
+    return null;
+  }
+  const checksum =
+    typeof item.checksum === "string" && EVIDENCE_SHA256.test(item.checksum)
+      ? item.checksum
+      : null;
+  const reasons = (Array.isArray(item.reasons) ? item.reasons : [])
+    .filter((reason): reason is string => typeof reason === "string" && EVIDENCE_REASONS.has(reason))
+    .slice(0, 4);
+  const cellStatus =
+    typeof item.cell_status === "string" && EVIDENCE_CELL_STATUS.has(item.cell_status)
+      ? (item.cell_status as ArtifactEvidenceItem["cell_status"])
+      : null;
+  const captureKind =
+    typeof item.capture_kind === "string" && EVIDENCE_CAPTURE_KIND.has(item.capture_kind)
+      ? (item.capture_kind as ArtifactEvidenceItem["capture_kind"])
+      : null;
+  const versionId = typeof item.version_id === "string" ? item.version_id.trim() : "";
+  if (!versionId) return null;
+  const size =
+    typeof item.size_bytes === "number" &&
+    Number.isInteger(item.size_bytes) &&
+    item.size_bytes >= 0
+      ? item.size_bytes
+      : null;
+  let verdict = item.verdict as ArtifactEvidenceItem["verdict"];
+  let keptReasons = reasons;
+  if (verdict === "verified_version_and_producer" && checksum === null) {
+    verdict = "insufficient_evidence";
+    if (!keptReasons.includes("no_checksum")) {
+      keptReasons = ["no_checksum", ...keptReasons].slice(0, 4);
+    }
+  }
+  return {
+    filename: publicText(item.filename, 200),
+    artifact_id: publicText(item.artifact_id, 200),
+    version_id: publicText(versionId, 200),
+    checksum,
+    size_bytes: size,
+    capture_kind: captureKind,
+    producing_cell_id:
+      typeof item.producing_cell_id === "string" && item.producing_cell_id
+        ? publicText(item.producing_cell_id, 200)
+        : null,
+    cell_status: cellStatus,
+    verdict,
+    reasons: keptReasons,
+  };
+}
+
+export function sanitizeArtifactEvidence(raw: unknown): ArtifactEvidence | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  if (record.scope !== "version_and_producer") return undefined;
+  const items = (Array.isArray(record.items) ? record.items : [])
+    .slice(0, 12)
+    .map(sanitizeEvidenceItem)
+    .filter((item): item is ArtifactEvidenceItem => item != null);
+  const evidence: ArtifactEvidence = {
+    scope: "version_and_producer",
+    items,
+    total: Math.max(evidenceCount(record.total, items.length), items.length),
+    truncated: record.truncated === true,
+  };
+  if (record.unavailable === true) evidence.unavailable = true;
+  if (typeof record.checked_at === "number" && Number.isFinite(record.checked_at)) {
+    evidence.checked_at = record.checked_at;
+  }
+  return evidence;
+}
+
 export function sanitizeDelegations(payload: unknown): DelegationState {
   const wrapped = asRecord(payload);
   const source = asRecord(
@@ -886,7 +993,7 @@ export function sanitizeDelegations(payload: unknown): DelegationState {
         item.overrides && typeof item.overrides === "object"
           ? asRecord(item.overrides)
           : {};
-      return {
+      const child: DelegationChild = {
         child_id: publicText(item.child_id, 96),
         parent_child_id: publicText(item.parent_child_id, 96),
         frame_id: publicText(item.frame_id, 96),
@@ -919,6 +1026,11 @@ export function sanitizeDelegations(payload: unknown): DelegationState {
             : 0,
         },
       };
+      if (Object.prototype.hasOwnProperty.call(item, "artifact_evidence")) {
+        const evidence = sanitizeArtifactEvidence(item.artifact_evidence);
+        if (evidence) child.artifact_evidence = evidence;
+      }
+      return child;
     })
     .filter((item) => item.child_id);
   return {

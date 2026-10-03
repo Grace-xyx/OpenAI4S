@@ -22,7 +22,7 @@
 | `backend-refactor-architecture.md` | backend refactor 的历史设计记录。它记的是当时定下的方案，不能用来证明当前已经端到端实现。 |
 | `compute.md` | 远程计算、BYOC provider 与 `host.fold` 的行为和限制。 |
 | `configuration.md` | provider、环境、daemon、内核与数据目录分别怎么配置。 |
-| `docker.md` | 双语容器指南：镜像、`compose.yaml`、Kubernetes 清单，以及通配绑定究竟改变了什么。它把容器与内核沙箱之间的取舍说清楚，而不是暗示容器能替代沙箱；写明镜像期望的 `OPENAI4S_SECRET_<SCOPE>_<NAME>` 推导变量名；也列出了今天真实存在的限制——没有 R、不支持 IPv6、没有访问日志、启动横幅里带着凭据。 |
+| `docker.md` | 双语容器指南：镜像、`compose.yaml`、Kubernetes 清单，以及通配绑定究竟改变了什么。它把容器与内核沙箱之间的取舍说清楚，而不是暗示容器能替代沙箱；写明镜像期望的 `OPENAI4S_SECRET_<SCOPE>_<NAME>` 推导变量名；也列出了今天真实存在的限制——没有 R、不支持 IPv6、没有访问日志。启动日志不含访问令牌；`docker exec … openai4s url` 会打印登录链接。 |
 | `jupyter.md` | 可选的 Jupyter 适配器：它对外暴露什么、执行边界划在哪里，以及相关的兼容说明。 |
 | `model-backend-bringup.md` | 模型 backend bring-up 与准入指南的英文版。 |
 | `model-backend-bringup_zh.md` | 框架级加速器路由、checkpoint staging、真实推理 canary 准入、connector 可移植性，以及依赖 checkpoint 的模型工具扩展契约。 |
@@ -35,8 +35,8 @@
 | `security.md` | 威胁模型、信任边界、各层防护与已知的覆盖缺口。 |
 | `skills.md` | 内置与用户 Skill 的格式、加载方式、sidecar 与生命周期。 |
 | `startup-guide.md` | 双语 macOS 上手全流程：安装 v0.3.0 预览镜像（Apple Silicon，ad-hoc 签名）及其 Gatekeeper 步骤，或从 PyPI 安装、配置模型，以及在 UI 里用一个 Agent Plan Key 授权豆包搜索；Tavily/免密钥搜索保留为备用。 |
-| `upgrading.md` | 从 0.2.x 升级到 0.3.0：首次启动前备份 `openai4s.db`（schema 从 27 升到 32，迁移成功后会删除自己的升级前副本）、为什么不支持退回 0.2.x、现在总是必需的访问令牌，以及升级用户会遇到的其他变化。 |
-| `upgrading_zh.md` | 0.2.x 到 0.3.0 升级指南的中文版。 |
+| `upgrading.md` | 升级指南，新的在前。下一版本（schema 32 到 34）：先停 daemon 并复制数据目录，因为 judge 审计改写成功后会删除自己的升级前副本，且不支持降级；然后是出口 allowlist 关卡、令牌不再进日志、后台 Cell 收据，以及 `GET /frames/{fid}/delegations` 的形状变化。0.2.x 到 0.3.0：首次启动前备份 `openai4s.db`（schema 从 27 升到 32）、为什么不支持退回 0.2.x、现在总是必需的访问令牌，以及升级用户会遇到的其他变化。 |
+| `upgrading_zh.md` | 升级指南的中文版。 |
 | `team-server.md` / `team-server_zh.md` | 多用户模式的运维页：开什么、按什么顺序开、每个开关到底暴露了什么。里面所有东西默认都是关的，所以默认安装仍是它一直以来的那个单用户工作台（INV-1）。它对两件最容易搞错的事说得很直白——团队模式加的是账号而不是"可以暴露"；relay 也不是访问实验室服务器的第三条路（它发布的是单个会话的脱敏投影，不是工作台）。 |
 | `team-server-plan.md` | 多用户 Team Server 模式的冻结执行计划（M1 多租户 → M2 治理 → M3a/M3b Slurm 编排 → M4）：产品决策、约束性不变量、逐里程碑工作项与门禁，以及为自主执行代理写就的非阻塞规则。该计划是意图记录；执行期间只允许追加其「偏差记录」附录。 |
 | `TODO.md` / `TODO_zh.md` | 双语「未了事项」台账：仓库已决定要做但还没做的后续项，每一条都写明「做完」长什么样。已规划的 v0.3 工作在 `next-version-progress.md` 里；这份文件收的是待办项，通常其负责主体在代码库之外。 |

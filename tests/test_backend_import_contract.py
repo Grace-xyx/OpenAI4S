@@ -91,10 +91,14 @@ FACADE_EXPORTS: dict[str, frozenset[str]] = {
     ),
     "openai4s.egress": frozenset(
         {
+            "EGRESS_BOUNDARY_UNAVAILABLE",
             "EGRESS_GROUPS",
             "EgressBlocked",
+            "EgressBoundaryUnavailable",
             "blocked_error",
             "blocked_message",
+            "boundary_refusal_decision",
+            "cell_admission_refusal",
             "check_url",
             "command_domains",
             "domain_allowed",
@@ -103,6 +107,7 @@ FACADE_EXPORTS: dict[str, frozenset[str]] = {
             "egress_mode",
             "grant_domain",
             "granted_domains",
+            "is_boundary_refusal",
             "scan_command",
         }
     ),

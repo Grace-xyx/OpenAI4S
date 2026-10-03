@@ -205,9 +205,28 @@ Shadow channels emit `judgment_shadow` with `kind`, `existing_verdict`,
 `shadow_answers`, `agree`, `status`, `latency_ms`, and `state_sha256` —
 not the code or the request text.
 
-The dispatcher envelope `log_host_call(method="judge")` still records the
-RPC spec, including state. That is a separate audit surface from the named
-`judgment` event.
+The dispatcher envelope `log_host_call(method="judge")` stores a projected
+`args_preview` written by `HostCallRepository.log`, not by a migration. A
+template id is kept only when the judgment registry resolves it. A string
+that matches `^[A-Za-z0-9_.:-]{1,100}$` but is not registered is stored as
+`<unknown template>`. Any other template string is `<invalid template>`.
+State is always `<redacted judge state>`. When the call carried params,
+those are `<redacted judge params>`. A call whose arguments are not a
+one-element list of an object stores only the state marker. Schema
+migration 33 does not write new rows. It rewrites `judge` rows already on
+disk. A preview that is byte for byte one of those projections is left
+alone, including the params marker and `<invalid template>` or
+`<unknown template>`. A raw preview that still begins with a registered
+template id keeps that id and the state marker, and drops params. A raw
+prefix the registry does not resolve becomes `<unknown template>`. Every
+other raw preview becomes the state-only marker `[{"state": "<redacted judge state>"}]`,
+which is not the same shape as a new write of an invalid template.
+`result_preview` and the replay tape are unchanged. `result_digest` is
+unchanged except for a soft-fail error result, which is stored without a
+digest because its text can repeat the caller's template id or params.
+Copies that can still hold the original state are listed in
+[security.md](security.md#outbound-data-flow-semantic-judgment-experimental).
+This remains a separate audit surface from the named `judgment` event.
 
 A session package export may attach `judgment_manifest.json` (capabilities
 used, backend, model, template versions, call and token counts). It must
@@ -390,9 +409,16 @@ when `api.typesafe.ai` is outside an enforced allowlist.
 
 Open for W2: `tests/conftest.py` still does not purge `OPENAI4S_*JUDGMENT*`,
 and a runtime path now exists for it to leak into. `host.judge` is deliberately
-absent from `GATEABLE_TOOLS`, `_SCREENED_METHODS` and `_m_capabilities()`. The
-dispatcher envelope's `log_host_call(method="judge")` still records the raw
-state even though the named `judgment` audit event does not.
+absent from `GATEABLE_TOOLS`, `_SCREENED_METHODS` and `_m_capabilities()`.
+New `host_call_log` rows for `method="judge"` are projected by
+`HostCallRepository.log` (`AUDIT_ARG_PROJECTIONS["judge"]`). Schema
+migration 33 only rewrites rows already stored: a preview that is already
+the projection is unchanged, and a raw preview keeps a registered template
+id from its prefix plus the state marker, records an unregistered
+charset-safe prefix as `<unknown template>`, or becomes the state-only
+marker.
+The named `judgment` event includes raw state only when
+`experimental.judgment.audit_raw_state` is on.
 
 ### W2 — 2026-09-20
 

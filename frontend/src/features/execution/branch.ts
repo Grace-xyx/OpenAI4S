@@ -10,9 +10,11 @@
  *   POST /frames/{id}/recovery/actions/{restore|retry|restart_fresh}
  */
 
+import { currentId } from "../../stores/session";
 import { workbenchErrors } from "../../stores/timeline";
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
+import { historyT } from "../messages/copy";
 import { publicText } from "../scrub/scrub";
 import { api } from "./api";
 import {
@@ -47,6 +49,98 @@ export async function forkFromCell(frameId: string, cellId: string): Promise<For
   if (attempt.ok) return null;
   applyForkPresentation(attempt.presentation);
   return attempt.presentation;
+}
+
+export type ForkResult =
+  | { ok: true; branch_id: string; name: string }
+  | { ok: false; presentation: ForkPresentation };
+
+/** One in-flight fork per message. A second click must not POST again. */
+const messageForkInFlight = new Set<string>();
+
+/**
+ * Panel refresh after a message fork. `list.ts` wires this to the workbench
+ * refresh. `branch_created` also refreshes. There is no dynamic import of the
+ * notebook kernel: that import was static everywhere else, so it never became
+ * its own chunk and only warned at build time.
+ */
+let messageForkRefresh: (() => void) | null = null;
+
+export function setMessageForkRefresh(refresh: (() => void) | null): void {
+  messageForkRefresh = refresh;
+}
+
+function refreshAfterMessageFork(): void {
+  const refresh = messageForkRefresh;
+  if (!refresh) return;
+  try {
+    refresh();
+  } catch {
+    // The branch already exists. A failed panel refresh must not look like
+    // a failed fork, and must not be retried as a second POST.
+  }
+}
+
+function stillOnFrame(frameId: string): boolean {
+  return currentId.value === frameId;
+}
+
+function messageForkKey(frameId: string, messageId: string): string {
+  return frameId + "\0" + messageId;
+}
+
+/**
+ * Whether this message's fork is still in flight. A history repaint gives the
+ * row a fresh button while the first POST is pending; that button asks here
+ * before it shows a busy state the first request would never settle.
+ */
+export function messageForkPending(frameId: string, messageId: string): boolean {
+  return messageForkInFlight.has(messageForkKey(frameId, messageId));
+}
+
+function branchLabel(result: unknown): { branch_id: string; name: string } {
+  const rec = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+  const branchId = publicText(rec.branch_id, 96);
+  const named = publicText(rec.name, 120);
+  return { branch_id: branchId, name: named || branchId };
+}
+
+/**
+ * Fork from one stored user message. One POST, body exactly
+ * `{from_message_id}`. A 409 is the server's sentence, not a retry and not
+ * a fork of the latest state. The new branch stays inactive.
+ */
+export async function forkFromMessage(
+  frameId: string,
+  messageId: string,
+): Promise<ForkResult | null> {
+  if (!frameId || !messageId) return null;
+  const key = messageForkKey(frameId, messageId);
+  if (messageForkInFlight.has(key)) return null;
+  messageForkInFlight.add(key);
+  try {
+    const attempt = await forkOnce(() =>
+      api(`/frames/${encodeURIComponent(frameId)}/branches/fork`, {
+        method: "POST",
+        body: JSON.stringify({ from_message_id: messageId }),
+      }),
+    );
+    if (!attempt.ok) {
+      const presentation = attempt.presentation.message
+        ? attempt.presentation
+        : { ...attempt.presentation, message: historyT("history.forkMessage.failed") };
+      if (stillOnFrame(frameId)) applyForkPresentation(presentation);
+      return { ok: false, presentation };
+    }
+    const created = branchLabel(attempt.result);
+    if (stillOnFrame(frameId)) {
+      hint(historyT("history.forkMessage.created", created.name));
+      refreshAfterMessageFork();
+    }
+    return { ok: true, ...created };
+  } finally {
+    messageForkInFlight.delete(key);
+  }
 }
 
 export async function forkFromCheckpoint(

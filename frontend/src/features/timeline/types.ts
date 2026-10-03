@@ -277,6 +277,33 @@ export type SecurityState = {
   };
 };
 
+export type ArtifactEvidenceVerdict =
+  | "verified_version_and_producer"
+  | "insufficient_evidence";
+
+export type ArtifactEvidenceItem = {
+  filename: string;
+  artifact_id: string;
+  version_id: string;
+  checksum: string | null;
+  size_bytes: number | null;
+  capture_kind: "version_created" | "same_cell_merge" | "head_checksum_reused" | null;
+  producing_cell_id: string | null;
+  cell_status: "ok" | "error" | "interrupted" | null;
+  verdict: ArtifactEvidenceVerdict;
+  reasons: string[];
+};
+
+export type ArtifactEvidence = {
+  scope: "version_and_producer";
+  items: ArtifactEvidenceItem[];
+  total: number;
+  truncated: boolean;
+  unavailable?: boolean;
+  /** Unix seconds. Recorded when the sub-agent finished, not on each read. */
+  checked_at?: number;
+};
+
 export type DelegationChild = {
   child_id: string;
   parent_child_id: string;
@@ -298,6 +325,7 @@ export type DelegationChild = {
     permission_count: number;
     capability_count: number;
   };
+  artifact_evidence?: ArtifactEvidence;
 };
 
 export type DelegationState = {

@@ -738,3 +738,321 @@ evidence upload. D12 permits these rows because each one names that run.
 
 Two more decisions for the release are recorded beside the waiver: D11 is
 settled as "no DMG in v0.3.0", and the Windows/WSL2 zip ships (D13).
+
+## 21. Next release: report items 01–08 (2026-10-01)
+
+> Plan: `OpenAI4S-next-version-report-20260923-021531-0u0nrl.md` (items 01–08,
+> release definition in its §12)
+> Branch: `feat/next-version`, merged from three waves of parallel work packages
+> onto `origin/main` @ `9f20ef8d`
+> Recorded against the commit that adds this section; the gate table at the end
+> names the head it was run on.
+
+Each item below states its status in this file's vocabulary, where it is wired
+into the real main path, the command that verifies it, what was put back to
+prove the tests can fail, and the entry points it deliberately does not cover.
+`Completed` carries the same five conditions as the top of this file, plus the
+manual end-to-end run named in the row where one applies.
+
+### 01 — Cell raw-network admission under `OPENAI4S_EGRESS=allowlist` (P0)
+
+- **Status:** `Completed`. The R raw-network block under `enforce` has no test
+  that can tell a block from an unsandboxed refusal (named below).
+- **Wiring:** `egress.cell_admission_refusal` is the one admission rule
+  (`enforced`, `self_test_passed`, `network_policy=blocked`). It is called by
+  `Kernel.execute` (`kernel/manager.py`) before the execute frame is sent, by
+  `BackgroundExecutor.launch` (`kernel/background.py`) before a background
+  worker runs, and by the Cell service's posture precheck
+  (`server/cell_run.py`). Refusals raised anywhere are recognized by
+  `egress.is_boundary_refusal` / `boundary_refusal_decision` (typed exception
+  or `.code` on the chain; the two exact bootstrap prefixes only while
+  allowlist is on), projected by `CellExecutionService._refuse_egress_boundary`
+  for Web Agent and REPL Cells, and by `LocalActionExecutor._egress_boundary_outcome`
+  (`agent/runtime.py`) and `agent/loop.py` for the CLI. `doctor._with_allowlist_boundary`
+  reports the same rule.
+- **Verification:** `uv run pytest tests/test_egress.py tests/test_cell_execution_service.py tests/test_kernel.py tests/test_kernel_sandbox.py tests/test_background_cleanup.py tests/test_agent_runtime.py tests/test_doctor.py -q`;
+  `OPENAI4S_KERNEL_SANDBOX=enforce uv run python -m harness.smoke.macos_sandbox`
+  reports `allowlist_agent_cell: true` and `degraded_refused: true` on macOS;
+  the Linux bubblewrap boundary is CI's `harness.smoke.linux_sandbox` job.
+- **Put back:** reverting the W2 recognition change turned 13 tests red
+  (a worker crash whose stderr names the code became a refusal again; an `off`
+  daemon projected a bootstrap prefix as a refusal; R kept `R kernel unavailable`).
+  Reverting the integration fix turned 7 red: a prefix refusal again borrowed
+  the previous worker's passing posture, a cancellation wrapping a refusal
+  became `egress_boundary_refused`, and a wrapped CLI refusal lost its reason.
+- **Not covered:** lifecycle entry points do not project
+  `egress_boundary_refused` (`start_kernel`, `set_env` answer 500;
+  `restart_kernel` on a live worker reports success and the next Cell is
+  refused); recovery replay, the Jupyter bridge and benchmark steps let the
+  typed error propagate; `.pth` / `sitecustomize` run before the per-Cell
+  gate; a cluster allocation is released on the first refusal; R under
+  `enforce` (see Status). All listed in `docs/security.md` and in the upgrade
+  notes.
+
+### 02 — `host.judge` redaction in the generic RPC audit, new and historical rows (P0)
+
+- **Status:** `Completed`.
+- **Wiring:** new rows: `HostCallRepository.log` runs
+  `AUDIT_ARG_PROJECTIONS["judge"]` = `judge_audit_args` before any
+  serialization (registered template id or a marker, fixed state/params
+  markers); `_result_audit` stores no digest for a judge soft-fail error.
+  Historical rows: migration 33, `Store._apply_redact_judge_host_call_args`
+  → `redact_stored_judge_args_preview`, by `rowid`, under
+  `PRAGMA secure_delete = ON` restored by name.
+- **Verification:** `uv run pytest tests/test_metadata_repositories.py tests/test_schema_migrations.py tests/test_judgment_rpc.py -q`
+  (a raw sentinel inside and past the 500-character cut never reaches the
+  database file, including free pages touched by the rewrite).
+- **Put back:** reverting the W2 projection turned 5 tests red; reverting the
+  integration fix turned 5 red (a raw row shaped like a projection survived
+  verbatim; a failing registry import failed migration 33; the soft-fail digest
+  of `unknown template: <id>` was stored).
+- **Not covered:** the named `judgment` event carries raw state only when
+  `experimental.judgment.audit_raw_state` is on (by design); a replay tape
+  records raw arguments (by design); a database already stamped 33 by a
+  development build does not re-run the step; bytes of rows deleted before
+  the upgrade stay in free pages until `VACUUM`; a kernel-side
+  `RuntimeError("unknown template: <id>")` reaches the Cell's own output.
+
+### 03 — no access token in startup, daemon or container logs (P0)
+
+- **Status:** `Completed` for logs, the CLI and the container. The desktop
+  relaunch is `Implemented but unverified` on an installed app: the launcher
+  block is tested by running it with a stub interpreter, not by a real DMG or
+  Linux bundle.
+- **Wiring:** `openai4s serve` and the gateway banner print the bare origin and
+  point to `openai4s url` (single user) or `/login` (team);
+  `cli/main.py::_daemon_credential_hint`; the relaunch block in
+  `scripts/build_macos_dmg.sh` / `scripts/build_linux_bundle.sh`
+  (`relaunch-sign-in:begin`) asks `openai4s status` before it opens a token URL
+  and opens the bare origin otherwise; `scripts/container_smoke.sh::assert_logs_omit_token`
+  checks the container logs at first start and after a restart.
+- **Verification:** `uv run pytest tests/test_first_run_access.py tests/test_container_deployment.py tests/test_cli_contract.py -q`;
+  `bash scripts/container_smoke.sh` (CI); every daemon started for the
+  end-to-end runs of this branch had zero occurrences of its token in its log
+  and `logs/`.
+- **Put back:** each protection added by the integration fix turned its test
+  red when reverted: the relaunch gated on `openai4s status`, the http(s)
+  check on the URL it opens, the Linux fallback that prints only the bare
+  origin, and the container log check that a full pipe cannot pass and whose
+  failure output is redacted.
+- **Not covered:** the Windows launcher warns that the URL carries no token for
+  team mode's `/login`; `openai4s serve` still opens a token URL in the local
+  browser unless `OPENAI4S_NO_OPEN` is set or `--no-open` is passed (by
+  design).
+
+### 04 — durable receipts for Web background Cells (P1)
+
+- **Status:** `Completed`.
+- **Wiring:** migration 34 adds `background_exec_receipts`
+  (`storage/background_execs.py`; on `QUERY_DENYLIST`; deleted with the
+  session). `BackgroundExecutor.launch` writes the receipt before the worker
+  starts and refuses the launch when it cannot; output is flushed at 16 KiB or
+  one second, with a timer for a quiet tail; terminal state is first-writer-wins.
+  Public completion waits for the terminal receipt write (or an explicit
+  `receipt_degraded` failure), so normal shutdown still joins a writer blocked
+  on the Store lock rather than discarding its final output.
+  `effective_status` derives `outcome_unknown` on read for a row another daemon
+  recorded or one this process no longer holds; a same-process row that would
+  read unknown is read again by id first, because its owner leaves the live
+  set only after its terminal write commits. A cleanup pass (first use of any
+  `exec_*` tool in a session runtime, then after a terminal write, at most
+  every ten minutes) marks other daemons' unfinished rows, trims each
+  owner's output to 128 MiB (per `owner_user_id`, so in team mode one member's
+  jobs never clear another's) and drops terminal rows older than seven days;
+  a failing pass touches no job. `HostDispatcher._bg` enables
+  receipts only for the Web session dispatcher
+  (`gateway._configure_background_kernel_factory` sets `durable_background`),
+  and `_m_exec_peek` / `_m_exec_list` / `_m_exec_interrupt` fall back to the
+  receipt; a receipt-only interrupt names which of three cases it is (another
+  daemon, another session runtime in this process, or no handle left). One
+  process id, `openai4s/process_instance.py`, is shared with session recovery.
+- **Verification:** `uv run pytest tests/test_background_cleanup.py tests/test_gateway_kernel_lifecycle.py tests/test_schema_migrations.py -q`.
+  End to end on a real, credential-less daemon: a finished job is read back by
+  id after a restart (`source: receipt`, status, output); a running job whose
+  daemon was `kill -9`ed reads `outcome_unknown` with its last flushed output,
+  and a start marker written by the job shows it was not run again.
+- **Put back:** reverting the receipt read rule, the scope predicate, and the
+  write-before-spawn order each turned its test red; reverting the integration
+  fix turned the quiet-tail and backoff tests red; the W3 follow-up's nine tests
+  went red on revert, three of them through targeted mutations because a whole
+  revert failed on a missing symbol first. The integration review added five
+  tests, each red under a revert or a targeted mutation and green again on
+  restore: a job that finished between the list's SELECT and the live check
+  reads finished, not `outcome_unknown` with no output; a receipt-only
+  interrupt for a job another runtime of this process holds says so; the
+  quota trim stops at exactly the excess; a failed launch whose receipt write
+  also fails reads unknown; and a failing cleanup neither masks the launch
+  error nor marks a finished job `receipt_degraded`.
+- **Not covered:** CLI and sub-agent jobs stay in memory (`persistent: false`);
+  a worker that outlives a crashed daemon is not reattached; `list_jobs()` and
+  idle release still see in-memory jobs only.
+
+### 05 — bounded artifact evidence for sub-agents (P1)
+
+- **Status:** `Completed`. The evidence is a record-consistency check, not an
+  authorization boundary, and the browser scenario renders a sanitized fixture
+  rather than a live sub-agent run.
+- **Wiring:** `agent/delegation.py::_project_artifact_evidence` builds the
+  envelope when the child finishes (`checked_at`, at most `EVIDENCE_ITEM_CAP`
+  items); the producing Cell is the one `kernel/manager.py` stamps on
+  `save_artifact`, `materialise_artifact` and `prov_record`: every spelling of
+  the worker's Cell-id key is removed, and the Cell the host is executing when
+  it reads the call is written back only when the worker's own claim is
+  absent or the same. A disagreeing claim, or a call read with no execute in
+  flight, is stamped `unattributed`, which never verifies
+  (`host/data.py::provenance_record` reads the stamp). The REST projection is the allowlist
+  `storage/delegation.py::project_browser_child` (no `result`/`output`, refs
+  through `project_browser_artifact_refs`), used by GET, stop and continue;
+  the live event is `workbench_state.delegation_event_projection`; delegate
+  step cards drop host paths before truncation. Absolute filenames in evidence
+  are projected to `null` both when generated and when existing records are
+  read through REST or WebSocket. The panel is
+  `frontend/src/features/timeline/island.ts` behind `sanitize.ts`.
+- **Verification:** `uv run pytest tests/test_delegation_control.py tests/test_delegation_persistence.py tests/test_delegation_task_status.py tests/test_delegation_step_projection.py tests/test_kernel.py -q`;
+  `npm test --prefix frontend`; `node tests/browser_p1_controls.mjs`
+  (evidence panel: both verdicts, truncation, one scope note, and an expanded
+  list that stays open across a rebuild). By hand: the expanded panel stayed
+  open when a real turn's events rebuilt it.
+- **Put back:** reverting the projection, the stop route, the continue route,
+  the worker injection, the host-side stamp, and the panel's details key each
+  turned its test red; a failed Cell that rewrote the worker's Cell id
+  recorded the earlier successful Cell until the host stamp was restored. The
+  integration review found three ways round that first stamp and one frame
+  hazard; each is pinned by a test that a targeted mutation turned red:
+  removing only the camelCase key let a snake_case `execution_cell_id` beside
+  the stamp name an earlier Cell (the dispatcher keeps the last spelling);
+  trusting the in-flight id regardless of the claim gave a failed Cell's late
+  thread call the next Cell and its verified evidence; leaving the caller's
+  `producing_cell_id` when the worker claims nothing let a Cell that cleared
+  the worker global name another Cell; and stamping before the `try` sent no
+  `host_response` for a malformed frame.
+- **Not covered:** a live sub-agent producing evidence in the browser (needs an
+  LLM; the CI browser daemon has none, so the scene's `GET /delegations` is a
+  `page.route` fixture); a version with no producing Cell at all
+  (`no_cell_receipt`, such as one a native tool wrote) can still verify; a
+  thread an earlier Cell started that sends its call while a later Cell is
+  running is attributed to the later Cell, because the worker's claim names
+  that Cell too and nothing tells the two calls apart; a child that writes a
+  host path into its own output text keeps it in the step card.
+
+### 06 — branch from an exact user message in the default workbench (P1)
+
+- **Status:** `Completed`.
+- **Wiring:** stored user messages carry `fork_checkpoint_id`;
+  `POST /frames/{fid}/branches/fork` with exactly `{from_message_id}`;
+  `frontend/src/features/messages/list.ts` (`forkMessageControl`, and
+  `syncForkMessageVisibility`, which sets `<html data-fork-from-message>` from
+  the session capability) and `execution/branch.ts::forkFromMessage`
+  (one in-flight fork per message, session guard, 409 shown as the server's
+  sentence).
+- **Verification:** `npm test --prefix frontend`; `node tests/browser_p1_controls.mjs`
+  (one POST with the exact body, no second POST while it is in flight and
+  still one after it settles, the new branch inactive, the control hidden when
+  the server reports the capability false; the scene no longer rewrites the
+  live `GET /branches` response when it does not). By hand:
+  the control was correct after activating the new branch and after a revert.
+- **Put back:** reverting the W2 visibility and session changes turned 14 and
+  7 tests red; reverting the integration fix turned 2 red (a late fork from
+  another session cleared this session's busy announcement; a repainted row
+  started a second busy state).
+- **Not covered:** forking from an assistant message; a click in the short
+  window while `adoptCreatedFrame` switches sessions posts the old message id
+  to the new session and gets a 409 (pre-existing).
+
+### 07 — `@` artifact completion from the paginated index (P1)
+
+- **Status:** `Completed`.
+- **Wiring:** `GET /projects/{pid}/artifact-index?q=&limit=` (`server/artifact_index_routes.py`)
+  over migration 32's browse index; `frontend/src/features/autocomplete/composer.ts`
+  (`runFileSearch` with generation guards and an 8 s timeout through
+  `requestSignal`, which falls back when `AbortSignal.any` is missing;
+  `armAccept` / `acHoldSend` so Enter, Tab and the send button wait for a
+  pending page); `send/send.ts` keeps composer focus on the send button.
+- **Verification:** `npm test --prefix frontend`; `node tests/browser_p1_controls.mjs`
+  (`/artifact-index?q=…&limit=20`, no `/projects/{pid}/artifacts`, at most 8
+  rows, the hint inside the popup, `name#version` inserted, and Enter pressed
+  after the index request started, in a session with no local candidates and
+  no row shown, does not send; no message POST and no call to the project
+  artifact array anywhere in the scene). By hand: Enter right after typing,
+  and the send button, both held and then completed; the highlight did not
+  drift when the page re-ranked.
+- **Put back:** reverting the W2 change turned 11 tests red; reverting the
+  integration fix turned 6 red, and a targeted mutation covered the typing
+  disarm. The first browser version of the Enter scene passed with the
+  pending-page guard removed (local rows answered first); with `acPending()`
+  forced false the rewritten scene fails.
+- **Not covered:** clicking send while the popup is open with no request in
+  flight sends the uncompleted `@name` (pre-existing; a product decision); the
+  editor's completion is unchanged.
+
+### 08 — Auto Mode status specification (P2)
+
+- **Status:** `Completed` as a specification. No control ships, as the plan
+  says.
+- **Wiring:** none by design. `docs/auto-mode.md`, "Workbench status surface
+  (specification — not shipped)", and a pointer on the two auto-mode rows of
+  `docs/webapp-api.md`.
+- **Verification:** every enumeration, error code and copy key the
+  specification names was matched against `server/auto_mode.py`,
+  `config.py` and the frontend (28 identifiers, all present;
+  `explicit` is false only for `built_in_defaults`, as the code says).
+- **Put back:** not applicable; there is no behaviour to break.
+- **Not covered:** the editor, the audit entry and their tests are for the
+  version that builds the surface.
+
+### Release documentation (report §12)
+
+`docs/upgrading.md` / `docs/upgrading_zh.md` open with "Upgrading to the next
+release (schema 32 → 34)": stop the daemon and copy the data directory, what
+migrations 33 and 34 change, why the migration's own `.v32.bak` is not a
+rollback copy, downgrade unsupported, and every behaviour change above.
+Integration read both halves sentence by sentence against the code,
+`docs/security.md` and `docs/webapp-api.md`, and corrected what the W3 fixes
+had moved or the first draft had wrong: a 0.2.x database goes to 34 in one
+open, which builds can still write a raw `judge` row, the shape of the
+state-only marker, how a template id stops counting as projected, the
+container `VACUUM`, the bootstrap prefixes, `--no-open`, the desktop sign-in
+URL, the cleanup pass, the three receipt-only interrupt sentences, absent
+rather than `null` delegation keys, and the agreement rule for the producing
+Cell. `tests/test_release_docs.py` reads `SCHEMA_VERSION` from the code and
+pins five sentences in each half of the new section; deleting each of the ten
+once turned the test red. It also requires both halves to quote the three
+interrupt reasons, `unattributed` and the state-only marker exactly as the
+code's literals spell them (rewording one in the code or in a half turned it
+red). The 0.2.x checks now read only their own section: before that, deleting
+`openai4s url` from the 0.2.x section left them green because the new section
+also says it.
+
+### §21 gates at the PR head
+
+Run on this machine (macOS, Python 3.13 venv with the `science` extra, Node 22)
+against the commit that adds this section, with the developer's real data
+directory checked before and after (unchanged). The commit that fills in this
+table also corrects the `--no-open` sentence in 03; it changes no code, and the
+documentation checks were run again on it.
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Offline suite | `uv run pytest -n auto --maxprocesses=4 --dist loadfile` | 10953 passed, 34 skipped (8 min 33 s) |
+| Format, lint, strict types | `uv run pre-commit run --all-files` · `uv run mypy` | every hook passed; mypy: no issues in 25 source files |
+| Directory READMEs | `uv run python scripts/check_directory_readmes.py` | 171 maintained directories, complete bilingual coverage |
+| Scenario contracts | `uv run python3 -m harness.cli run --tier pr --offline` | 38 of 38 passed (26 contract-only, 12 production-backed) |
+| Response shapes and route contracts | `scripts/capture_response_schemas.py --check` · `scripts/capture_response_contract.py --check` | no breaking change to the frozen shapes; 215 of 215 routes have a contract. The shape check also lists two differences that come from this machine, not this branch (`PUT /models/default [error]` newly covered, `GET /compute/remote` additive); they were not recaptured |
+| Source secret scan | `uv run python scripts/source_secret_scan.py` | passed (4080 files) |
+| Plan crosswalk | `uv run python scripts/reaudit_crosswalk.py --check` | up to date, 47 closed rows |
+| Workbench | `npm test --prefix frontend` · `npm run build --prefix frontend` · no diff under `openai4s/server/webui/dist` | Vitest 1343 passed in 135 files; build passed; no diff |
+| macOS sandbox boundary | `OPENAI4S_KERNEL_SANDBOX=enforce uv run python -m harness.smoke.macos_sandbox` | seatbelt `enforced`, self-test passed; `network_blocked`, `outside_write_blocked`, `subprocess_secret_absent`, `allowlist_agent_cell` and `degraded_refused` all true |
+| Browser | `node tests/browser_smoke.mjs` · `node tests/browser_p1_controls.mjs` (three runs) on a fresh credential-less daemon | smoke passed; P1 controls passed 3 of 3 (15, 16 and 15 s); the access token appeared 0 times in the daemon log and `logs/` |
+
+Not run here: the container smoke, both Linux bubblewrap smokes, the
+Firefox/WebKit browser matrix, the admission-fault and sandbox-preview browser
+jobs, the Skill installer checks and the single-cell stack job. They are CI
+jobs on this pull request.
+
+### What §21 does not claim
+
+- No release version number, and no `__version__` change.
+- No Linux bubblewrap or container result from this machine: those are CI jobs.
+- No live LLM turn, and no live sub-agent: every end-to-end run used a
+  credential-less daemon.
+- R raw-network blocking under `enforce` is not demonstrated by a test (01).

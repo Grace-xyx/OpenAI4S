@@ -11,11 +11,20 @@
  * `addMsgActions` here too.
  */
 
+import { effect } from "@preact/signals";
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
 import { artifacts } from "../../stores/artifacts";
 import { currentId, feedback as feedbackSignal } from "../../stores/session";
+import { branchState } from "../../stores/timeline";
 import { copyFailedText, copyText } from "../chrome/clipboard";
+import {
+  forkFromMessage,
+  messageForkPending,
+  setMessageForkRefresh,
+  type ForkResult,
+} from "../execution/branch";
+import { scheduleWorkbenchRefresh } from "../notebook/kernel";
 import { paintIcon } from "../icons/paths";
 import { renderMd } from "../md/render";
 import { publicText } from "../scrub/scrub";
@@ -23,6 +32,7 @@ import { api } from "../sessions/api";
 import { hint } from "../sessions/chrome";
 import { grow } from "../sessions/dom";
 import { iconEl } from "../sessions/icon";
+import { historyT } from "./copy";
 import { el, messagesHost } from "./dom";
 import { failureMeta } from "./failure";
 import { rememberCandidateIdentity, setMessageReviewBadge } from "./identity";
@@ -43,6 +53,8 @@ export type StoredMessage = {
   role?: string;
   content?: unknown;
   created_at?: unknown;
+  message_id?: string;
+  fork_checkpoint_id?: string | null;
   artifact_refs?: unknown;
   failure?: { request_id?: unknown; code?: unknown; output_committed?: unknown } | null;
   cancelled?: { request_id?: unknown; execution_id?: unknown; reason?: unknown } | null;
@@ -50,6 +62,26 @@ export type StoredMessage = {
   metadata?: { review_status?: unknown };
   [key: string]: unknown;
 };
+
+/** Exact cursor plus a message id. Capability is a separate, later signal. */
+export function canForkFromMessage(m: {
+  message_id?: unknown;
+  fork_checkpoint_id?: unknown;
+}): boolean {
+  return (
+    typeof m.message_id === "string" &&
+    typeof m.fork_checkpoint_id === "string" &&
+    m.fork_checkpoint_id !== ""
+  );
+}
+
+/** `branchState.capabilities.fork_from_message` after sanitize. Strict true. */
+export function forkFromMessageCapability(): boolean {
+  const state = branchState.value as {
+    capabilities?: { fork_from_message?: unknown };
+  } | null;
+  return !!state && !!state.capabilities && state.capabilities.fork_from_message === true;
+}
 
 type StepRenderer = (step: unknown, target?: ParentNode | null) => Node | null | void;
 
@@ -193,6 +225,109 @@ function reviewStatusOf(m: StoredMessage): unknown {
   return review;
 }
 
+/**
+ * One subscription for every stored row, including rows still inside the
+ * off-document fragment `loadHistory` paints before `replaceChildren`.
+ * A per-node scan misses that fragment, so the flag lives on the document
+ * element and the stylesheet shows `.msg-fork` only while it is `"on"`.
+ */
+function syncForkMessageVisibility(show: boolean): void {
+  const doc = globalThis.document as { documentElement?: HTMLElement } | undefined;
+  const root = doc && doc.documentElement;
+  if (!root || !root.dataset) return;
+  root.dataset.forkFromMessage = show ? "on" : "off";
+}
+
+let forkMessageVisibilityInstalled = false;
+
+function installForkMessageVisibility(): void {
+  if (forkMessageVisibilityInstalled) return;
+  forkMessageVisibilityInstalled = true;
+  effect(() => {
+    syncForkMessageVisibility(forkFromMessageCapability());
+  });
+}
+
+/**
+ * Which fork owns the busy sentence in `#composer-hint`. Every session shows
+ * the same sentence, so the text alone cannot tell a late settlement from
+ * another session apart from this session's own pending fork.
+ */
+let busyHintOwner = "";
+
+function clearBusyHint(owner: string, busy: string): void {
+  if (busyHintOwner !== owner) return;
+  busyHintOwner = "";
+  const doc = globalThis.document as { getElementById?: (id: string) => HTMLElement | null } | undefined;
+  if (!doc || typeof doc.getElementById !== "function") return;
+  const host = doc.getElementById("composer-hint");
+  if (host && (host.textContent || "").includes(busy)) hint();
+}
+
+function settleForkButton(
+  button: HTMLButtonElement,
+  frameId: string,
+  owner: string,
+  busy: string,
+  label: string,
+  result: ForkResult | null,
+): void {
+  if (currentId.value !== frameId) {
+    clearBusyHint(owner, busy);
+    return;
+  }
+  if (busyHintOwner === owner) busyHintOwner = "";
+  if (result && result.ok === false && result.presentation.noCheckpoint) {
+    const reason = result.presentation.message || historyT("history.forkMessage.failed");
+    button.textContent = reason;
+    button.title = reason;
+    button.removeAttribute("aria-busy");
+    return;
+  }
+  button.textContent = label;
+  button.title = label;
+  button.removeAttribute("aria-disabled");
+  button.removeAttribute("aria-busy");
+}
+
+function forkMessageControl(messageId: string): HTMLElement {
+  const row = el("div", "msg-fork");
+  const button = el("button", "msg-fork-btn") as HTMLButtonElement;
+  button.type = "button";
+  const label = historyT("history.forkMessage.label");
+  button.textContent = label;
+  button.title = label;
+  button.setAttribute("data-fork-message-id", messageId);
+  button.dataset.forkMessageId = messageId;
+  button.onclick = () => {
+    if (button.getAttribute("aria-disabled") === "true") return;
+    const frameId = currentId.value;
+    if (typeof frameId !== "string" || !frameId) return;
+    // A repaint while the POST is pending: the first button still owns it.
+    if (messageForkPending(frameId, messageId)) return;
+    const busy = historyT("history.forkMessage.busy");
+    const owner = frameId + "\0" + messageId;
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-busy", "true");
+    button.textContent = busy;
+    button.title = busy;
+    hint(busy, false, true);
+    busyHintOwner = owner;
+    return forkFromMessage(frameId, messageId).then(
+      (result) => {
+        settleForkButton(button, frameId, owner, busy, label, result);
+        return result;
+      },
+      (error: unknown) => {
+        settleForkButton(button, frameId, owner, busy, label, null);
+        throw error;
+      },
+    );
+  };
+  row.appendChild(button);
+  return row;
+}
+
 /** app.js:7234-7260. `target` is a fragment during framed paint. */
 export function renderStored(
   m: StoredMessage,
@@ -227,6 +362,9 @@ export function renderStored(
     b.textContent = planModeRequestText(text);
     w.appendChild(b);
     renderMessageRefChips(w, m.artifact_refs);
+    if (canForkFromMessage(m) && typeof m.message_id === "string") {
+      w.appendChild(forkMessageControl(m.message_id));
+    }
   } else {
     const md = el("div", "md");
     md.innerHTML = renderMd(text);
@@ -459,3 +597,9 @@ export function interleaveHistory(
   items.sort((a, b) => a.t - b.t || a.seq - b.seq);
   return items;
 }
+
+setMessageForkRefresh(() => {
+  scheduleWorkbenchRefresh();
+});
+
+installForkMessageVisibility();

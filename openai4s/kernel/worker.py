@@ -505,8 +505,13 @@ def _attach_cell_context(method: str, args: list) -> list:
     # NULL -- which is the exact column the end-of-cell capture matches on, so
     # the capture could never reuse it and made a second version of the same
     # bytes. The lineage edge stayed on the first, leaving the artifact head
-    # with no inputs.
-    if method not in ("save_artifact", "materialise_artifact") or not cell_id:
+    # with no inputs. `prov_record` is always allowed to a delegated cell, so
+    # it gets the same injected id; the host prefers that id over a caller
+    # supplied producing_cell_id.
+    if (
+        method not in ("save_artifact", "materialise_artifact", "prov_record")
+        or not cell_id
+    ):
         return args
     if not args:
         return args

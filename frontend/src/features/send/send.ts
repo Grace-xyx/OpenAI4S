@@ -46,6 +46,7 @@ import {
   type UploadResult,
 } from "../chrome/upload";
 import { loadSkillsCatalog } from "../autocomplete/catalog";
+import { acHoldSend, acPending } from "../autocomplete/composer";
 import { effProject } from "../customize/host";
 import { composerChoiceMark, composerModelChoicePending, modelT, noteAdmittedModelBinding, noteSessionModelBinding } from "../customize/models";
 import { $, el } from "../messages/dom";
@@ -761,7 +762,7 @@ export function bindComposer(dispatch: ComposerDispatch = send): void {
   // (a keyed or conditional subtree, a second render()) keeps its Enter
   // handler with nothing to rebind. Bubble phase, so the autocomplete's
   // capture listener on the node still shields it with
-  // stopImmediatePropagation while ac.open.
+  // stopImmediatePropagation while ac.open or a file search is in flight.
   const root = document.documentElement;
   if (root && !root.dataset.sendBound) {
     root.dataset.sendBound = "1";
@@ -795,10 +796,16 @@ export function bindComposer(dispatch: ComposerDispatch = send): void {
       if (!c || c.id !== "composer") return;
       if (e.isComposing || e.keyCode === 229) return;
       const ac = (globalThis as { ac?: { open?: boolean } }).ac;
-      if (ac && ac.open) return;
+      if ((ac && ac.open) || acPending()) return;
       if (e.key !== "Enter" || e.shiftKey) return;
       e.preventDefault();
       dispatchComposer(c.value);
+    });
+    // Keep focus in the composer on a send-button press. Its blur cancels an
+    // in-flight @ search, and blur runs before click (mousedown -> blur -> click).
+    root.addEventListener("mousedown", (e) => {
+      const target = e.target as { closest?: (selector: string) => unknown } | null;
+      if (target && typeof target.closest === "function" && target.closest("#send-btn")) e.preventDefault();
     });
     // The round send button beside the model picker (Shell.tsx #send-btn).
     root.addEventListener("click", (e) => {
@@ -807,6 +814,7 @@ export function bindComposer(dispatch: ComposerDispatch = send): void {
       const c = document.getElementById("composer") as HTMLTextAreaElement | null;
       if (!c) return;
       e.preventDefault();
+      if (acHoldSend()) return;
       dispatchComposer(c.value);
       if (typeof c.focus === "function") c.focus();
     });

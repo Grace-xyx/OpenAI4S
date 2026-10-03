@@ -365,3 +365,38 @@ def test_a_route_with_no_frozen_shape_fails_the_gate():
     assert (
         returns_nonzero
     ), "an uncovered route is reported and then the gate returns success"
+
+
+def test_the_contract_capture_keeps_default_config_lookups_in_its_temp_dir(
+    monkeypatch,
+):
+    """`drive()` hands the runner its own Config, but the judgment shadows
+    resolve the process-wide default. With OPENAI4S_DATA_DIR unset that was the
+    developer's real ~/.openai4s, and a `--check` run migrated it. During the
+    drive the default must resolve to the capture's temp dir, and the caller's
+    environment must come back unchanged."""
+    import importlib.util
+    import os
+
+    from openai4s.config import get_config
+
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "capture_response_contract.py"
+    )
+    spec = importlib.util.spec_from_file_location("capture_contract_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    seen: dict = {}
+
+    def record(recorder, make_handler, config, runner):
+        seen["passed"] = Path(config.data_dir).resolve()
+        seen["default"] = Path(get_config().data_dir).resolve()
+        seen["env"] = os.environ.get("OPENAI4S_DATA_DIR")
+
+    monkeypatch.setattr(response_capture, "drive_all_routes", record)
+    before = os.environ.get("OPENAI4S_DATA_DIR")
+    module.drive()
+    assert seen["default"] == seen["passed"]
+    assert Path(seen["env"]).resolve() == seen["passed"]
+    assert os.environ.get("OPENAI4S_DATA_DIR") == before

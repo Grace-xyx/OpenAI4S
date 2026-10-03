@@ -67,7 +67,7 @@
       "tests": "tests/test_delegation_control.py,tests/test_delegation_persistence.py",
       "browser_evidence": "tests/browser_p1_controls.mjs",
       "external_evidence": "",
-      "evidence_digest": "fb7807a090d78a5cffb02b91e878145df920b04bb4ba2957d703c9c67e2551b4"
+      "evidence_digest": "01452df3c13e831b112ae0e390127730a045905a8ffb3b6e4af044f96851c01b"
     },
     {
       "source": "R1",
@@ -176,7 +176,7 @@
       "tests": "tests/test_memory_scope_and_budgets.py,tests/test_memory_edit_and_expiry_quota.py",
       "browser_evidence": "tests/browser_p1_controls.mjs",
       "external_evidence": "",
-      "evidence_digest": "ee5153eaa7d823ead821c192b896daea477390f6b0e0c12f78e2212eeff6d4a2"
+      "evidence_digest": "d9340894e70c1c0f1285fc718878fa3dce460d76e585098a3da808894f2dce31"
     },
     {
       "source": "R2",
@@ -190,7 +190,7 @@
       "tests": "tests/test_session_and_message_paging.py",
       "browser_evidence": "tests/browser_p1_controls.mjs",
       "external_evidence": "",
-      "evidence_digest": "40085cbfceab23dae20c277feb09562fbe0f271343f85898afe6e1a44afc7d35"
+      "evidence_digest": "ae3c0f120c510c7317203e3e66fee20f8256babf377a5e22d93ee33e0d789ae1"
     },
     {
       "source": "R2",
@@ -648,7 +648,7 @@
       "tests": "tests/test_delegation_control.py,tests/test_queued_followups.py,tests/test_specialist_connector_allowlist.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "71bb8860433f850d2d0b45e574477918656be607676bd6eabab6025d75f8d322"
+      "evidence_digest": "58cce2433fb59e95e73f76f4ad38c263049c02b0559f8501919acd5de2cd4743"
     },
     {
       "source": "R6",
@@ -773,7 +773,7 @@
       "tests": "tests/test_notebook_export.py,tests/test_gateway_session_domain_routes.py",
       "browser_evidence": "tests/browser_smoke.mjs",
       "external_evidence": "",
-      "evidence_digest": "07da2443f26e8e97e8334ed253e76b7d93c74c08e2c1ae4adcf32edf66b78545"
+      "evidence_digest": "a3020d39722b406760c9ef3b2abfa965b2cae99cba9bebcb10036ec38ec81b10"
     },
     {
       "source": "R7",

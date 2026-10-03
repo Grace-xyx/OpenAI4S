@@ -437,3 +437,240 @@ def test_the_delegations_route_carries_task_status(client):
     assert child["task_status"] == "partial"
     assert child["stop_reason"] == "submitted"
     assert child["status"] == "done"
+
+
+def test_the_delegations_route_omits_bodies_and_host_paths(client):
+    """GET /frames/{fid}/delegations is the browser projection.
+
+    Result and output bodies stay on the internal include_text read. The
+    response that leaves the route does not carry them, a durable_path, or
+    this daemon's data directory. artifact_evidence stays.
+    """
+
+    data_dir = str(client.cfg.data_dir)
+    absolute = data_dir + "/artifacts/delegation/child/plot.png"
+    evidence = {
+        "scope": "version_and_producer",
+        "items": [
+            {
+                "version_id": "v-kept",
+                "verdict": "verified_version_and_producer",
+                "reasons": ["no_cell_receipt"],
+            }
+        ],
+        "total": 1,
+        "truncated": False,
+    }
+    client.store.restore_delegation_tree(
+        root_frame_id=client.frame_id,
+        owner_instance_id="owner-1",
+        runner_instance_id="runner-1",
+        budget_limit=48,
+    )
+    reserved = client.store.reserve_delegation_children(
+        root_frame_id=client.frame_id,
+        owner_instance_id="owner-1",
+        runner_instance_id="runner-1",
+        count=1,
+        depth=1,
+        parent_child_id=None,
+        parent_action_group_id="ag-browser",
+        native_call_id="call-browser",
+        request_sha256="b" * 64,
+        payload={"request": "publish"},
+    )
+    child_id = (reserved.get("child_ids") or [None])[0]
+    assert child_id
+    persisted = client.store.persist_delegation_child(
+        root_frame_id=client.frame_id,
+        owner_instance_id="owner-1",
+        runner_instance_id="runner-1",
+        child={
+            "child_id": child_id,
+            "name": "worker",
+            "status": "done",
+            "depth": 1,
+            "parent_child_id": None,
+            "frame_id": "f-child",
+            "stop_reason": "submitted",
+            "task_status": "completed",
+            "result": {
+                "output": {"body": "SHOULD-NOT-LEAK-BODY"},
+                "task_status": "completed",
+                "artifact_evidence": evidence,
+                "artifact_refs": [
+                    {
+                        "version_id": "v-kept",
+                        "path": "out/plot.png",
+                        "durable_path": absolute,
+                    }
+                ],
+            },
+            "artifact_refs": [
+                {
+                    "artifact_id": "a-kept",
+                    "version_id": "v-kept",
+                    "filename": "plot.png",
+                    "path": absolute,
+                    "durable_path": absolute,
+                    "checksum": "ab",
+                    "frame_id": "f-child",
+                }
+            ],
+        },
+        messages=[
+            {
+                "message_id": "m-steer",
+                "status": "delivered",
+                "text_preview": "steer secret text",
+                "queued_at": 1.0,
+            }
+        ],
+    )
+    assert persisted is not None
+    assert persisted["result"]["output"]["body"] == "SHOULD-NOT-LEAK-BODY"
+    assert persisted["steering"]["messages"][0]["text_preview"] == "steer secret text"
+
+    status, body = client.get(f"/frames/{client.frame_id}/delegations")
+    rendered = json.dumps(body)
+    assert status == 200
+    child = next(item for item in body["children"] if item["child_id"] == child_id)
+    assert "result" not in child
+    assert "output" not in child
+    assert "durable_path" not in rendered
+    assert data_dir not in rendered
+    assert "SHOULD-NOT-LEAK-BODY" not in rendered
+    assert "steer secret text" not in rendered
+    assert child["artifact_evidence"]["items"][0]["version_id"] == "v-kept"
+    assert child["artifact_refs"][0]["version_id"] == "v-kept"
+    assert child["artifact_refs"][0]["filename"] == "plot.png"
+    assert "path" not in child["artifact_refs"][0]
+
+    # include_text stays on the in-process reads. restore is the runner's
+    # lease read; delegation_child_record is the single-child read.
+    restored = client.store.restore_delegation_tree(
+        root_frame_id=client.frame_id,
+        owner_instance_id="owner-1",
+        runner_instance_id="runner-1",
+        budget_limit=48,
+    )
+    restored_child = next(
+        item for item in restored["children"] if item["child_id"] == child_id
+    )
+    assert restored_child["output"]["body"] == "SHOULD-NOT-LEAK-BODY"
+    record = client.store.delegation_child_record(client.frame_id, child_id)
+    assert record is not None
+    assert record["result"]["output"]["body"] == "SHOULD-NOT-LEAK-BODY"
+
+
+@pytest.mark.stubbed_backend
+def test_a_live_stop_uses_the_browser_projection(client):
+    """Stop returns the live snapshot. Absolute paths in that snapshot must
+    not leave the route. The runner here is a stub, so the recorder stays
+    paused."""
+
+    child_id = client.seed_child("child-1")
+    state = client.runner._state(client.frame_id, client.project_id)
+    runner = _LiveRunner(child_id)
+    absolute = str(client.cfg.data_dir / "secret.bin")
+
+    def stop(target, reason):
+        runner.stopped.append(target)
+        return {
+            "child_id": target,
+            "status": "stopped",
+            "stop_reason": reason,
+            "output": {"body": "SHOULD-NOT-LEAK-BODY"},
+            "result": {"output": {"body": "SHOULD-NOT-LEAK-BODY"}},
+            "artifact_refs": [
+                {
+                    "version_id": "v-1",
+                    "filename": "plot.png",
+                    "path": "out/plot.png",
+                    "durable_path": absolute,
+                }
+            ],
+            "artifact_evidence": {
+                "scope": "version_and_producer",
+                "items": [],
+                "total": 0,
+                "truncated": False,
+            },
+        }
+
+    runner._stop_subtree = stop
+    state.delegation_runner = runner
+
+    status, body = client.post(f"/frames/{client.frame_id}/delegations/{child_id}/stop")
+    rendered = json.dumps(body)
+    assert status == 200
+    assert body["status"] == "stopped"
+    assert "result" not in body
+    assert "output" not in body
+    assert "durable_path" not in rendered
+    assert str(client.cfg.data_dir) not in rendered
+    assert body["artifact_refs"][0]["path"] == "out/plot.png"
+    assert body["artifact_refs"][0]["version_id"] == "v-1"
+    assert body["artifact_evidence"]["scope"] == "version_and_producer"
+
+
+@pytest.mark.stubbed_backend
+def test_continue_answers_with_the_stored_child_not_the_run_envelope(client):
+    """``continue_child`` returns the attempt's run envelope, not a child.
+
+    That envelope carries the final message, bullets, limitations and the
+    child's environment with interpreter paths. The route answers with the
+    stored child through the GET projection instead, and a child with no
+    stored row is cut down to the allowlisted keys. The runner is a stub.
+    """
+
+    child_id = client.seed_child("child-1", status="stopped")
+    state = client.runner._state(client.frame_id, client.project_id)
+    runner = _LiveRunner(child_id)
+    data_dir = str(client.cfg.data_dir)
+
+    def envelope(target):
+        return {
+            "child_id": target,
+            "status": "done",
+            "output": "OUTPUT-BODY",
+            "final_message": "FINAL-MESSAGE-BODY",
+            "completion_bullets": ["BULLET-BODY"],
+            "limitations": ["LIMITATION-BODY"],
+            "environment": {
+                "python": f"{data_dir}/envs/py/bin/python",
+                "env_root": f"{data_dir}/envs",
+            },
+            "artifacts": [{"path": f"{data_dir}/out.csv"}],
+            "turns": 3,
+            "max_turns": 8,
+        }
+
+    runner.continue_child = envelope
+    state.delegation_runner = runner
+
+    status, body = client.post(
+        f"/frames/{client.frame_id}/delegations/{child_id}/continue"
+    )
+    _status, listed = client.get(f"/frames/{client.frame_id}/delegations")
+    stored = next(item for item in listed["children"] if item["child_id"] == child_id)
+    assert status == 200
+    assert body == stored
+
+    runner.continue_child = lambda target: envelope("child-without-a-row")
+    status, bare = client.post(
+        f"/frames/{client.frame_id}/delegations/{child_id}/continue"
+    )
+    assert status == 200
+    assert bare == {"child_id": "child-without-a-row", "status": "done"}
+
+    for response in (body, bare):
+        rendered = json.dumps(response)
+        for leaked in (
+            "OUTPUT-BODY",
+            "FINAL-MESSAGE-BODY",
+            "BULLET-BODY",
+            "LIMITATION-BODY",
+            data_dir,
+        ):
+            assert leaked not in rendered

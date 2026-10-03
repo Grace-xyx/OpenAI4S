@@ -174,12 +174,58 @@ def run_boundary_smoke(
                     "override"
                 )
             result = kernel.execute(boundary_probe(outside), origin="system")
-        if result.get("error"):
-            raise RuntimeError(f"sandbox smoke cell failed: {result['error']}")
-        lines = [line for line in str(result.get("stdout") or "").splitlines() if line]
-        checks = json.loads(lines[-1]) if lines else {}
-        if checks != EXPECTED:
-            raise RuntimeError(f"sandbox smoke mismatch: {checks!r}")
+            if result.get("error"):
+                raise RuntimeError(f"sandbox smoke cell failed: {result['error']}")
+            lines = [
+                line for line in str(result.get("stdout") or "").splitlines() if line
+            ]
+            checks = json.loads(lines[-1]) if lines else {}
+            if checks != EXPECTED:
+                raise RuntimeError(f"sandbox smoke mismatch: {checks!r}")
+            previous_egress = os.environ.get("OPENAI4S_EGRESS")
+            os.environ["OPENAI4S_EGRESS"] = "allowlist"
+            try:
+                admitted = kernel.execute("print('allowlist-admitted')", origin="agent")
+                if admitted.get("error") or "allowlist-admitted" not in str(
+                    admitted.get("stdout") or ""
+                ):
+                    raise RuntimeError(
+                        "allowlist refused a proven kernel: " f"{admitted!r}"
+                    )
+                from openai4s.egress import EgressBoundaryUnavailable
+                from openai4s.security.sandbox import KernelSandbox, SandboxStatus
+
+                degraded = Kernel(
+                    cwd=str(workspace),
+                    sandbox=KernelSandbox(
+                        status=SandboxStatus(
+                            mode="off",
+                            state="disabled",
+                            backend=None,
+                            enforced=False,
+                            self_test_passed=None,
+                            network_policy="not_enforced",
+                            workspace=str(workspace),
+                            temp_dir=None,
+                            detail="injected for allowlist refusal",
+                        )
+                    ),
+                )
+                try:
+                    try:
+                        degraded.execute("print('should-not-run')", origin="agent")
+                    except EgressBoundaryUnavailable as refused:
+                        if refused.code != "egress_boundary_unavailable":
+                            raise
+                    else:
+                        raise RuntimeError("degraded kernel executed under allowlist")
+                finally:
+                    degraded.shutdown()
+            finally:
+                if previous_egress is None:
+                    os.environ.pop("OPENAI4S_EGRESS", None)
+                else:
+                    os.environ["OPENAI4S_EGRESS"] = previous_egress
         print(
             json.dumps(
                 {
@@ -187,6 +233,8 @@ def run_boundary_smoke(
                     "sandbox": status,
                     "checks": checks,
                     "raw_network_override": False if forbid_raw_network else None,
+                    "allowlist_agent_cell": True,
+                    "degraded_refused": True,
                 }
             )
         )

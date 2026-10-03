@@ -263,7 +263,23 @@ s.settimeout(0.4)
 sys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)
 PROBE
 then
-  exec /usr/bin/open "$URL"
+  # app.out no longer contains the token, so ask for the sign-in URL (token
+  # in single-user mode, /login in team mode). The probe above only proves
+  # that *something* answers on the port: ask only when `status` verifies this
+  # data dir's own daemon (pidfile + start token + /health at its recorded
+  # endpoint). Anything else listening there gets the bare origin, never the
+  # access token.
+  # relaunch-sign-in:begin
+  SIGN_IN_URL=""
+  if "$PY" -m openai4s status >/dev/null 2>&1; then
+    SIGN_IN_URL="$("$PY" -m openai4s url 2>/dev/null | tail -n 1)" || SIGN_IN_URL=""
+    case "$SIGN_IN_URL" in
+      http://*|https://*) ;;
+      *) SIGN_IN_URL="" ;;
+    esac
+  fi
+  # relaunch-sign-in:end
+  exec /usr/bin/open "${SIGN_IN_URL:-$URL}"
 fi
 
 # -u: the log is the only way to diagnose a Finder-launched daemon, and block

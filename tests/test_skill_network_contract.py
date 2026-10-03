@@ -990,3 +990,169 @@ def test_reading_a_skill_file_is_gated_like_loading_it(tmp_path):
         allowed = disp._m_skills_read({"name": "lit"})
     assert isinstance(allowed, str) and "import requests" in allowed
     disp.store.close()
+
+
+def _one_python_cell(_messages, _cfg, **_kwargs):
+    return {
+        "content": "```python\nprint(42)\n```",
+        "reasoning": None,
+        "usage": {},
+        "finish_reason": "stop",
+        "raw": {},
+    }
+
+
+def test_cli_allowlist_refuses_a_degraded_kernel_without_a_traceback(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    created = []
+
+    class DegradedKernel:
+        generation = 1
+        sandbox_status = {
+            "enforced": False,
+            "self_test_passed": False,
+            "network_policy": "not_enforced",
+            "backend": None,
+        }
+
+        def __init__(self, *_args, **_kwargs):
+            self.closed = False
+            self.executed = 0
+            created.append(self)
+
+        def is_alive(self):
+            return not self.closed
+
+        def execute(self, *_args, **_kwargs):
+            self.executed += 1
+            raise AssertionError("user or Skill bootstrap code reached the worker")
+
+        def shutdown(self):
+            self.closed = True
+
+    monkeypatch.setattr(loop_mod, "chat", _one_python_cell)
+    monkeypatch.setattr(loop_mod, "Kernel", DegradedKernel)
+    agent = Agent(use_skills=False, allow_delegate=False, max_turns=1)
+    result = agent.run("run one Cell")
+    assert result["stop_reason"] == "egress_boundary_unavailable"
+    assert any(
+        "egress_boundary_unavailable" in str(turn.get("content"))
+        for turn in result["transcript"]
+    )
+    assert "error: egress_boundary_unavailable:" in capsys.readouterr().err
+    assert created and created[0].closed is True
+    assert created[0].executed == 0
+
+
+def test_cli_projects_a_boundary_refusal_raised_during_execute(monkeypatch, capsys):
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+
+    class ProvenKernel:
+        generation = 1
+        sandbox_status = {
+            "mode": "enforce",
+            "state": "enabled",
+            "backend": "seatbelt",
+            "enforced": True,
+            "self_test_passed": True,
+            "network_policy": "blocked",
+        }
+
+        def __init__(self, *_args, **_kwargs):
+            self.closed = False
+
+        def is_alive(self):
+            return not self.closed
+
+        def execute(self, *_args, **_kwargs):
+            raise EgressBoundaryUnavailable(
+                {
+                    "code": "egress_boundary_unavailable",
+                    "reason": "mode flipped before the frame was sent",
+                }
+            )
+
+        def shutdown(self):
+            self.closed = True
+
+    monkeypatch.setattr(loop_mod, "chat", _one_python_cell)
+    monkeypatch.setattr(loop_mod, "Kernel", ProvenKernel)
+    agent = Agent(use_skills=False, allow_delegate=False, max_turns=1)
+    result = agent.run("run one Cell")
+    assert result["stop_reason"] == "egress_boundary_unavailable"
+    captured = capsys.readouterr().err
+    assert "error: egress_boundary_unavailable:" in captured
+    assert "mode flipped before the frame was sent" in captured
+
+
+def test_r_egress_refusal_keeps_the_kernel(monkeypatch):
+    import threading
+
+    from openai4s.egress import EgressBoundaryUnavailable
+
+    monkeypatch.setenv("OPENAI4S_EGRESS", "allowlist")
+    agent = object.__new__(Agent)
+    agent.frame_id = "frame-r-egress"
+    agent.dispatcher = SimpleNamespace(active_r_env=None)
+    agent._foreground_lock = threading.Lock()
+    agent._generation_recorder = None
+    agent.cancellation = None
+    agent.workspace = None
+    agent.read_isolation = None
+    shut: list[str] = []
+
+    class KernelDouble:
+        def __init__(self, sandbox_status, execute):
+            self.sandbox_status = sandbox_status
+            self._execute = execute
+
+        def is_alive(self):
+            return True
+
+        def shutdown(self):
+            shut.append("shutdown")
+
+        def execute(self, *_args, **_kwargs):
+            return self._execute()
+
+    agent._r_kernel = KernelDouble(
+        {
+            "enforced": False,
+            "self_test_passed": False,
+            "network_policy": "not_enforced",
+            "backend": None,
+        },
+        lambda: (_ for _ in ()).throw(AssertionError("r cell ran")),
+    )
+    agent._r_kernel_env = None
+    with pytest.raises(PermissionError, match="egress_boundary_unavailable"):
+        agent._execute_r("print(1)")
+    assert shut == []
+    assert agent._r_kernel is not None
+
+    agent._r_kernel = KernelDouble(
+        {
+            "mode": "enforce",
+            "state": "enabled",
+            "backend": "seatbelt",
+            "enforced": True,
+            "self_test_passed": True,
+            "network_policy": "blocked",
+        },
+        lambda: (_ for _ in ()).throw(
+            EgressBoundaryUnavailable(
+                {
+                    "code": "egress_boundary_unavailable",
+                    "reason": "mode flipped on the r kernel",
+                }
+            )
+        ),
+    )
+    with pytest.raises(EgressBoundaryUnavailable, match="mode flipped on the r kernel"):
+        agent._execute_r("print(1)")
+    assert shut == []
+    assert agent._r_kernel is not None

@@ -316,13 +316,9 @@ def host_only_boundary_holds(status: Mapping[str, Any] | None) -> bool:
 
     if not isinstance(status, Mapping):
         return False
-    if status.get("backend") == "remote":
-        return False
-    return (
-        status.get("enforced") is True
-        and status.get("self_test_passed") is True
-        and status.get("network_policy") == "blocked"
-    )
+    from openai4s.security.sandbox import boundary_holds
+
+    return boundary_holds(status)
 
 
 def _raw_env_enabled() -> bool:

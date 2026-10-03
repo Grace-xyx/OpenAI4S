@@ -529,6 +529,20 @@ def test_team_first_action_background_cell_gets_read_isolation(monkeypatch, tmp_
         raise AssertionError("background Cell did not finish")
 
     assert peek["error"] is None
+    assert dispatcher.durable_background is True
+    assert launched["persistent"] is True
+    assert peek["persistent"] is True
+    job = dispatcher._bg_executor._get(launched["exec_id"])
+    assert job._thread is not None
+    job._thread.join(2)
+    receipt = dispatcher._bg().receipts.get(launched["exec_id"])
+    assert receipt is not None
+    assert receipt["status"] == "done"
+    assert receipt["output"] == "done"
+    assert receipt["env_generation"] is None
+    assert "print('first')" not in "".join(
+        str(receipt[key] or "") for key in ("output", "error", "code_sha256", "origin")
+    )
     assert len(created) == 1
     options = created[0].options
     assert Path(options["cwd"]) == st.local_workspace

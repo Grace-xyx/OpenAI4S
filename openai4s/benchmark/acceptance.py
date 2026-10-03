@@ -1101,12 +1101,13 @@ def _probe_notebook(runtime: _Runtime) -> tuple[dict[str, Any], list[_Evidence]]
 def _serve_ketcher_probe(data_dir: str, channel: Any) -> None:
     """Serve one production Ketcher request in an output-isolated process.
 
-    ``build_app_server`` intentionally prints the daemon's freshly minted bearer
-    URL.  Capturing that print in the acceptance process would replace global
-    ``sys.stderr`` and race unrelated threads.  This worker is spawned into a
-    separate process, where its standard streams are private; it returns only
-    booleans about the captured banner plus the in-memory credential needed by
-    its parent for exactly one loopback request.
+    ``build_app_server`` prints a startup notice that tells the operator how
+    to sign in and must not include the access token.  Capturing that print
+    in the acceptance process would replace global ``sys.stderr`` and race
+    unrelated threads.  This worker is spawned into a separate process, where
+    its standard streams are private; it returns only booleans about the
+    captured banner plus the in-memory credential needed by its parent for
+    exactly one loopback request.
     """
 
     # Apply the acceptance-only posture before importing the production
@@ -1123,6 +1124,9 @@ def _serve_ketcher_probe(data_dir: str, channel: Any) -> None:
     from openai4s.server.gateway import build_app_server
     from openai4s.store import get_store
 
+    expected_banner = (
+        local_auth.startup_auth_banner("127.0.0.1", 0, team_mode=False) + "\n"
+    )
     route_config = Config(
         data_dir=Path(data_dir),
         host="127.0.0.1",
@@ -1173,10 +1177,6 @@ def _serve_ketcher_probe(data_dir: str, channel: Any) -> None:
             # request threads are joined by ``server_close`` before completion.
             server.daemon_threads = False
             server.timeout = 15.0
-            expected_banner = (
-                "[openai4s] access token required.\n"
-                f"  open: http://127.0.0.1:0/?token={token}\n"
-            )
             startup_stderr = captured_stderr.getvalue()
             channel.send(
                 {
@@ -1184,11 +1184,12 @@ def _serve_ketcher_probe(data_dir: str, channel: Any) -> None:
                     "port": int(server.server_address[1]),
                     "token": token,
                     # Optional startup diagnostics may precede the auth
-                    # banner.  The credential itself must occur exactly once,
-                    # in the exact final banner, and nowhere else.
+                    # banner.  The banner must be the exact final text, occur
+                    # once, and the access token must not appear anywhere.
                     "auth_banner_valid": startup_stderr.endswith(expected_banner)
                     and startup_stderr.count(expected_banner) == 1
-                    and startup_stderr.count(token) == 1,
+                    and bool(token)
+                    and startup_stderr.count(token) == 0,
                     "stdout_empty": not captured_stdout.getvalue(),
                     "secret_posture": secret_posture,
                 }
@@ -1208,21 +1209,16 @@ def _serve_ketcher_probe(data_dir: str, channel: Any) -> None:
                 except Exception as cleanup_error:
                     cleanup_errors.append(f"{label}:{type(cleanup_error).__name__}")
 
-    expected_banner = (
-        "[openai4s] access token required.\n"
-        f"  open: http://127.0.0.1:0/?token={token}\n"
-        if token
-        else ""
-    )
+    stderr_text = captured_stderr.getvalue()
     completion = {
         "phase": "done" if ready_sent else "error",
         "ok": error_type is None and not cleanup_errors,
         "error_type": error_type,
         "cleanup_errors": cleanup_errors,
         "auth_banner_exact": bool(token)
-        and captured_stderr.getvalue().endswith(expected_banner)
-        and captured_stderr.getvalue().count(expected_banner) == 1
-        and captured_stderr.getvalue().count(token) == 1,
+        and stderr_text.endswith(expected_banner)
+        and stderr_text.count(expected_banner) == 1
+        and stderr_text.count(token) == 0,
         "stdout_empty": not captured_stdout.getvalue(),
         "secret_posture": secret_posture,
     }
@@ -1350,7 +1346,7 @@ def _probe_ketcher(runtime: _Runtime) -> tuple[dict[str, Any], list[_Evidence]]:
         [
             _Evidence(
                 "openai4s.server.gateway.build_app_server GET /ketcher",
-                "An isolated production Gateway handler served /ketcher over a real loopback HTTP socket; its credential banner was captured and verified inside the child process, the secret broker was pinned to the read-only env-injection backend, and no external request was made.",
+                "An isolated production Gateway handler served /ketcher over a real loopback HTTP socket; its startup banner was captured and verified to contain no access token inside the child process, the secret broker was pinned to the read-only env-injection backend, and no external request was made.",
             )
         ],
     )

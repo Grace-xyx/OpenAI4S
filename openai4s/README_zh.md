@@ -36,6 +36,7 @@ OpenAI4S 有两个嵌套循环。[`agent/`](./agent/) 里的外层循环在每�
 | [`permissions.py`](./permissions.py) | 进程级的权限 broker。它解析 allow/deny/ask 规则；需要用户拍板时，持久化一条审批请求并阻塞当前回合，同时处理取消与超时。无人值守的执行默认失败即拒绝，也仅仅是默认：运维把 `OPENAI4S_UNATTENDED_APPROVAL` 设成 `allow`，就等于主动选择了失败即放行，此后每一条无人应答的审批都会被放过。 |
 | [`pkgscan.py`](./pkgscan.py) | 扫描 Python、conda 和 R 环境里包的可用性并做名称归一化，全程不把这些包导入核心。 |
 | [`platform_support.py`](./platform_support.py) | kernel 可以在哪些平台上启动，一处声明。Windows 在 spawn 路径上被**拒绝**，而不是在 onboarding 时被警告一句——警告后继续和拒绝是两种不同的承诺，而对一个以「结果可信」为立身之本的产品来说，半可用的 kernel 是更糟的结局。 |
+| [`process_instance.py`](./process_instance.py) | 这一次 daemon 进程的唯一身份。内核的后台收据和 server 的会话恢复归属导入的是同一个对象，同一次运行不会留下两个身份。 |
 | [`prompts.py`](./prompts.py) | 核心自己要发的那批小型单用途 prompt：压缩、审查 gate、溯源、Skill 检索、抽取、编辑和安全。 |
 | [`replay.py`](./replay.py) | 把成功的 `host.*` 结果记进离线回放 tape（溯源、凭据读取这类内部管道调用刻意不入 tape）；导出的 notebook 回放这盘 tape 时，它负责发现调用顺序的漂移。 |
 | [`review.py`](./review.py) | 对已完成回合的证据做一次有界、无工具的审查，并把 JSON verdict 标准化。审查者动不了工作区。 |

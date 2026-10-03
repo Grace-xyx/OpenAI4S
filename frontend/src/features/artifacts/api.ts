@@ -1,7 +1,13 @@
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
 import { API } from "../ws/connect";
-import type { ArtifactRow, ArtifactVersionRow } from "./types";
+import {
+  FILES_MAX_PAGE_SIZE,
+  FILES_PAGE_SIZE,
+  type ArtifactIndexPage,
+  type ArtifactRow,
+  type ArtifactVersionRow,
+} from "./types";
 
 export { API };
 
@@ -76,6 +82,55 @@ export function asArtifactList(value: unknown): ArtifactRow[] {
     rows.push({ ...rec, id: String(id) } as ArtifactRow);
   }
   return rows;
+}
+
+export type ArtifactIndexQuery = {
+  /** Filename substring. Omitted when empty — the page is then the most recent rows. */
+  q?: string;
+  contentType?: string;
+  origin?: string;
+  cursor?: string | null;
+  /** Clamped to 1…100. Omitted uses the Files page size (50). */
+  limit?: number;
+  signal?: AbortSignal;
+};
+
+/** Page size for artifact-index. Empty, non-finite, or <1 falls back to the Files page. */
+export function clampIndexLimit(limit: number | undefined): number {
+  if (limit == null || !Number.isFinite(limit) || limit < 1) return FILES_PAGE_SIZE;
+  return Math.min(Math.max(1, Math.floor(limit)), FILES_MAX_PAGE_SIZE);
+}
+
+/**
+ * One page of `GET /projects/{pid}/artifact-index`. The only URL builder and
+ * DTO parse for that route: Files and composer autocomplete both call it.
+ * `pid` is encoded. An empty `q` is left off the query string.
+ */
+export async function fetchArtifactIndexPage(
+  pid: string,
+  query: ArtifactIndexQuery = {},
+): Promise<ArtifactIndexPage> {
+  const params = new URLSearchParams();
+  if (query.q) params.set("q", query.q);
+  if (query.contentType) params.set("content_type", query.contentType);
+  if (query.origin) params.set("origin", query.origin);
+  if (query.cursor) params.set("cursor", query.cursor);
+  params.set("limit", String(clampIndexLimit(query.limit)));
+  const init: RequestInit = {};
+  if (query.signal) init.signal = query.signal;
+  const body = await api(
+    `/projects/${encodeURIComponent(pid)}/artifact-index?${params.toString()}`,
+    init,
+  );
+  if (!body || typeof body !== "object") {
+    return { artifacts: [], next_cursor: null, has_more: false };
+  }
+  const rec = body as Record<string, unknown>;
+  return {
+    artifacts: asArtifactList(rec.artifacts),
+    next_cursor: rec.next_cursor == null ? null : String(rec.next_cursor),
+    has_more: !!rec.has_more,
+  };
 }
 
 export function asVersionList(value: unknown): ArtifactVersionRow[] {
