@@ -346,6 +346,59 @@ def test_a_child_persisted_without_task_status_projects_null():
     assert "artifact_evidence" not in child
 
 
+def test_persisted_evidence_scrubs_absolute_filenames_on_browser_reads():
+    """Old envelopes are scrubbed on REST and socket reads, not rewritten."""
+    from openai4s.server.workbench_state import delegation_event_projection
+
+    _cfg, store, root = _root_store()
+    filenames = [
+        "/Users/private/research/report.csv",
+        r"C:\Private\research\report.csv",
+        "C:/Private/research/report.csv",
+        r"\\research-host\private\report.csv",
+        "reports/report.csv",
+    ]
+    evidence = {
+        "scope": "version_and_producer",
+        "items": [
+            {"filename": filename, "version_id": f"v-{index}"}
+            for index, filename in enumerate(filenames)
+        ],
+        "total": len(filenames),
+        "truncated": False,
+    }
+    child_id = _seeded_child(
+        store,
+        root,
+        {"status": "done", "result": {"artifact_evidence": evidence}},
+    )
+    stored = store.delegation_child_record(root, child_id)
+    assert stored is not None
+    before = json.dumps(stored, sort_keys=True)
+
+    rest_child = store.delegation_tree(root)["children"][0]
+    socket_child = delegation_event_projection({"child": stored})["child"]
+
+    for child in (rest_child, socket_child):
+        public_items = child["artifact_evidence"]["items"]
+        assert [item["filename"] for item in public_items] == [
+            None,
+            None,
+            None,
+            None,
+            "reports/report.csv",
+        ]
+        assert [item["version_id"] for item in public_items] == [
+            f"v-{index}" for index in range(len(filenames))
+        ]
+    assert json.dumps(stored, sort_keys=True) == before
+    assert (
+        json.dumps(store.delegation_child_record(root, child_id), sort_keys=True)
+        == before
+    )
+    assert [item["filename"] for item in evidence["items"]] == filenames
+
+
 def test_encode_result_keeps_artifact_evidence_past_the_public_cap():
     """Under 16_000 characters the result is unchanged. Over it, evidence stays."""
     evidence = {

@@ -369,6 +369,7 @@ def test_delegation_event_projection_forwards_bounded_artifact_evidence():
         "total": 13,
         "truncated": False,
     }
+    evidence["items"][0]["filename"] = "/Users/private/report.csv"
     projected = delegation_event_projection(
         {
             "type": "delegation_child_event",
@@ -389,6 +390,9 @@ def test_delegation_event_projection_forwards_bounded_artifact_evidence():
     assert child["artifact_evidence"]["items"][-1]["version_id"] == "v-11"
     assert child["artifact_evidence"]["truncated"] is True
     assert child["artifact_evidence"]["total"] == 13
+    assert child["artifact_evidence"]["items"][0]["filename"] is None
+    assert evidence["items"][0]["filename"] == "/Users/private/report.csv"
+    assert len(evidence["items"]) == 13
     assert "v-12" not in {
         item["version_id"] for item in child["artifact_evidence"]["items"]
     }

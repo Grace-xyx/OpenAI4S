@@ -848,6 +848,9 @@ manual end-to-end run named in the row where one applies.
   session). `BackgroundExecutor.launch` writes the receipt before the worker
   starts and refuses the launch when it cannot; output is flushed at 16 KiB or
   one second, with a timer for a quiet tail; terminal state is first-writer-wins.
+  Public completion waits for the terminal receipt write (or an explicit
+  `receipt_degraded` failure), so normal shutdown still joins a writer blocked
+  on the Store lock rather than discarding its final output.
   `effective_status` derives `outcome_unknown` on read for a row another daemon
   recorded or one this process no longer holds; a same-process row that would
   read unknown is read again by id first, because its owner leaves the live
@@ -901,7 +904,9 @@ manual end-to-end run named in the row where one applies.
   `storage/delegation.py::project_browser_child` (no `result`/`output`, refs
   through `project_browser_artifact_refs`), used by GET, stop and continue;
   the live event is `workbench_state.delegation_event_projection`; delegate
-  step cards drop host paths before truncation. The panel is
+  step cards drop host paths before truncation. Absolute filenames in evidence
+  are projected to `null` both when generated and when existing records are
+  read through REST or WebSocket. The panel is
   `frontend/src/features/timeline/island.ts` behind `sanitize.ts`.
 - **Verification:** `uv run pytest tests/test_delegation_control.py tests/test_delegation_persistence.py tests/test_delegation_task_status.py tests/test_delegation_step_projection.py tests/test_kernel.py -q`;
   `npm test --prefix frontend`; `node tests/browser_p1_controls.mjs`

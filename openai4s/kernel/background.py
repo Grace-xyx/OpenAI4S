@@ -394,18 +394,30 @@ class BackgroundExecutor:
                         # arbitrary exception.
                         terminal_status = "failed"
                         terminal_error = "background execution admission release failed"
-                # Until BOTH cleanup boundaries finish, public status remains
-                # running. Session shutdown therefore still sees and joins or
-                # exact-kills this thread instead of popping its SessionState
-                # while the background lifetime is live. Publish the complete
-                # terminal snapshot under the job lock, with status last.
-                with job._lock:
-                    job.result = terminal_result
-                    job.error = terminal_error
-                    job.interrupted = terminal_interrupted
-                    job.ended_at = int(time.time() * 1000)
-                    job.status = terminal_status
-                self._finish_receipt(job)
+                # Public completion also waits for the terminal receipt. If
+                # its SQLite write is waiting on the Store lock, shutdown
+                # must still see a running job and join its daemon thread;
+                # publishing completion first let normal exit lose the write.
+                ended_at = int(time.time() * 1000)
+                try:
+                    self._finish_receipt(
+                        job,
+                        status=terminal_status,
+                        error=terminal_error,
+                        interrupted=terminal_interrupted,
+                        ended_at=ended_at,
+                    )
+                finally:
+                    # Never hold the snapshot lock while writing a receipt:
+                    # peek stays non-blocking even when SQLite is busy. A
+                    # failed receipt still publishes the execution outcome
+                    # with receipt_degraded, rather than staying running.
+                    with job._lock:
+                        job.result = terminal_result
+                        job.error = terminal_error
+                        job.interrupted = terminal_interrupted
+                        job.ended_at = ended_at
+                        job.status = terminal_status
 
         try:
             thread = threading.Thread(target=_run, daemon=True)
@@ -575,7 +587,15 @@ class BackgroundExecutor:
                 job._flush_timer = None
         self._maybe_flush(job)
 
-    def _finish_receipt(self, job: _BackgroundJob) -> None:
+    def _finish_receipt(
+        self,
+        job: _BackgroundJob,
+        *,
+        status: str,
+        error: str | None,
+        interrupted: bool,
+        ended_at: int,
+    ) -> None:
         receipts = self.receipts
         wrote = False
         try:
@@ -583,10 +603,6 @@ class BackgroundExecutor:
                 with job._lock:
                     timer = job._flush_timer
                     job._flush_timer = None
-                    status = job.status
-                    error = job.error
-                    interrupted = job.interrupted
-                    ended = job.ended_at
                     text = "".join(job._buf)
                     truncated = job._buf_truncated
                 if timer is not None:
@@ -599,7 +615,7 @@ class BackgroundExecutor:
                         status=status,
                         error=error,
                         interrupted=interrupted,
-                        ended_at=int(ended or self._clock_ms()),
+                        ended_at=ended_at,
                         output=text,
                         truncated=truncated,
                     )

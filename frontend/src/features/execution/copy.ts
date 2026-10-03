@@ -15,7 +15,7 @@ const COPY = {
     unknownEnvironment: "Not recorded",
     packages: "Recorded packages",
     evidenceScope:
-      "Checks the version record, the recorded sha256, that the snapshot file exists and matches the recorded size, and that the producer is this sub-agent with a successful Cell. The check is recorded when the sub-agent finishes and is not repeated while this panel is open. The content hash is not recomputed. This is not a scientific conclusion or a claim of statistical validity.",
+      "Checks the version record, the recorded sha256, that the snapshot file exists and matches the recorded size, and that the producer is this sub-agent. When a producing Cell is recorded, it must have succeeded. A version without a Cell receipt can still pass. The check is recorded when the sub-agent finishes and is not repeated while this panel is open. The content hash is not recomputed. This is not a scientific conclusion or a claim of statistical validity.",
     evidenceSummary: "Version and producer checked {0} · Insufficient evidence {1}",
     evidenceUnavailable: "Evidence unavailable",
     evidenceTruncated: "Showing the first {0} of {1}",
@@ -55,7 +55,7 @@ const COPY = {
     unknownEnvironment: "未记录",
     packages: "已记录的包",
     evidenceScope:
-      "仅核对版本记录、sha256 记录、快照文件存在与大小、生产者为该子代理及其 Cell 成功。核对发生在子代理完成时，面板打开期间不会重新核对。未重新计算内容哈希；不代表科学结论或统计有效性。",
+      "仅核对版本记录、sha256 记录、快照文件存在与大小，以及生产者为该子代理。若记录了生产 Cell，则要求该 Cell 成功；没有 Cell 回执的版本仍可能通过。核对发生在子代理完成时，面板打开期间不会重新核对。未重新计算内容哈希；不代表科学结论或统计有效性。",
     evidenceSummary: "版本与归属已核对 {0} · 证据不足 {1}",
     evidenceUnavailable: "证据不可用",
     evidenceTruncated: "仅显示前 {0} 项 / 共 {1} 项",

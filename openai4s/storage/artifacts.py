@@ -197,6 +197,14 @@ class ArtifactRepository:
         self._paths_match = paths_match or same_file_path
         self._delete_related = delete_related
         self._observations = ArtifactObservationRepository(connection)
+        # SQLite's built-in lower/LIKE only fold ASCII. The composer's filename
+        # search uses Unicode lowercasing; keep its paginated query equivalent.
+        self._connection.create_function(
+            "openai4s_filename_lower",
+            1,
+            lambda value: value.lower() if isinstance(value, str) else None,
+            deterministic=True,
+        )
 
     def get_artifact(self, artifact_id: str) -> dict | None:
         with self._lock:
@@ -1699,17 +1707,17 @@ class ArtifactRepository:
         ``has_more`` is observed from row counts, so filtering after
         ``LIMIT`` turns a page of hidden rows into a phantom end-of-list.
 
-        ``filename_query`` is an escaped substring match on ``filename``
-        only — never path, checksum, or content type. ``origin`` is
+        ``filename_query`` is a Unicode-lowercased escaped substring match on
+        ``filename`` only — never path, checksum, or content type. ``origin`` is
         derived from ``is_user_upload`` (``uploaded`` / ``generated``).
         """
         clauses: list[str] = ["a.project_id=?", "COALESCE(a.priority,0)>=0"]
         params: list[Any] = [project_id]
         query = (filename_query or "").strip()
         if query:
-            clauses.append("a.filename LIKE ? ESCAPE '\\'")
+            clauses.append("openai4s_filename_lower(a.filename) LIKE ? ESCAPE '\\'")
             # An unescaped ``%`` in a filename query would match every filename.
-            params.append(like_contains(query))
+            params.append(like_contains(query.lower()))
         if content_type:
             clauses.append("a.content_type=?")
             params.append(content_type)

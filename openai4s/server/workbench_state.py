@@ -74,12 +74,13 @@ def _bounded_artifact_evidence(value: Any) -> Any:
     """
 
     from openai4s.agent.delegation import EVIDENCE_ITEM_CAP
+    from openai4s.storage.delegation import project_browser_artifact_evidence
 
     if not isinstance(value, Mapping):
         return value
     items = value.get("items")
     if not isinstance(items, list) or len(items) <= EVIDENCE_ITEM_CAP:
-        return dict(value)
+        return project_browser_artifact_evidence(value)
     bounded = dict(value)
     bounded["items"] = list(items[:EVIDENCE_ITEM_CAP])
     total = value.get("total")
@@ -87,7 +88,7 @@ def _bounded_artifact_evidence(value: Any) -> Any:
         total = len(items)
     bounded["total"] = total
     bounded["truncated"] = True
-    return bounded
+    return project_browser_artifact_evidence(bounded)
 
 
 def delegation_event_projection(payload: Mapping[str, Any]) -> dict[str, Any]:

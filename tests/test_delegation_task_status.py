@@ -653,6 +653,55 @@ def _item(result, version_id):
     return next(item for item in items if item["version_id"] == version_id)
 
 
+@pytest.mark.parametrize(
+    ("filename", "public_filename"),
+    [
+        ("/Users/private/research/report.csv", None),
+        (r"C:\Private\research\report.csv", None),
+        ("C:/Private/research/report.csv", None),
+        (r"\\research-host\private\report.csv", None),
+        ("reports/report.csv", "reports/report.csv"),
+        ("report.csv", "report.csv"),
+    ],
+)
+def test_saved_artifact_evidence_omits_absolute_filenames(
+    tmp_path, filename, public_filename
+):
+    """A real Host save may carry a path-shaped display filename."""
+    from openai4s.host_dispatch import build_dispatcher
+
+    cfg = get_config()
+    store = get_store(cfg.db_path)
+    frame_id = store.new_frame(kind="delegate")
+    dispatcher = build_dispatcher(cfg, workspace=tmp_path, frame_id=frame_id)
+    store.set_permission_rule(
+        scope="conversation",
+        scope_id=frame_id,
+        tool="save_artifact",
+        pattern="*",
+        decision="allow",
+    )
+    (tmp_path / "report.csv").write_text("value\n1\n", encoding="utf-8")
+    cell_id = store.log_cell(
+        frame_id=frame_id, code="value = 1\n", result={}, origin="delegate"
+    )
+    saved = dispatcher(
+        "save_artifact",
+        [{"path": "report.csv", "filename": filename, "producing_cell_id": cell_id}],
+    )
+    assert "version_id" in saved
+    rows = store.artifact_evidence_rows_for_frame(frame_id, limit=12)
+    before = json.dumps(rows, sort_keys=True)
+
+    evidence = _project_artifact_evidence(rows, frame_id)
+
+    assert evidence["items"][0]["filename"] == public_filename
+    assert evidence["items"][0]["version_id"] == saved["version_id"]
+    assert evidence["items"][0]["verdict"] == "verified_version_and_producer"
+    assert rows["versions"][0]["filename"] == filename
+    assert json.dumps(rows, sort_keys=True) == before
+
+
 def test_other_frame_artifact_is_excluded_from_child_evidence(monkeypatch, tmp_path):
     """A same-name version from another frame is not this child's evidence.
 

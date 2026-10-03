@@ -48,6 +48,7 @@ from openai4s.config import Config
 from openai4s.host.delegation_policy import child_execution_policy
 from openai4s.observability import carry_context
 from openai4s.security.sandbox import KernelReadIsolation
+from openai4s.storage.delegation import project_browser_artifact_evidence
 from openai4s.storage.delegation_attempts import (
     DelegationRequestConflict,
     delegation_identity,
@@ -2542,14 +2543,16 @@ def _project_artifact_evidence(rows: Any, child_frame_id: str) -> dict[str, Any]
                 "reasons": reasons,
             }
         )
-    return {
-        "scope": _EVIDENCE_SCOPE,
-        "items": items,
-        "total": total,
-        "truncated": total > len(items),
-        # Frozen when the child finishes. A later panel read does not re-check.
-        "checked_at": time.time(),
-    }
+    return project_browser_artifact_evidence(
+        {
+            "scope": _EVIDENCE_SCOPE,
+            "items": items,
+            "total": total,
+            "truncated": total > len(items),
+            # Frozen when the child finishes. A later panel read does not re-check.
+            "checked_at": time.time(),
+        }
+    )
 
 
 def _derive_task_status(

@@ -900,6 +900,31 @@ def project_browser_artifact_refs(refs: list[Any]) -> list[dict[str, Any]]:
     return safe_refs
 
 
+def project_browser_artifact_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy evidence without absolute filenames, including persisted envelopes.
+
+    The filename is display metadata supplied when an Artifact is saved, so
+    it may contain a host path even though the evidence has no path field.
+    Keep its existing nullable shape and the other evidence fields intact.
+    """
+
+    projected = dict(evidence)
+    items = evidence.get("items")
+    if isinstance(items, list):
+        safe_items: list[Any] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                safe_items.append(item)
+                continue
+            safe_item = dict(item)
+            filename = item.get("filename")
+            if isinstance(filename, str) and host_absolute_path(filename):
+                safe_item["filename"] = None
+            safe_items.append(safe_item)
+        projected["items"] = safe_items
+    return projected
+
+
 #: The keys a browser sees on a delegation child. An allowlist, not a list
 #: of keys to drop: a child-shaped value can also be a run envelope
 #: (``final_message``, bullets, ``environment`` with interpreter paths), and
@@ -935,7 +960,8 @@ def project_browser_child(child: Mapping[str, Any]) -> dict[str, Any]:
     not null. Steering message bodies are omitted. ``artifact_refs`` keep
     identity and a relative name through ``project_browser_artifact_refs``:
     ``durable_path`` is dropped, and an absolute ``path`` or ``filename`` is
-    dropped. ``artifact_evidence`` is left as stored, including a missing key.
+    dropped. ``artifact_evidence`` keeps its stored fields but replaces an
+    absolute filename with null; a missing evidence key remains absent.
     ``GET /frames/{id}/delegations`` and the stop/continue responses use this
     function. The WebSocket ``delegation_child_event`` keeps its own narrower
     allowlist in ``workbench_state.delegation_event_projection``.
@@ -945,6 +971,9 @@ def project_browser_child(child: Mapping[str, Any]) -> dict[str, Any]:
     refs = projected.get("artifact_refs")
     if isinstance(refs, list):
         projected["artifact_refs"] = project_browser_artifact_refs(refs)
+    evidence = projected.get("artifact_evidence")
+    if isinstance(evidence, Mapping):
+        projected["artifact_evidence"] = project_browser_artifact_evidence(evidence)
     steering = projected.get("steering")
     if isinstance(steering, Mapping):
         safe_steering = dict(steering)

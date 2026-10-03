@@ -1327,6 +1327,7 @@ def test_a_failed_terminal_write_stays_unknown_after_restart(tmp_path):
         assert peeked["status"] == "done"
         assert peeked["error"] is None
         assert peeked["stdout"] == "should-not-count-as-success"
+        assert peeked["receipt_degraded"] is True
         raw_status = _raw(store, launched["exec_id"])["status"]
         assert raw_status in {"launching", "running"}
         restarted = _dispatcher(
@@ -1340,6 +1341,88 @@ def test_a_failed_terminal_write_stays_unknown_after_restart(tmp_path):
         assert again["status"] != "done"
     finally:
         dispatcher._bg_executor.shutdown(timeout_per_job=1.0)
+        store.close()
+
+
+def test_shutdown_joins_a_terminal_receipt_waiting_for_the_store_lock(
+    tmp_path, monkeypatch
+):
+    """Normal exit must not discard a completed cell's pending SQLite write."""
+
+    cfg, store = _cfg_store(tmp_path)
+    root = _root(store)
+    kernel = _WaitKernel()
+    kernel.chunks = ("last-output-before-exit",)
+    dispatcher = _dispatcher(cfg, root, "daemon-a", lambda: kernel)
+    executor = dispatcher._bg()
+    # Keep the small output in memory until the terminal receipt writes it.
+    executor.FLUSH_INTERVAL_MS = 60_000
+    finish_entered = threading.Event()
+    join_entered = threading.Event()
+    shutdown_returned = threading.Event()
+    stopped = []
+    shutdown_thread = None
+    finish = executor.receipts.finish
+
+    def observed_finish(*args, **kwargs):
+        finish_entered.set()
+        return finish(*args, **kwargs)
+
+    monkeypatch.setattr(executor.receipts, "finish", observed_finish)
+    try:
+        exec_id = executor.launch("print('last-output-before-exit')")["exec_id"]
+        assert kernel.entered.wait(1)
+        job = executor._get(exec_id)
+        assert job._thread is not None
+        join = job._thread.join
+
+        def observed_join(*args, **kwargs):
+            join_entered.set()
+            return join(*args, **kwargs)
+
+        monkeypatch.setattr(job._thread, "join", observed_join)
+
+        def shutdown():
+            stopped.append(executor.shutdown(timeout_per_job=2))
+            shutdown_returned.set()
+
+        with store._lock:
+            kernel.release.set()
+            assert finish_entered.wait(1)
+            before = executor.peek(exec_id)
+            assert before["status"] == "running"
+            assert before["done"] is False
+            assert before["ended_at"] is None
+            assert _raw(store, exec_id)["output"] == ""
+            shutdown_thread = threading.Thread(target=shutdown)
+            shutdown_thread.start()
+            # This observes shutdown's join directly, without racing a sleep
+            # against the receipt writer or relying on a timeout to pass.
+            assert join_entered.wait(1)
+            assert not shutdown_returned.is_set()
+
+        shutdown_thread.join(2)
+        assert not shutdown_thread.is_alive()
+        assert shutdown_returned.is_set()
+        assert stopped == [1]
+        assert not job._thread.is_alive()
+        assert executor.peek(exec_id)["status"] == "done"
+        assert _raw(store, exec_id)["status"] == "done"
+        store.close()
+
+        # A fresh connection and dispatcher must see committed output; an
+        # in-memory terminal snapshot cannot satisfy this assertion.
+        cfg, store = _cfg_store(tmp_path)
+        restarted = _dispatcher(cfg, root, "daemon-b", _OkKernel)
+        receipt = restarted._m_exec_peek(exec_id)
+        assert receipt["status"] == "done"
+        assert receipt["stdout"] == "last-output-before-exit"
+        assert receipt["source"] == "receipt"
+    finally:
+        kernel.release.set()
+        if shutdown_thread is not None:
+            shutdown_thread.join(3)
+        executor.shutdown(timeout_per_job=1)
         store.close()
 
 
