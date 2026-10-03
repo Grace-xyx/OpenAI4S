@@ -2688,6 +2688,12 @@ class SessionRunner:
         self.skills = SkillLoader(cfg=cfg)
         self._sessions: dict[str, SessionState] = {}
         self._jobs: dict[str, MessageJob] = {}
+        #: Serializes every read-check-write of a session's model pin. The
+        #: composer's re-pin and a send's first bind can arrive together; with
+        #: no lock the send read "unpinned", the re-pin wrote the user's
+        #: choice, and the send's active-profile bind then overwrote it.
+        #: Reentrant because the re-pin paths call the send-side bind.
+        self._model_binding_lock = threading.RLock()
         #: The row an in-flight turn has already written as its terminal
         #: failure, so the *outer* handler for the same turn amends it rather
         #: than appending a second one.
@@ -8488,10 +8494,13 @@ class SessionRunner:
                             explore,
                             # What this item was accepted under, carried from the
                             # request thread rather than re-read from the frame.
+                            # An item admitted unpinned is frozen unpinned
+                            # too: `("", 0)`, not None. None meant "bind at
+                            # dequeue", so a pin the composer set after the 202
+                            # was adopted by an item accepted before it.
                             frozen_binding=(
-                                (job.model_profile_id, job.model_profile_revision)
-                                if job.model_profile_id
-                                else None
+                                job.model_profile_id,
+                                job.model_profile_revision,
                             ),
                             task_mode=task_mode,
                         )
@@ -8565,6 +8574,14 @@ class SessionRunner:
                         # socket both said failed.
                         outcome["handled"] = e
                         raise
+                    finally:
+                        # The turn's frozen pair lives exactly as long as the
+                        # turn, and is dropped inside the lease, before the next
+                        # item can freeze its own. Left set, everything that
+                        # resolves the session's model between turns -- the
+                        # context projection, the REPL, export -- kept reading
+                        # the previous turn's pin after the composer re-pinned.
+                        self._release_frozen_binding(root_frame_id, st)
             except ExecutionCancelled as e:
                 # First: `ExecutionCancelled` is an `Exception`, so the generic
                 # clause below would otherwise swallow every cancellation and
@@ -9650,6 +9667,10 @@ class SessionRunner:
         that no longer exists, which is the rebind prompt. Guessing the nearest
         revision would be the silent-follow-latest behaviour being removed.
         """
+        with self._model_binding_lock:
+            return self._bind_model_revision(root_frame_id)
+
+    def _bind_model_revision(self, root_frame_id: str) -> dict:
         frame = self.store.get_frame(root_frame_id) or {}
         bound_id = str(frame.get("model_profile_id") or "")
         bound_revision = frame.get("model_profile_revision")
@@ -9790,6 +9811,10 @@ class SessionRunner:
         "re-bound", and the next send was `model_revision_ambiguous` again --
         offering the same rebind, with no way out that it named.
         """
+        with self._model_binding_lock:
+            return self._rebind_model_revision(root_frame_id)
+
+    def _rebind_model_revision(self, root_frame_id: str) -> dict:
         profiles = self.store.list_model_profiles()
         active = self._active_profile(profiles)
         if active is not None:
@@ -9821,6 +9846,106 @@ class SessionRunner:
         self.store.unpin_model(root_frame_id)
         return self.bind_model_revision(root_frame_id)
 
+    def choose_session_model(
+        self, root_frame_id: str, model_id: str, *, member: bool = False
+    ) -> dict:
+        """`POST /frames/{id}/model-binding {model_id}`: pin the model the user chose.
+
+        The composer selector used to answer only `PUT /models/default`, which
+        moves the instance's active profile. A session is pinned to the
+        configuration of its first send (D2), so switching models inside a
+        conversation changed what *new* sessions bind and did nothing at all to
+        the one on screen. Choosing an entry while a session is open is the
+        explicit request D2 asks for, so it re-pins that session -- and only
+        this route does: a `model` on a message is still never consent.
+
+        `model_id` is the selector's option value. A live profile id pins that
+        profile's current revision, whatever is active. The selector's first
+        entry is not a profile: its id is the daemon's live model name and it
+        stands for the global configuration, so it re-pins to the active
+        profile -- or, with none active, leaves the session unpinned on the
+        global configuration. Any other value is a choice made from a list that
+        has since changed (another tab, an admin, a deleted profile): it is
+        refused rather than quietly answered with whatever is active now.
+
+        As with the bodiless rebind, the target's credential is checked before
+        the old pin is dropped, so a refusal leaves the session's record of what
+        it ran under untouched. A turn already admitted keeps the pair it was
+        frozen with; this applies from the next one.
+        """
+        frame = self.store.get_frame(root_frame_id)
+        if not frame:
+            raise GatewayError(404, "session not found", "not_found")
+        if (frame.get("root_frame_id") or root_frame_id) != root_frame_id:
+            # Dispatch reads the root's pin, so a pin written on a delegated
+            # child would be a switch with no effect that said it succeeded.
+            raise GatewayError(
+                400, "a model is chosen for a session root", "not_a_session_root"
+            )
+        with self._model_binding_lock:
+            profiles = self.store.list_model_profiles()
+            target = next(
+                (item for item in profiles if str(item.get("id") or "") == model_id),
+                None,
+            )
+            if target is None:
+                return self._choose_global_configuration(root_frame_id, model_id)
+            if target.get("deleted_at"):
+                raise GatewayError(404, "profile not found", "model_profile_not_found")
+            self._require_profile_credential(target, chosen=True, member=member)
+            return self._pin_profile(root_frame_id, target)
+
+    def _choose_global_configuration(self, root_frame_id: str, model_id: str) -> dict:
+        """The selector's live entry: whatever the daemon's global configuration is."""
+        live = str(
+            self.store.get_setting("llm_model") or self.cfg.llm.model or "default"
+        ).strip()
+        if model_id != live:
+            raise GatewayError(
+                409,
+                f"{model_id!r} is not a model this daemon offers any more; the "
+                "model list has changed, so choose again",
+                "model_selection_stale",
+            )
+        profiles = self.store.list_model_profiles()
+        if self._active_profile(profiles) is not None:
+            return self._rebind_model_revision(root_frame_id)
+        # No profile is active, so the global configuration is the `llm_*`
+        # settings themselves. `frames.model` is what the legacy backfill
+        # matches on the next send: left naming the profile just switched away
+        # from, it would re-pin that profile and the global configuration could
+        # never be chosen back -- so it becomes the live model.
+        #
+        # That backfill is the decision the next send takes, so it is taken
+        # here, and refused here, *before* anything is written: a 409 raised
+        # after the unpin left a session that sent fine unpinned and unable to
+        # send at all, while the refusal said nothing had changed.
+        matches = (
+            [
+                item
+                for item in profiles
+                if not item.get("deleted_at")
+                and str(item.get("model") or "").strip() == live
+            ]
+            if self.store.message_count(root_frame_id) > 0
+            else []
+        )
+        if len(matches) > 1:
+            raise GatewayError(
+                409,
+                f"no model profile is active and more than one matches {live!r}; "
+                "activate the one this session continues under in Customize -> "
+                "Models, or choose that profile",
+                "model_profile_needs_active",
+            )
+        if matches:
+            # Exactly the backfill the next send would make, made now.
+            self._require_profile_credential(matches[0], follows_active=False)
+            return self._pin_profile(root_frame_id, matches[0])
+        self.store.unpin_model(root_frame_id)
+        self.store.update_frame(root_frame_id, model=live)
+        return {"model_profile_id": "", "model_profile_revision": 0, "bound": False}
+
     def _active_profile(self, profiles: list[dict]) -> dict | None:
         active_id = str(self.store.get_setting("active_model_profile") or "")
         if not active_id:
@@ -9834,7 +9959,6 @@ class SessionRunner:
             # entirely by .env has no profiles at all, and refusing to run would
             # break a configuration this project documents as supported.
             return {"model_profile_id": "", "model_profile_revision": 0, "bound": False}
-        active_id = str(active.get("id") or "")
 
         # Checked BEFORE the pin is written. This branch used to pin the active
         # profile with no credential check at all, so a profile nothing could
@@ -9842,26 +9966,46 @@ class SessionRunner:
         # usable" -- and `POST /frames/{id}/model-binding`, which that error
         # points at, came straight back here and pinned it again.
         self._require_profile_credential(active)
-        revision = int(active.get("revision") or 0)
+        return self._pin_profile(root_frame_id, active)
+
+    def _pin_profile(self, root_frame_id: str, profile: dict) -> dict:
+        """Write `profile`'s current revision as this session's pin.
+
+        The caller has already checked the credential; this only resolves the
+        revision and writes it, so the active-profile bind and an explicit
+        choice cannot drift apart on how a pin is spelled.
+
+        `frames.model` is written with it, as one rule for every pin. It is what
+        `GET /frames/{id}`, `host.session()` and a share report as the session's
+        model, and what the legacy backfill matches if the pin is ever dropped;
+        left at the name the session was created with, it went on naming a
+        model the session no longer runs once the composer could switch it.
+        """
+        profile_id = str(profile.get("id") or "")
+        revision = int(profile.get("revision") or 0)
         if not revision:
             # A profile written before revisions existed. Seal one now rather
             # than binding to a number that names nothing.
             def _seal(items):
                 for item in items:
-                    if item.get("id") == active_id:
+                    if item.get("id") == profile_id:
                         return ModelProfileService._seal_revision(
                             item, now_ms=int(time.time() * 1000)
                         )
                 return 0
 
             revision = int(self.store.mutate_model_profiles(_seal) or 1)
+        model = ModelProfileService(
+            self.store, self.cfg, providers=lambda: PROVIDERS
+        ).effective_model_id(profile.get("provider"), profile.get("model"))
         self.store.update_frame(
             root_frame_id,
-            model_profile_id=active_id,
+            model_profile_id=profile_id,
             model_profile_revision=revision,
+            model=model,
         )
         return {
-            "model_profile_id": active_id,
+            "model_profile_id": profile_id,
             "model_profile_revision": revision,
             "bound": True,
         }
@@ -9896,7 +10040,12 @@ class SessionRunner:
         ).credential(profile, configuration)
 
     def _require_profile_credential(
-        self, profile: dict, *, follows_active: bool = True
+        self,
+        profile: dict,
+        *,
+        follows_active: bool = True,
+        chosen: bool = False,
+        member: bool = False,
     ) -> None:
         """Refuse to pin a profile that no request could be dispatched under.
 
@@ -9907,6 +10056,10 @@ class SessionRunner:
         `follows_active=False` is the legacy backfill, which binds the profile
         the session's recorded model names whatever is active -- so "activate
         another profile" is advice that would not change the answer.
+        `chosen=True` is the composer's explicit choice, where the way out is
+        to pick a different model rather than to activate one -- and, for a
+        team member (`member=True`), to ask an admin rather than to edit
+        instance configuration they may not write.
         """
         credential = self._profile_credential(profile)
         if credential.usable:
@@ -9924,16 +10077,44 @@ class SessionRunner:
                 if provider
                 else "the provider's API key variable"
             )
-            message = (
-                f"model profile {name!r} has no API key: add one in Customize -> "
-                f"Models, set {variable} for the daemon, or activate another "
-                "profile"
-                if follows_active
-                else f"model profile {name!r}, which this session's recorded "
-                "model matches, has no API key: add one in Customize -> Models "
-                f"or set {variable} for the daemon"
-            )
+            if chosen and member:
+                message = (
+                    f"model profile {name!r} has no API key: ask an admin to "
+                    "add one, or choose another model"
+                )
+            elif chosen:
+                message = (
+                    f"model profile {name!r} has no API key: add one in "
+                    f"Customize -> Models, set {variable} for the daemon, or "
+                    "choose another model"
+                )
+            elif follows_active:
+                message = (
+                    f"model profile {name!r} has no API key: add one in Customize "
+                    f"-> Models, set {variable} for the daemon, or activate "
+                    "another profile"
+                )
+            else:
+                message = (
+                    f"model profile {name!r}, which this session's recorded "
+                    "model matches, has no API key: add one in Customize -> "
+                    f"Models or set {variable} for the daemon"
+                )
         raise GatewayError(409, message, "model_profile_needs_key")
+
+    def _release_frozen_binding(self, root_frame_id: str, st: Any) -> None:
+        """Drop a finished turn's frozen pair, on every state it could be on.
+
+        The worker holds the state it found at submit; a branch activation can
+        swap the session's runtime while the turn runs, and `run_message` then
+        freezes onto the state it finds. Cleared inside the lease, so no other
+        turn of this session can have frozen its own yet.
+        """
+        st.frozen_model_binding = None
+        with self._lock:
+            current = self._sessions.get(root_frame_id)
+        if current is not None:
+            current.frozen_model_binding = None
 
     def freeze_model_binding(self, root_frame_id: str) -> dict:
         """Bind if needed and return the exact pair to carry on a ticket.
@@ -10144,7 +10325,16 @@ class SessionRunner:
             st.frozen_model_binding = None
             # A direct turn: the frame is the freshest answer there is. Raises 409
             # for a dangling pin, before anything runs.
-            self.bind_model_revision(root_frame_id)
+            binding = self.bind_model_revision(root_frame_id)
+            # And frozen for the rest of the turn, as a queued item's is. The
+            # composer can re-pin a session at any moment now, and a plan turn
+            # that re-read the frame on every `_llm_cfg` was recorded under one
+            # configuration (the ledger) and ran partly under another
+            # (screening, kernel and delegation wiring, the reviewer).
+            st.frozen_model_binding = (
+                str(binding.get("model_profile_id") or ""),
+                int(binding.get("model_profile_revision") or 0),
+            )
         if model:
             st.model = model
         st.plan = bool(plan)
@@ -12838,6 +13028,14 @@ class SessionRunner:
                         # queued -> running -> completed for a failed turn.
                         outcome["handled"] = e
                         raise
+                    finally:
+                        # The turn's frozen pair lives exactly as long as the
+                        # turn, and is dropped inside the lease, before the next
+                        # item can freeze its own. Left set, everything that
+                        # resolves the session's model between turns -- the
+                        # context projection, the REPL, export -- kept reading
+                        # the previous turn's pin after the composer re-pinned.
+                        self._release_frozen_binding(root_frame_id, st)
             except ExecutionCancelled as e:
                 if outcome.get("handled") is not e:
                     # Raised BY `admitted`, not by `fn`: the item was cancelled
@@ -16438,13 +16636,35 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 # it above the real gate some day. Verified by a test that
                 # drives a quarantined session and expects 423.
                 #
-                # It binds the ACTIVE configuration, which is what its prompt
-                # says, and not the legacy backfill a plain unpin-and-bind fell
-                # into for any session carrying a recorded model.
+                # Bodiless, it binds the ACTIVE configuration, which is what its
+                # prompt says, and not the legacy backfill a plain unpin-and-bind
+                # fell into for any session carrying a recorded model. With
+                # `{model_id}` -- the composer selector, switching models inside
+                # an open conversation -- it binds the configuration named.
                 frame_id = m.group(1)
-                self._json(
-                    {"ok": True, "binding": runner.rebind_model_revision(frame_id)}
+                chosen = self._body().get("model_id")
+                if chosen is not None and not isinstance(chosen, str):
+                    raise GatewayError(
+                        400, "model_id must be a string", "invalid_model_id"
+                    )
+                chosen = (chosen or "").strip()
+                identity = getattr(self, "_team_identity", None)
+                binding = (
+                    runner.choose_session_model(
+                        frame_id,
+                        chosen,
+                        # A member cannot add a profile's key; an admin can.
+                        member=bool(identity is not None and not identity.is_admin),
+                    )
+                    if chosen
+                    else runner.rebind_model_revision(frame_id)
                 )
+                # The session may have been deleted after the mutation gate
+                # or while the pin was written. SQLite accepts a zero-row
+                # UPDATE, so a successful call alone is not a saved switch.
+                if store.get_frame(frame_id) is None:
+                    raise GatewayError(404, "session not found", "not_found")
+                self._json({"ok": True, "binding": binding})
                 return
             m = re.fullmatch(r"/model-profiles/([^/]+)/probe", sub)
             if m and method == "POST":
@@ -17296,6 +17516,15 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                             # to -- and it was the only one of the three that
                             # did not say.
                             "request_id": job.request_id,
+                            # The model configuration this turn was admitted
+                            # under -- the same pair the ticket froze. A first
+                            # send is what pins a fresh session, and without it
+                            # here the composer kept showing the session as
+                            # unpinned, i.e. whatever the default became later.
+                            "model_binding": {
+                                "model_profile_id": job.model_profile_id,
+                                "model_profile_revision": job.model_profile_revision,
+                            },
                             # What became of the pins this message carried.
                             # `sent` means consumed exactly once; `pending`
                             # means the turn was accepted but the consume did
@@ -20191,7 +20420,7 @@ def _frame_json(f: dict | None, store: Store) -> dict:
     if not f:
         return {}
     fid = f["frame_id"]
-    return {
+    out = {
         "id": fid,
         "root_frame_id": f.get("root_frame_id") or fid,
         "parent_frame_id": f.get("parent_id"),
@@ -20208,6 +20437,14 @@ def _frame_json(f: dict | None, store: Store) -> dict:
         "created_at": _iso(f.get("created_at")),
         "updated_at": _iso(f.get("updated_at")),
     }
+    # The configuration this session is pinned to (D2), so the composer can
+    # show the session's own model rather than the instance default. Both
+    # queries behind this serializer select it -- the list's explicit column
+    # list included -- and the list/detail parity test keeps it that way: a
+    # column the list leaves out would read as "unpinned" for a pinned session.
+    out["model_profile_id"] = f.get("model_profile_id") or None
+    out["model_profile_revision"] = f.get("model_profile_revision") or None
+    return out
 
 
 def _project_json(p: dict) -> dict:

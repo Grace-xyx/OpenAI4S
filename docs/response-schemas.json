@@ -9965,6 +9965,18 @@
                     "string"
                   ]
                 },
+                "model_profile_id": {
+                  "type": [
+                    "null",
+                    "string"
+                  ]
+                },
+                "model_profile_revision": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "name": {
                   "type": [
                     "null",
@@ -10011,6 +10023,8 @@
                 "kernel_alive",
                 "message_count",
                 "model",
+                "model_profile_id",
+                "model_profile_revision",
                 "name",
                 "output_tokens",
                 "parent_frame_id",
@@ -10106,6 +10120,18 @@
             "type": [
               "null",
               "string"
+            ]
+          },
+          "model_profile_id": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "model_profile_revision": {
+            "type": [
+              "integer",
+              "null"
             ]
           },
           "name": {
@@ -16661,14 +16687,29 @@
               "default": {
                 "items": {
                   "properties": {
+                    "base_url": {
+                      "type": "string"
+                    },
                     "description": {
                       "type": "string"
                     },
                     "id": {
                       "type": "string"
                     },
+                    "model": {
+                      "type": "string"
+                    },
                     "name": {
                       "type": "string"
+                    },
+                    "profile_id": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": "integer"
                     }
                   },
                   "required": [
@@ -23147,6 +23188,18 @@
               "string"
             ]
           },
+          "model_profile_id": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "model_profile_revision": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -23183,6 +23236,8 @@
           "input_tokens",
           "message_count",
           "model",
+          "model_profile_id",
+          "model_profile_revision",
           "name",
           "output_tokens",
           "parent_frame_id",
@@ -30394,6 +30449,12 @@
               "string"
             ]
           },
+          "model_profile_id": {
+            "type": "null"
+          },
+          "model_profile_revision": {
+            "type": "null"
+          },
           "name": {
             "type": "null"
           },
@@ -30427,6 +30488,8 @@
           "input_tokens",
           "message_count",
           "model",
+          "model_profile_id",
+          "model_profile_revision",
           "name",
           "output_tokens",
           "parent_frame_id",
@@ -34945,6 +35008,21 @@
           "job_id": {
             "type": "string"
           },
+          "model_binding": {
+            "properties": {
+              "model_profile_id": {
+                "type": "string"
+              },
+              "model_profile_revision": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model_profile_id",
+              "model_profile_revision"
+            ],
+            "type": "object"
+          },
           "owner": {
             "properties": {
               "id": {
@@ -35008,6 +35086,31 @@
           "error",
           "method",
           "path",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "POST /frames/([^/]+)/model-binding [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
           "request_id",
           "status"
         ],

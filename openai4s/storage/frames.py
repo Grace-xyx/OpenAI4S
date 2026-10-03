@@ -1291,7 +1291,8 @@ class FrameRepository:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT frame_id,parent_id,root_frame_id,project_id,folder_id,"
-                "kind,name,task_summary,model,status,depth,input_tokens,"
+                "kind,name,task_summary,model,model_profile_id,"
+                "model_profile_revision,status,depth,input_tokens,"
                 "output_tokens,cost_usd,created_at,updated_at FROM frames"
                 + where
                 + " ORDER BY created_at DESC, frame_id DESC LIMIT ?",
