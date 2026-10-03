@@ -106,6 +106,37 @@ describe("following the browser's language", () => {
     expect(runtime.langPreference()).toBe("system");
     expect(runtime.LANG).toBe("zh");
   });
+
+  it("a refused write overrides an older readable preference for this page", async () => {
+    storage({ "os-lang": "zh" });
+    localStorage.setItem = () => {
+      throw new Error("QuotaExceededError");
+    };
+    browser(["zh-CN"]);
+    const runtime = await freshRuntime();
+    await runtime.setLang("en");
+
+    expect(runtime.langPreference()).toBe("en");
+    expect(runtime.LANG).toBe("en");
+    await runtime.syncSystemLanguage();
+    expect(runtime.LANG).toBe("en");
+  });
+
+  it("System follows language changes even if the old preference cannot be removed", async () => {
+    storage({ "os-lang": "zh" });
+    localStorage.removeItem = () => {
+      throw new Error("SecurityError");
+    };
+    browser(["en-US"]);
+    const runtime = await freshRuntime();
+    await runtime.setLang("system");
+
+    expect(runtime.langPreference()).toBe("system");
+    expect(runtime.LANG).toBe("en");
+    browser(["zh-CN"]);
+    await runtime.syncSystemLanguage();
+    expect(runtime.LANG).toBe("zh");
+  });
 });
 
 describe("another tab", () => {

@@ -885,6 +885,46 @@ def test_deleting_the_active_profile_releases_a_rotated_live_key_too(gateway):
 
 
 @pytest.mark.stubbed_backend
+@pytest.mark.parametrize("removal", ["disconnect", "reprovision", "edit"])
+@pytest.mark.parametrize("retained_by", ["none", "profile", "card"])
+def test_removing_an_active_plan_releases_its_rotated_live_copy(
+    gateway, removal, retained_by
+):
+    _cfg_, store, call = gateway
+    assert call("POST", "/volcengine/configure", {"plan_key": "agent-plan"})[0] == 201
+    profile_id = store.get_setting("volcengine_model_profile_id")
+    rotated = "agent-plan-live-rotated-key"
+    assert call("POST", "/config/llm", {"api_key": rotated})[0] == 200
+    assert datapro.explicit_agent_plan_key(store) == rotated
+    if retained_by == "profile":
+        _agent_plan_profile(call, key=rotated, name="Retained plan")
+    elif retained_by == "card":
+        datapro.save_agent_plan_key(store, rotated)
+    call.manager.disconnects.clear()
+
+    if removal == "disconnect":
+        assert call("POST", "/volcengine/disconnect", {"confirm": True})[0] == 200
+    elif removal == "reprovision":
+        call.connector.api_key = OTHER_KEY
+        call.connector.plan_key = "coding-plan"
+        assert (
+            call("POST", "/volcengine/configure", {"plan_key": "coding-plan"})[0] == 201
+        )
+    else:
+        body = {"provider": "claude", "base_url": "", "api_key": OTHER_KEY}
+        assert call("PATCH", f"/model-profiles/{profile_id}", body)[0] == 200
+
+    assert store.get_secret_setting("llm_api_key") != rotated
+    assert datapro.explicit_agent_plan_key(store) == (
+        "" if retained_by == "none" else rotated
+    )
+    if retained_by == "none":
+        assert call.manager.disconnects == [
+            (datapro.CONNECTOR_ID, datapro.runtime_cache_scope(store))
+        ]
+
+
+@pytest.mark.stubbed_backend
 def test_no_agent_plan_means_no_broker_touch_and_no_warning(
     tmp_path, monkeypatch, capsys
 ):

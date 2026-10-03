@@ -34,7 +34,7 @@ export const I18N: { zh: I18nDict; en: I18nDict } = { zh: {}, en: {} };
  * blocked, a pick used to be forgotten at once, so the language control showed
  * "system" over an explicit choice and a browser language change undid it.
  */
-let sessionPick: Lang | null = null;
+let sessionPick: LangPreference | null = null;
 
 /** The language the user picked in this browser, or null when they never did. */
 export function savedLang(): Lang | null {
@@ -77,7 +77,7 @@ export function detectLang(): Lang {
 
 /** What the language control shows: a saved pick, or "system" when there is none. */
 export function langPreference(): LangPreference {
-  return savedLang() ?? sessionPick ?? "system";
+  return sessionPick ?? savedLang() ?? "system";
 }
 
 export let LANG: Lang = detectLang();
@@ -289,7 +289,8 @@ export async function setLang(lang: string): Promise<void> {
     try {
       localStorage.removeItem("os-lang");
     } catch {
-      /* ignore missing storage */
+      // The old value may still be readable even though removal was refused.
+      sessionPick = "system";
     }
     await applyLang(systemLang());
     return;
