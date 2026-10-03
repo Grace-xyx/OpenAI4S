@@ -7755,6 +7755,59 @@
                     "database": {
                       "type": "string"
                     },
+                    "dataset": {
+                      "properties": {
+                        "concept_doi": {
+                          "type": "string"
+                        },
+                        "declared_checksum": {
+                          "type": "string"
+                        },
+                        "declared_license": {
+                          "type": [
+                            "null",
+                            "string"
+                          ]
+                        },
+                        "declared_size_bytes": {
+                          "type": "integer"
+                        },
+                        "downloaded_bytes": {
+                          "type": "integer"
+                        },
+                        "file_key": {
+                          "type": "string"
+                        },
+                        "file_verification": {
+                          "type": "string"
+                        },
+                        "local_sha256": {
+                          "type": "string"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "record_doi": {
+                          "type": "string"
+                        },
+                        "record_id": {
+                          "type": "string"
+                        },
+                        "undisclosed_field_count": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "concept_doi",
+                        "declared_license",
+                        "file_key",
+                        "local_sha256",
+                        "record_doi",
+                        "record_id",
+                        "undisclosed_field_count"
+                      ],
+                      "type": "object"
+                    },
                     "record_count": {
                       "type": "integer"
                     },
@@ -7769,11 +7822,7 @@
                     }
                   },
                   "required": [
-                    "database",
-                    "record_count",
-                    "request_url",
-                    "retrieved_at",
-                    "undisclosed_field_count"
+                    "database"
                   ],
                   "type": "object"
                 },
@@ -26346,10 +26395,77 @@
         "type": "object"
       }
     },
+    "PATCH /projects/([^/]+) [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "PATCH /projects/([^/]+) [ok]": {
       "schema": {
-        "properties": {},
-        "required": [],
+        "properties": {
+          "context": {
+            "type": "string"
+          },
+          "conversation_count": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_example": {
+            "type": "boolean"
+          },
+          "last_active_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "conversation_count",
+          "created_at",
+          "description",
+          "id",
+          "is_example",
+          "last_active_at",
+          "name",
+          "project_id",
+          "updated_at"
+        ],
         "type": "object"
       }
     },
@@ -46509,10 +46625,77 @@
         "type": "object"
       }
     },
+    "PUT /projects/([^/]+) [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "PUT /projects/([^/]+) [ok]": {
       "schema": {
-        "properties": {},
-        "required": [],
+        "properties": {
+          "context": {
+            "type": "string"
+          },
+          "conversation_count": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_example": {
+            "type": "boolean"
+          },
+          "last_active_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "conversation_count",
+          "created_at",
+          "description",
+          "id",
+          "is_example",
+          "last_active_at",
+          "name",
+          "project_id",
+          "updated_at"
+        ],
         "type": "object"
       }
     },

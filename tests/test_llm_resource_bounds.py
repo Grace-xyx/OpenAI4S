@@ -401,6 +401,103 @@ def test_total_timeout_environment_value_reports_its_own_range(monkeypatch, raw)
         LLMConfig()
 
 
+def test_retry_policy_defaults_match_the_transport_defaults():
+    """The quota bound and the transport both fall back to these constants for
+    configs without the fields; a drift would price three sends and make N."""
+
+    cfg = LLMConfig()
+    assert cfg.max_retries + 1 == transport.DEFAULT_MAX_ATTEMPTS
+    assert cfg.retry_budget_s == transport.DEFAULT_RETRY_BUDGET
+    assert cfg.retry_max_delay_s == transport.DEFAULT_MAX_BACKOFF
+
+
+def test_retry_policy_is_read_from_the_environment_per_construction(monkeypatch):
+    monkeypatch.setenv("OPENAI4S_LLM_MAX_RETRIES", " 6 ")
+    monkeypatch.setenv("OPENAI4S_LLM_RETRY_BUDGET", "180")
+    monkeypatch.setenv("OPENAI4S_LLM_RETRY_MAX_DELAY", "60")
+    cfg = LLMConfig()
+    assert (cfg.max_retries, cfg.retry_budget_s, cfg.retry_max_delay_s) == (
+        6,
+        180.0,
+        60.0,
+    )
+    assert type(cfg.max_retries) is int
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_retries", 0),
+        ("max_retries", 20),
+        ("retry_budget_s", 0),
+        ("retry_budget_s", 3600),
+        ("retry_max_delay_s", 1),
+        ("retry_max_delay_s", 600),
+    ],
+)
+def test_retry_policy_accepts_the_documented_range(field, value):
+    assert getattr(LLMConfig(**{field: value}), field) == value
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_retries", -1),
+        ("max_retries", 21),
+        ("max_retries", True),
+        ("max_retries", 2.5),
+        ("max_retries", "2.5"),
+        ("max_retries", None),
+        ("retry_budget_s", -1),
+        ("retry_budget_s", 3601),
+        ("retry_budget_s", float("nan")),
+        ("retry_budget_s", True),
+        ("retry_max_delay_s", 0),
+        ("retry_max_delay_s", 0.5),
+        ("retry_max_delay_s", 601),
+        ("retry_max_delay_s", float("inf")),
+    ],
+)
+def test_retry_policy_rejects_invalid_values(field, value):
+    with pytest.raises(ValueError):
+        LLMConfig(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("variable", "raw", "message"),
+    [
+        ("OPENAI4S_LLM_MAX_RETRIES", "", "integer from 0 to 20"),
+        ("OPENAI4S_LLM_MAX_RETRIES", "many", "integer from 0 to 20"),
+        ("OPENAI4S_LLM_MAX_RETRIES", "3.0", "integer from 0 to 20"),
+        ("OPENAI4S_LLM_RETRY_BUDGET", "", "finite number from 0 to 3600 seconds"),
+        ("OPENAI4S_LLM_RETRY_BUDGET", "inf", "finite number from 0 to 3600 seconds"),
+        ("OPENAI4S_LLM_RETRY_MAX_DELAY", "abc", "finite number from 1 to 600 seconds"),
+        ("OPENAI4S_LLM_RETRY_MAX_DELAY", "0", "finite number from 1 to 600 seconds"),
+    ],
+)
+def test_retry_policy_environment_value_reports_its_own_range(
+    monkeypatch, variable, raw, message
+):
+    monkeypatch.setenv(variable, raw)
+    with pytest.raises(ValueError, match=message):
+        LLMConfig()
+
+
+def test_retry_policy_survives_dataclass_replace():
+    """Delegated children, pinned profiles and reviewers are ``replace()``d
+    from the turn's config; ``__post_init__`` re-runs on the parsed values."""
+
+    import dataclasses
+
+    parent = LLMConfig(max_retries=6, retry_budget_s=180, retry_max_delay_s=60)
+    child = dataclasses.replace(parent, model="child-model")
+    assert (child.max_retries, child.retry_budget_s, child.retry_max_delay_s) == (
+        6,
+        180.0,
+        60.0,
+    )
+
+
 @pytest.mark.parametrize("seconds", [0, -1, float("nan"), float("inf"), True, "x"])
 def test_request_timeout_is_refused_before_it_reaches_the_exchange(seconds):
     """``timeout_s`` becomes ``HTTPExchangeDeadline(idle_timeout=...)``, which

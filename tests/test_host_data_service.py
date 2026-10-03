@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -727,6 +728,35 @@ def test_single_user_artifact_path_keeps_direct_path_compatibility(tmp_path):
     assert service.artifact_path("v-direct") == str(direct)
     assert service.artifact_snapshot_path("v-direct") == str(direct)
     assert not (tmp_path / "data" / "kernel-artifact-inputs").exists()
+
+
+@pytest.mark.parametrize("encode", [lambda s: s, json.dumps])
+def test_a_cell_cannot_claim_the_importers_verification(tmp_path, encode):
+    """Only the native importer may record that it checked the bytes."""
+    from openai4s.server.retrieval_source import public_source
+
+    service, store, workspace, _config, _frame_id = _real_service(
+        tmp_path, trusted_delivery=False
+    )
+    (workspace / "forged.csv").write_bytes(b"a\n1\n")
+    forged = {
+        "database": "zenodo",
+        "dataset": {
+            "record_doi": "10.5281/zenodo.123",
+            "file_key": "forged.csv",
+            "file_verification": "size_and_source_checksum_verified",
+        },
+    }
+    try:
+        saved = service.save_artifact({"path": "forged.csv", "source": encode(forged)})
+        stored = json.loads(store.version_meta(saved["version_id"])["source"])
+        assert "file_verification" not in stored["dataset"]
+        assert stored["dataset"]["record_doi"] == "10.5281/zenodo.123"
+        projected = public_source(stored)["dataset"]
+        assert "file_verification" not in projected
+        assert projected["file_key"] == "forged.csv"
+    finally:
+        store.close()
 
 
 def test_real_team_store_stages_each_immutable_version_in_session_root(tmp_path):

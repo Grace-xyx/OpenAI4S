@@ -503,9 +503,9 @@ class ChatModel:
         report_lock = threading.Lock()
         reported = False
         outcome: dict[str, Any] = {}
-        call_state = CallState(
-            total_timeout_s=getattr(self.cfg, "total_timeout_s", 600.0)
-        )
+        # This state, not the one ``client.chat`` would build, governs every
+        # Agent turn's sends, so the configured retry policy must ride on it.
+        call_state = CallState.from_config(self.cfg)
         probe.call_state = call_state
 
         def is_cancelled() -> bool:

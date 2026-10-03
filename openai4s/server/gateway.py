@@ -9250,11 +9250,15 @@ class SessionRunner:
         own sentence, which is author-written (a `GatewayError`) or generic by
         construction, never the exception's text.
         """
-        from openai4s.llm.models import LLMError, TransportError
+        from openai4s.llm.models import LLMError, TransportError, llm_retry_outcome
 
         status = getattr(exc, "status", None)
         code = str(getattr(exc, "error_code", "") or "")
         failure_code = llm_failure_code(exc)
+        # How the retry policy ended the call, from typed fields: a capacity
+        # message may say "retried" only when the transport recorded a retry.
+        retry_outcome = llm_retry_outcome(exc)
+        gave_up = retry_outcome != "retried"
         zh = language == "zh"
         if failure_code == "llm_deadline_exceeded":
             return (
@@ -9301,6 +9305,16 @@ class SessionRunner:
                     "configuration problem. Continue this session later or temporarily "
                     "switch models."
                 )
+            if gave_up:
+                return (
+                    "**触发了模型服务的突发流量保护。** 在当前重试策略允许的次数与等待时间内未能恢复；"
+                    "这不是 API Key 配置问题。请稍后在当前会话继续，或临时切换模型。"
+                    if zh
+                    else "**The model provider's burst-traffic protection was triggered.** "
+                    "It did not recover within the retries and waiting the retry policy "
+                    "allows; this is not an API-key configuration problem. Continue this "
+                    "session later or temporarily switch models."
+                )
             return (
                 "**触发了模型服务的突发流量保护。** 系统已自动放慢请求并退避重试；"
                 "这不是 API Key 配置问题。若仍未恢复，请稍后在当前会话继续，或临时切换模型。"
@@ -9311,6 +9325,16 @@ class SessionRunner:
                 "continue this session later or temporarily switch models."
             )
         if failure_code == "llm_upstream_overloaded":
+            if gave_up:
+                return (
+                    "**模型服务当前过载。** 在当前重试策略允许的范围内未能恢复；这不是 API Key 配置问题。"
+                    "请稍后在当前会话继续，或临时切换模型。"
+                    if zh
+                    else "**The model provider is currently overloaded.** It did not "
+                    "recover within what the retry policy allows; this is not an "
+                    "API-key configuration problem. Continue this session later or "
+                    "temporarily switch models."
+                )
             return (
                 "**模型服务当前过载。** 系统已自动退避重试；这不是 API Key 配置问题。"
                 "请稍后在当前会话继续，或临时切换模型。"
@@ -9329,12 +9353,89 @@ class SessionRunner:
                 "`OPENAI4S_LLM_API_KEY` in `.env` and restart."
             )
         if failure_code == "llm_rate_limited":
+            if getattr(exc, "output_committed", False):
+                return (
+                    "**模型服务正在限流。** 这一轮已经产生部分输出，系统为避免重复执行没有自动重试。"
+                    "请稍后在当前会话继续，或临时切换模型。"
+                    if zh
+                    else "**The model provider is rate-limiting requests.** This turn "
+                    "had already produced partial output, so it was not retried "
+                    "automatically to avoid repeating work. Continue this session "
+                    "later or temporarily switch models."
+                )
+            # The retry policy is the one knob a user on an RPM-limited relay
+            # can turn; name it the way the 408 branch names its timeout --
+            # and name the one that actually stopped the call.
+            if retry_outcome == "deadline":
+                return (
+                    "**模型服务正在限流。** 下一次重试前所需的等待超出了本次调用剩余的总时限，系统没有继续等待。"
+                    "可在 `.env` 调大 `OPENAI4S_LLM_TOTAL_TIMEOUT`（必要时连同 `OPENAI4S_LLM_RETRY_BUDGET`）后重启，"
+                    "或稍后在当前会话继续。"
+                    if zh
+                    else "**The model provider is rate-limiting requests.** The wait "
+                    "before the next retry would not fit in what was left of this "
+                    "call's total timeout, so it stopped waiting. Raise "
+                    "`OPENAI4S_LLM_TOTAL_TIMEOUT` (and, if needed, "
+                    "`OPENAI4S_LLM_RETRY_BUDGET`) in `.env` and restart, or continue "
+                    "this session later."
+                )
+            if retry_outcome == "budget":
+                return (
+                    "**模型服务正在限流。** 下一次重试前所需的等待超出了重试预算，系统没有继续等待。"
+                    "使用限制 RPM 的中转或公益服务时，可在 `.env` 调大 `OPENAI4S_LLM_RETRY_BUDGET`"
+                    "（必要时连同 `OPENAI4S_LLM_MAX_RETRIES`、`OPENAI4S_LLM_RETRY_MAX_DELAY`）后重启，"
+                    "或稍后在当前会话继续。"
+                    if zh
+                    else "**The model provider is rate-limiting requests.** The wait "
+                    "before the next retry exceeded the retry budget, so it stopped "
+                    "waiting. For a relay with a requests-per-minute limit, raise "
+                    "`OPENAI4S_LLM_RETRY_BUDGET` (and, if needed, "
+                    "`OPENAI4S_LLM_MAX_RETRIES` and `OPENAI4S_LLM_RETRY_MAX_DELAY`) "
+                    "in `.env` and restart, or continue this session later."
+                )
+            if retry_outcome == "not_retried":
+                return (
+                    "**模型服务正在限流。** 这次请求没有自动重试（重试次数已用尽，或 `OPENAI4S_LLM_MAX_RETRIES` 为 0）。"
+                    "可在 `.env` 调大 `OPENAI4S_LLM_MAX_RETRIES` 后重启，或稍后在当前会话继续、更换模型。"
+                    if zh
+                    else "**The model provider is rate-limiting requests.** This request "
+                    "was not retried automatically (no retries were left, or "
+                    "`OPENAI4S_LLM_MAX_RETRIES` is 0). Raise "
+                    "`OPENAI4S_LLM_MAX_RETRIES` in `.env` and restart, or continue "
+                    "this session later or switch models."
+                )
+            if retry_outcome == "request_limit":
+                return (
+                    "**模型服务正在限流。** 已达到本次单次请求的发送上限，无法继续自动重试。"
+                    "请稍后在当前会话继续，或临时切换模型。若中转服务不支持流式响应，"
+                    "可在 `.env` 设置 `OPENAI4S_LLM_STREAM=0` 后重启，使非流式请求使用完整重试策略。"
+                    if zh
+                    else "**The model provider is rate-limiting requests.** This request "
+                    "reached its per-request attempt limit, so no further retry was "
+                    "allowed. Continue this session later or temporarily switch models. "
+                    "If the relay does not support streaming, set "
+                    "`OPENAI4S_LLM_STREAM=0` in `.env` and restart so non-streaming "
+                    "requests can use the full retry policy."
+                )
+            retry_note = (
+                (
+                    "系统已按重试策略自动退避重试；"
+                    if zh
+                    else "Automatic backoff retries were attempted under the retry policy. "
+                )
+                if retry_outcome == "retried"
+                else ""
+            )
             return (
-                "**模型服务正在限流。** 系统已自动退避重试；若仍未恢复，请稍后在当前会话继续或更换模型。"
+                f"**模型服务正在限流。** {retry_note}若仍未恢复，请稍后在当前会话继续或更换模型。"
+                "使用限制 RPM 的中转或公益服务时，可在 `.env` 调大 `OPENAI4S_LLM_MAX_RETRIES`、"
+                "`OPENAI4S_LLM_RETRY_BUDGET` 与 `OPENAI4S_LLM_RETRY_MAX_DELAY` 后重启。"
                 if zh
-                else "**The model provider is rate-limiting requests.** Automatic "
-                "backoff retries were attempted; if it still does not recover, "
-                "continue this session later or switch models."
+                else f"**The model provider is rate-limiting requests.** {retry_note}"
+                "If it still does not recover, continue this session later or switch models. "
+                "For a relay with a requests-per-minute limit, raise "
+                "`OPENAI4S_LLM_MAX_RETRIES`, `OPENAI4S_LLM_RETRY_BUDGET` and "
+                "`OPENAI4S_LLM_RETRY_MAX_DELAY` in `.env` and restart."
             )
         if status == 408:
             return (
@@ -16370,6 +16471,14 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     self._json(runner.delete_project(pid))
                     return
                 if method in ("PUT", "PATCH"):
+                    # An UPDATE naming no row succeeds, and `_project_json({})`
+                    # is `{}`, so an edit of a project that does not exist
+                    # answered 200 -- indistinguishable from an edit that
+                    # landed. Same sentence as the team project guard's, which
+                    # already answers this for a non-participant (INV-13):
+                    # missing and not-yours must not read differently.
+                    if store.get_project(pid) is None:
+                        raise GatewayError(404, "project not found")
                     store.update_project(
                         pid,
                         **{
@@ -16378,7 +16487,10 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                             if k in ("name", "description", "context")
                         },
                     )
-                    self._json(_project_json(store.get_project(pid) or {}))
+                    project = store.get_project(pid)
+                    if project is None:  # deleted between the check and this read
+                        raise GatewayError(404, "project not found")
+                    self._json(_project_json(project))
                     return
                 if method == "GET":
                     p = store.get_project(pid)
@@ -18205,7 +18317,8 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                                     {"retrieval_source": projected}
                                     if (
                                         projected := retrieval_source.public_source(
-                                            v.get("source")
+                                            v.get("source"),
+                                            artifact_sha256=v.get("checksum"),
                                         )
                                     )
                                     else {}

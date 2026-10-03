@@ -8,6 +8,7 @@ and routing envelope and delegates the domain behaviour here.
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -159,6 +160,32 @@ _VALID_MARKER_ID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+
+
+def _cell_declared_source(source: Any) -> Any:
+    """A cell may say where its data came from, not that the Host checked it.
+
+    `dataset.file_verification` records a check the native dataset importer ran
+    on bytes it downloaded itself, and that receipt reaches the Store only
+    through Host-owned capture. Accepted here, any script could store
+    "size_and_source_checksum_verified" and Version history rendered it as
+    "Size and source checksum matched", indistinguishable from a real import.
+    """
+    declared = source
+    if isinstance(source, str):
+        try:
+            declared = json.loads(source)
+        except ValueError:
+            return source
+    if not isinstance(declared, dict):
+        return source
+    dataset = declared.get("dataset")
+    if not isinstance(dataset, dict) or "file_verification" not in dataset:
+        return source
+    return {
+        **declared,
+        "dataset": {k: v for k, v in dataset.items() if k != "file_verification"},
+    }
 
 
 def _artifact_directory_flags() -> int:
@@ -1487,7 +1514,7 @@ class HostDataService:
                 frame_id=self._frame_id(),
                 snapshot_path=str(destination),
                 input_version_ids=input_version_ids,
-                source=spec.get("source"),
+                source=_cell_declared_source(spec.get("source")),
                 reuse_policy="provisional",
                 **({"reuse_matching_head": True} if trusted_delivery else {}),
             )

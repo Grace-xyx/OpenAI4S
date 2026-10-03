@@ -36,6 +36,16 @@ scripts.
   local capture observation. The scoped lineage view projects the latest
   version's path-free producer frame, so delegated code/native outputs show the
   real child frame without fabricating a root Notebook Cell or view-code link.
+- **Dataset source records** — open an Artifact's **Version history** to inspect
+  the dataset metadata saved with each version: exact record and version-family
+  DOI, source file, declared license/access, declared size/checksum, recorded
+  downloaded bytes and import check. The recorded file SHA-256 is separate from
+  the metadata-response fingerprint. Unknown values remain explicit; sensitive
+  values are redacted and clipped values are identified. A record link opens
+  the source page without fetching the dataset; redacted or clipped URLs remain
+  text. These are recorded declarations,
+  which scripts can also supply, not an independent certification of the data.
+  Historical rows keep their own source record after a new version or restart.
 - **Interactive HTML previews on loopback** — the default Workbench requests
   a signed grant before navigating a report's frame anywhere, then runs the
   report on the other loopback hostname at the daemon's port; a granted URL
