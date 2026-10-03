@@ -2071,6 +2071,71 @@ def test_quota_trim_stops_at_exactly_the_excess(tmp_path):
         store.close()
 
 
+def test_one_owners_jobs_never_clear_another_owners_output(tmp_path):
+    """Team mode shares one Store, so the output quota is per owner.
+
+    Here alice holds 80 bytes and is within the 100-byte quota. bob holds
+    120, an excess of 20, so bob's oldest row goes and nothing of alice's
+    does. With one table-wide cap the oldest rows overall went first, and
+    both of alice's rows went before any of bob's: one member running
+    background cells could erase another member's stored output.
+    """
+
+    from openai4s.storage.background_execs import BackgroundExecReceiptRepository
+
+    _cfg, store = _cfg_store(tmp_path)
+    repo = BackgroundExecReceiptRepository(
+        store._conn,
+        store._lock,
+        clock_ms=lambda: 10_000,
+        max_output_bytes=80,
+        max_total_output_bytes=100,
+        terminal_ttl_ms=10**12,
+    )
+    rows = (
+        ("alice", "exec-a1", "A", 1_000),
+        ("alice", "exec-a2", "B", 2_000),
+        ("bob", "exec-b1", "C", 3_000),
+        ("bob", "exec-b2", "D", 4_000),
+        ("bob", "exec-b3", "E", 5_000),
+    )
+    try:
+        for owner, exec_id, body, ended_at in rows:
+            repo.begin(
+                exec_id=exec_id,
+                root_frame_id=f"root-{owner}",
+                frame_id=f"root-{owner}",
+                owner_user_id=owner,
+                daemon_instance="daemon-a",
+                origin="agent",
+                code_sha256="ab" * 32,
+                code_chars=1,
+            )
+            repo.finish(
+                exec_id,
+                status="done",
+                error=None,
+                interrupted=False,
+                ended_at=ended_at,
+                output=body * 40,
+                truncated=False,
+            )
+        report = repo.prune(10_000, current_instance="daemon-a")
+        assert report["cleared"] == 1
+        outputs = dict(
+            store._conn.execute(
+                "SELECT exec_id, output FROM background_exec_receipts"
+            ).fetchall()
+        )
+        assert outputs["exec-a1"] == "A" * 40
+        assert outputs["exec-a2"] == "B" * 40
+        assert outputs["exec-b1"] == ""
+        assert outputs["exec-b2"] == "D" * 40
+        assert outputs["exec-b3"] == "E" * 40
+    finally:
+        store.close()
+
+
 def test_a_failed_launch_whose_receipt_write_fails_reads_unknown(tmp_path):
     """The spawn fails and so does the `launch_failed` write.
 

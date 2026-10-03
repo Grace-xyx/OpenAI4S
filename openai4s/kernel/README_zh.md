@@ -45,7 +45,7 @@
 - [`manager.py`](manager.py) 用 [`security/sandbox.py`](../security/sandbox.py) 包住 worker。无法建立隔离时，`enforce` 失败即拒绝；单用户的 `auto` 在真实自测失败后仍可能继续运行，但状态会明确标成降级或 unavailable。团队读取策略即使在 `auto` 下也是强制边界，`off` 或降级都会拒绝。它遮住 daemon 数据、其他成员的 data-root 个人区和系统临时目录中的旧 kernel，同时用精确只读例外保留源码目录、所选 Python/R runtime、已授权 sidecar 与本会话 Artifact 输入。这是受管数据隔离，不代表同 UID 下任意宿主文件都不可读。
 - 工作区里的 Python 代码本来就是全能的，这是有意为之。[`environment.py`](environment.py) 能挡住已识别的 secret 被继承，但它没办法让任意 Cell 代码变得可信。
 - R worker 靠 `jsonlite` 解析入站请求。缺这个包时它会发出结构化错误；无论如何，它始终只是分析通道。R Cell 和 Python Cell 走的是同一个执行前分类器，它的动态加载词表现在也认 `dyn.load` 和 `library.dynam`：以前一次多步的加载器逃逸到底会不会被筛，取决于这个 Cell 要的是哪个内核。
-- 后台执行走独立 worker。进程内的任务表（最多十六个在跑，peek 缓冲区封顶）是空闲释放认定「活跃」的依据。Web 会话另外留一条 SQLite 收据：每个任务最多 256 KiB stdout，全部任务合计 128 MiB，终态之后七天删除。worker 不会跨重启继续跑，不会重放，CLI 任务不入库。
+- 后台执行走独立 worker。进程内的任务表（最多十六个在跑，peek 缓冲区封顶）是空闲释放认定「活跃」的依据。Web 会话另外留一条 SQLite 收据：每个任务最多 256 KiB stdout，每个用户的全部任务合计 128 MiB，终态之后七天删除。worker 不会跨重启继续跑，不会重放，CLI 任务不入库。
 - 溯源和 guards 都是观察性的：尽力而为，不保证覆盖。不支持的对象、库、native 转换，或者显式关闭，都可能让血缘不完整。
 - Recovery 不会序列化一个存活的 Python/R 命名空间。它建立新的 generation，只重放保守接受的步骤并校验 manifest，因此可能如实返回部分恢复。
 - supervisor 的 interrupt/restart 必须带上精确的 lease，并走 session 的执行 barrier。绕开这些所有权规则，就会和 manager 那唯一的 frame 读取方发生竞态。

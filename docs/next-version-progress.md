@@ -853,9 +853,10 @@ manual end-to-end run named in the row where one applies.
   read unknown is read again by id first, because its owner leaves the live
   set only after its terminal write commits. A cleanup pass (first use of any
   `exec_*` tool in a session runtime, then after a terminal write, at most
-  every ten minutes) marks other daemons' unfinished rows, trims output to
-  128 MiB and drops terminal rows older than seven days; a failing pass
-  touches no job. `HostDispatcher._bg` enables
+  every ten minutes) marks other daemons' unfinished rows, trims each
+  owner's output to 128 MiB (per `owner_user_id`, so in team mode one member's
+  jobs never clear another's) and drops terminal rows older than seven days;
+  a failing pass touches no job. `HostDispatcher._bg` enables
   receipts only for the Web session dispatcher
   (`gateway._configure_background_kernel_factory` sets `durable_background`),
   and `_m_exec_peek` / `_m_exec_list` / `_m_exec_interrupt` fall back to the

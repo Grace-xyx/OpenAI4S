@@ -227,9 +227,10 @@ uses background execution (`exec_background`, `exec_peek`, `exec_list`, or
 every ten minutes in that process. Each pass first stores `outcome_unknown` on
 rows that another daemon process left unfinished, with `ended_at` set to the
 time of that pass; from then on they are terminal rows like any other. It
-then clears the output of the oldest terminal rows until the table's stored
-output is within 128 MiB, and deletes terminal rows that ended more than seven
-days ago. A pass never deletes an unfinished row. Between passes the table can
+then clears the output of each owner's oldest terminal rows until that
+owner's stored output is within 128 MiB, and deletes terminal rows that ended
+more than seven days ago. The output quota is per owner: in team mode one
+member's background jobs never clear another member's stored output. A pass never deletes an unfinished row. Between passes the table can
 run over either limit.
 
 A row that had not finished reads as `outcome_unknown` when another daemon

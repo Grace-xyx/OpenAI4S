@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping
 from openai4s.storage.migrations import apply_ddl_script
 
 MAX_PERSISTED_OUTPUT_BYTES = 256 * 1024
+# Per owner (``owner_user_id``), not per table; see ``_clear_quota_locked``.
 MAX_TOTAL_OUTPUT_BYTES = 128 * 1024 * 1024
 TERMINAL_TTL_MS = 7 * 24 * 60 * 60 * 1000
 MAX_ERROR_CHARS = 2000
@@ -374,10 +375,11 @@ class BackgroundExecReceiptRepository:
     def prune(self, now: int, *, current_instance: str) -> dict[str, int]:
         """Mark foreign non-terminal rows, drop expired terminals, trim output.
 
-        Non-terminal rows are never deleted. Output is cleared from the oldest
-        terminal row first until the stored total is within the quota. Victims
-        are chosen in one ordered read and cleared in fixed-size batches, so
-        the total is not recomputed once per row.
+        Non-terminal rows are never deleted. Output is cleared from each
+        owner's oldest terminal row first until that owner's stored total is
+        within the quota. Victims are chosen in one ordered read per owner
+        over quota and cleared in fixed-size batches, so a total is not
+        recomputed once per row.
         """
 
         moment = int(now)
@@ -407,32 +409,45 @@ class BackgroundExecReceiptRepository:
         }
 
     def _clear_quota_locked(self, moment: int) -> int:
-        """Clear oldest terminal output until the stored total is in quota.
+        """Clear each owner's oldest terminal output until it is in quota.
 
-        Caller holds the repository lock. Order matches the previous per-row
-        loop: ``ended_at``, then ``created_at``, then ``exec_id``. One read
-        selects every victim; updates run in fixed-size batches.
+        The quota applies per ``owner_user_id``. Rows with no owner form one
+        group, which in single-user mode is every row. With one shared table
+        cap, any team member who could run background cells could clear the
+        stored output of every other member. Now one owner's jobs only ever
+        clear that owner's own rows.
+
+        Caller holds the repository lock. Within an owner the order matches
+        the previous per-row loop: ``ended_at``, then ``created_at``, then
+        ``exec_id``. Updates run in fixed-size batches.
         """
 
-        total = self._output_total_locked()
-        excess = total - self._max_total_output_bytes
-        if excess <= 0:
+        over = self._conn.execute(
+            "SELECT owner_user_id, COALESCE(SUM(output_bytes), 0) AS total "
+            "FROM background_exec_receipts GROUP BY owner_user_id "
+            "HAVING COALESCE(SUM(output_bytes), 0) > ?",
+            (self._max_total_output_bytes,),
+        ).fetchall()
+        if not over:
             return 0
         terminals = tuple(sorted(TERMINAL_STATUSES))
         marks = ",".join("?" for _ in terminals)
-        victims = self._conn.execute(
-            "SELECT exec_id, output_bytes FROM background_exec_receipts "
-            f"WHERE status IN ({marks}) AND output_bytes>0 "
-            "ORDER BY ended_at ASC, created_at ASC, exec_id ASC",
-            terminals,
-        ).fetchall()
         chosen: list[str] = []
-        freed = 0
-        for victim in victims:
-            if freed >= excess:
-                break
-            chosen.append(str(victim["exec_id"]))
-            freed += int(victim["output_bytes"] or 0)
+        for group in over:
+            excess = int(group["total"] or 0) - self._max_total_output_bytes
+            victims = self._conn.execute(
+                "SELECT exec_id, output_bytes FROM background_exec_receipts "
+                f"WHERE owner_user_id IS ? AND status IN ({marks}) "
+                "AND output_bytes>0 "
+                "ORDER BY ended_at ASC, created_at ASC, exec_id ASC",
+                (group["owner_user_id"], *terminals),
+            ).fetchall()
+            freed = 0
+            for victim in victims:
+                if freed >= excess:
+                    break
+                chosen.append(str(victim["exec_id"]))
+                freed += int(victim["output_bytes"] or 0)
         cleared = 0
         batch = 400
         for start in range(0, len(chosen), batch):
@@ -446,12 +461,6 @@ class BackgroundExecReceiptRepository:
             )
             cleared += int(result.rowcount or 0)
         return cleared
-
-    def _output_total_locked(self) -> int:
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(output_bytes), 0) FROM background_exec_receipts"
-        ).fetchone()
-        return int(row[0] or 0)
 
     def _public(self, row: Any, *, current_instance: str) -> dict[str, Any] | None:
         if row is None:
