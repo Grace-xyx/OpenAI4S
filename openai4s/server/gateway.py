@@ -16659,6 +16659,11 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     if chosen
                     else runner.rebind_model_revision(frame_id)
                 )
+                # The session may have been deleted after the mutation gate
+                # or while the pin was written. SQLite accepts a zero-row
+                # UPDATE, so a successful call alone is not a saved switch.
+                if store.get_frame(frame_id) is None:
+                    raise GatewayError(404, "session not found", "not_found")
                 self._json({"ok": True, "binding": binding})
                 return
             m = re.fullmatch(r"/model-profiles/([^/]+)/probe", sub)

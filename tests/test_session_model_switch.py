@@ -340,8 +340,10 @@ def test_an_unknown_session_or_a_child_frame_is_refused(api):
     runner, call = api
     frame, _a, b = _two_profiles(runner, call)
 
-    missing = call("POST", "/frames/no-such-frame/model-binding", {"model_id": b})
-    assert missing["code"] == 404, missing
+    for body in (None, {"model_id": b}):
+        missing = call("POST", "/frames/no-such-frame/model-binding", body)
+        assert missing["code"] == 404, missing
+        assert missing["body"]["error"] == "session not found"
 
     child = runner.store.new_frame(
         parent_id=frame,
@@ -353,6 +355,39 @@ def test_an_unknown_session_or_a_child_frame_is_refused(api):
     assert refused["code"] == 400, refused
     assert refused["body"].get("code") == "not_a_session_root", refused
     assert not (runner.store.get_frame(child) or {}).get("model_profile_id")
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize("delete_when", ["before", "after"])
+@pytest.mark.parametrize("selection", ["profile", "live", "bodiless"])
+def test_a_session_deleted_during_a_model_switch_cannot_report_success(
+    api, monkeypatch, delete_when, selection
+):
+    runner, call = api
+    frame, _a, b = _two_profiles(runner, call)
+    live = call("GET", "/models")["body"]["models"]["default"][0]["id"]
+    body = (
+        {"model_id": b if selection == "profile" else live}
+        if selection != "bodiless"
+        else None
+    )
+    update_frame = runner.store.update_frame
+
+    def delete_during_write(frame_id, **kwargs):
+        if frame_id == frame and delete_when == "before":
+            runner.store.delete_frame(frame)
+        result = update_frame(frame_id, **kwargs)
+        if frame_id == frame and delete_when == "after":
+            runner.store.delete_frame(frame)
+        return result
+
+    monkeypatch.setattr(runner.store, "update_frame", delete_during_write)
+    refused = call("POST", f"/frames/{frame}/model-binding", body)
+
+    assert refused["code"] == 404, refused
+    assert refused["body"]["error"] == "session not found"
+    assert refused["body"]["code"] == "not_found"
+    assert runner.store.get_frame(frame) is None
 
 
 def test_with_no_profile_active_the_live_entry_leaves_the_session_unpinned(api):

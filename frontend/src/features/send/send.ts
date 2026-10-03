@@ -47,7 +47,7 @@ import {
 } from "../chrome/upload";
 import { loadSkillsCatalog } from "../autocomplete/catalog";
 import { effProject } from "../customize/host";
-import { composerChoiceMark, noteAdmittedModelBinding, noteSessionModelBinding } from "../customize/models";
+import { composerChoiceMark, composerModelChoicePending, modelT, noteAdmittedModelBinding, noteSessionModelBinding } from "../customize/models";
 import { $, el } from "../messages/dom";
 import { down } from "../messages/scroll";
 import { runtimeSummary } from "../notebook/kernel";
@@ -183,6 +183,10 @@ export const SUBMISSION_GRACE_MS = 5000;
 export async function send(text?: string | null, opts?: { execute?: boolean }): Promise<void> {
   text = (text || "").trim();
   opts = opts || {};
+  if (composerModelChoicePending()) {
+    hint(modelT("model.session.pending"), false, true);
+    return;
+  }
   const queueing = running.value;
   const runtime = runtimeSummary();
   if (currentId.value && runtime.viewOnly && runtime.trustState === "quarantined") {
@@ -354,6 +358,12 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
   // there is no dispatch frame. It is here so the pinned id is a `string` for
   // every use below, where reading `currentId` again is the bug being fixed.
   if (!dispatchFrameId) return;
+  // A choice may have started during the upload/catalog/session preflight.
+  // Keep the draft and annotations until that configuration is saved.
+  if (composerModelChoicePending()) {
+    hint(modelT("model.session.pending"), false, true);
+    return;
+  }
   // Mint the admission id before this send changes any state: minting can
   // refuse (no platform CSPRNG), and refusing after the draft was cleared and
   // the turn locked would strand the composer behind a turn never posted.

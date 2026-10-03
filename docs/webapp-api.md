@@ -459,7 +459,8 @@ profile says today.
   since changed and is `409 model_selection_stale`, not quietly answered with
   whatever is active now. The target's credential is checked before the old
   pin is dropped (`409 model_profile_needs_key`, pin untouched); a deleted
-  profile's id is `404 model_profile_not_found`; an unknown session is `404`
+  profile's id is `404 model_profile_not_found`; an unknown session, including
+  one deleted while the binding is being saved, is `404 session not found`
   and a delegated child frame `400 not_a_session_root` (dispatch reads the
   root's pin); a `model_id` that is not a string is `400 invalid_model_id`.
   It is session-scoped: the instance default is the selector's separate
@@ -473,6 +474,9 @@ profile says today.
   and the pair is dropped when the turn's lease ends; the switch applies from
   the next turn. Re-pinning stays a request someone makes on this route — a
   `model` sent with a message is still never consent.
+  The workbench saves re-pins and default changes in order. While a choice is
+  still pending, Send preserves the draft and asks the user to retry after the
+  save finishes, so admission cannot silently use the previous configuration.
 - An install with no profiles at all (driven by `.env`) binds nothing and runs.
   An absent profile is an absent binding, not an error.
 

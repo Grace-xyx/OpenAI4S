@@ -29,6 +29,7 @@ function options(tree: Node): Node[] {
 beforeEach(() => {
   resetStoreFields();
   resetSessionModelState();
+  let savedDefault = "doubao-seed-2.0-pro";
   fetchMock.mockReset().mockImplementation((url: string, init?: RequestInit) => {
     if (url === "/api/v1/models") {
       return Promise.resolve(
@@ -39,12 +40,13 @@ beforeEach(() => {
               { id: "mp-claude", name: "Claude", model: "claude-sonnet-4-5" },
             ],
           },
-          default_model_id: "doubao-seed-2.0-pro",
+          default_model_id: savedDefault,
         }),
       );
     }
     if (url === "/api/v1/models/default" && init?.method === "PUT") {
-      return Promise.resolve(response({ default_model_id: "mp-claude" }));
+      savedDefault = String(JSON.parse(String(init.body)).model_id);
+      return Promise.resolve(response({ default_model_id: savedDefault }));
     }
     return Promise.resolve(response({}, 404));
   });
@@ -334,6 +336,32 @@ describe("#model-select with a session open", () => {
     await vi.waitFor(() => expect(sent().map(([url]) => url)).toContain("/api/v1/models/default"));
   });
 
+  it("does not overtake a re-pin that takes more than fifteen seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const answers: Array<(value: Response) => void> = [];
+      route(() => response({}));
+      const routed = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+        url.endsWith("/model-binding")
+          ? new Promise<Response>((resolve) => answers.push(resolve))
+          : routed(url, init),
+      );
+      const first = chooseComposerModel("mp-claude");
+      const second = chooseComposerModel("doubao-seed-2.0-pro");
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(answers).toHaveLength(1);
+      answers[0]!(response({ binding: { model_profile_id: "mp-claude", model_profile_revision: 4 } }));
+      await first;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answers).toHaveLength(2);
+      answers[1]!(response({ binding: { model_profile_id: "", model_profile_revision: 0 } }));
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a refusal for a session the user has left leaves the open one alone", async () => {
     let refuse: (value: Response) => void = () => {};
     route(() => response({}));
@@ -444,15 +472,58 @@ describe("#model-select keeps up with the session and the list", () => {
     expect(defaultModel.value).toBe("doubao-seed-2.0-pro");
     const first = chooseComposerModel("mp-claude");
     const second = chooseComposerModel("mp-third");
-    await second;
+    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(1));
     expect(defaultModel.value).toBe("mp-third");
     refuse(response({ error: "no" }, 409));
     await first;
+    await second;
     expect(defaultModel.value).toBe("mp-third");
   });
 });
 
 describe("#model-select with no session open", () => {
+  it("persists quick default choices in order", async () => {
+    const answers: Array<() => void> = [];
+    let savedDefault = "doubao-seed-2.0-pro";
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith("/default")) {
+        const chosen = String(JSON.parse(String(init?.body)).model_id);
+        return new Promise<Response>((resolve) => answers.push(() => {
+          savedDefault = chosen;
+          resolve(response({ default_model_id: chosen }));
+        }));
+      }
+      return Promise.resolve(response({
+        models: { default: [{ id: "alpha" }, { id: "beta" }] },
+        default_model_id: savedDefault,
+      }));
+    });
+    const first = chooseComposerModel("alpha");
+    const second = chooseComposerModel("beta");
+    await vi.waitFor(() => expect(answers).toHaveLength(1));
+    answers[0]!();
+    await first;
+    await vi.waitFor(() => expect(answers).toHaveLength(2));
+    answers[1]!();
+    await second;
+    expect(savedDefault).toBe("beta");
+    expect(defaultModel.value).toBe("beta");
+  });
+
+  it("ignores a model list read before a newer choice", async () => {
+    await loadModels();
+    const routed = fetchMock.getMockImplementation()!;
+    let stale: (value: Response) => void = () => {};
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { stale = resolve; }));
+    const reading = loadModels();
+    fetchMock.mockImplementation(routed);
+    await chooseComposerModel("mp-claude");
+    stale(response({ models: { default: [{ id: "old" }] }, default_model_id: "old" }));
+    await reading;
+    expect(defaultModel.value).toBe("mp-claude");
+    expect((models.value as Array<{ id: string }>).some((entry) => entry.id === "mp-claude")).toBe(true);
+  });
+
   it("tells a member that the default is an admin's", async () => {
     const hint = vi.fn();
     vi.stubGlobal("window", { hint });

@@ -225,8 +225,10 @@ export function composerModelName(id: unknown): string {
  * post-profile-change refreshes in Customize did nothing.
  */
 export async function loadModels(): Promise<void> {
+  const choice = choiceSeq;
   try {
     const payload = await api("/models");
+    if (choice !== choiceSeq) return;
     const list = readComposerModels(payload);
     models.value = list;
     const wanted = entryText(payload.default_model_id);
@@ -241,7 +243,7 @@ export async function loadModels(): Promise<void> {
     defaultModel.value = chosen;
     defaultModelName.value = chosen ? composerModelName(chosen) : null;
   } catch {
-    models.value = [];
+    if (choice === choiceSeq) models.value = [];
   }
 }
 
@@ -346,7 +348,9 @@ export function noteAdmittedModelBinding(frameId: string, binding: unknown, mark
 export function resetSessionModelState(): void {
   knownPins.clear();
   listRefreshedFor.clear();
-  pinChain = Promise.resolve();
+  modelWriteChain = Promise.resolve();
+  pendingChoices.clear();
+  choiceSeq += 1;
   stopPinWatch?.();
 }
 
@@ -413,6 +417,7 @@ const MODEL_COPY: CopyTable = {
     "model.session.switchedNextTurn":
       "This session uses {0} from your next message; the turn already running keeps its model",
     "model.session.switchFailed": "Could not switch this session's model: {0}",
+    "model.session.pending": "The model change is still saving. Please send again once it finishes.",
     "model.default.adminOnly": "Only an admin can change the default model",
   },
   zh: {
@@ -421,6 +426,7 @@ const MODEL_COPY: CopyTable = {
     "model.session.switched": "该会话已切换到 {0}",
     "model.session.switchedNextTurn": "该会话将从你的下一条消息起使用 {0}；正在运行的这一轮保持原模型",
     "model.session.switchFailed": "未能切换该会话的模型：{0}",
+    "model.session.pending": "模型切换仍在保存，请完成后再发送。",
     "model.default.adminOnly": "只有管理员可以修改默认模型",
   },
 };
@@ -445,6 +451,12 @@ function errorCode(error: unknown): string {
 
 /** Only the latest choice may finish: a quick second pick supersedes the first. */
 let choiceSeq = 0;
+const pendingChoices = new Set<number>();
+
+/** An optimistic selection is not yet the configuration admission will use. */
+export function composerModelChoicePending(): boolean {
+  return pendingChoices.size > 0;
+}
 
 /**
  * The server default only: the stores move at once, a refusal puts them back
@@ -459,7 +471,9 @@ async function chooseDefaultModel(id: string, seq: number): Promise<boolean> {
   defaultModel.value = id;
   defaultModelName.value = composerModelName(id);
   try {
-    await api("/models/default", { method: "PUT", body: JSON.stringify({ model_id: id }) });
+    await queueModelWrite(() =>
+      api("/models/default", { method: "PUT", body: JSON.stringify({ model_id: id }) }),
+    );
   } catch (error) {
     if (seq === choiceSeq) {
       defaultModel.value = previous;
@@ -472,25 +486,17 @@ async function chooseDefaultModel(id: string, seq: number): Promise<boolean> {
 }
 
 /**
- * Session re-pins go out one at a time, in the order they were made. Sent
- * concurrently, two quick picks could be applied by the server in either
- * order, leaving it pinned to the first while the selector showed the second.
+ * Re-pins and default writes share one queue. Concurrent defaults could
+ * otherwise finish in reverse order, even while the selector showed the
+ * newest choice. A slow request must not be overtaken after a timeout: its
+ * server-side write is still capable of undoing a newer choice.
  */
-let pinChain: Promise<unknown> = Promise.resolve();
+let modelWriteChain: Promise<unknown> = Promise.resolve();
 
-/** How long a re-pin waits behind an earlier one before it goes out anyway. */
-const PIN_CHAIN_WAIT_MS = 15_000;
-
-/** `prior` settled, or `ms` passed -- whichever is first. Never rejects. */
-function settledOrTimeout(prior: Promise<unknown>, ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    const done = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    prior.then(done, done);
-  });
+function queueModelWrite(write: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>> {
+  const sent = modelWriteChain.then(write);
+  modelWriteChain = sent.catch(() => undefined);
+  return sent;
 }
 
 /**
@@ -508,6 +514,15 @@ function settledOrTimeout(prior: Promise<unknown>, ms: number): Promise<void> {
  */
 export async function chooseComposerModel(id: string): Promise<boolean> {
   const seq = ++choiceSeq;
+  pendingChoices.add(seq);
+  try {
+    return await applyComposerModel(id, seq);
+  } finally {
+    pendingChoices.delete(seq);
+  }
+}
+
+async function applyComposerModel(id: string, seq: number): Promise<boolean> {
   const frameId = currentId.peek();
   if (!frameId) {
     try {
@@ -524,15 +539,12 @@ export async function chooseComposerModel(id: string): Promise<boolean> {
   setPin({ frameId, profileId: id, revision: 0 });
   let answer: Record<string, unknown>;
   try {
-    // A request that never settles must not hold every later pick hostage.
-    const sent = settledOrTimeout(pinChain, PIN_CHAIN_WAIT_MS).then(() =>
+    answer = await queueModelWrite(() =>
       api(`/frames/${encodeURIComponent(frameId)}/model-binding`, {
         method: "POST",
         body: JSON.stringify({ model_id: id }),
       }),
     );
-    pinChain = sent.catch(() => undefined);
-    answer = await sent;
   } catch (error) {
     if (seq !== choiceSeq) return false;
     if (currentId.peek() === frameId) {
