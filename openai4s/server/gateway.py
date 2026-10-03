@@ -18298,7 +18298,8 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                                     {"retrieval_source": projected}
                                     if (
                                         projected := retrieval_source.public_source(
-                                            v.get("source")
+                                            v.get("source"),
+                                            artifact_sha256=v.get("checksum"),
                                         )
                                     )
                                     else {}

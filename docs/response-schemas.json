@@ -7755,6 +7755,59 @@
                     "database": {
                       "type": "string"
                     },
+                    "dataset": {
+                      "properties": {
+                        "concept_doi": {
+                          "type": "string"
+                        },
+                        "declared_checksum": {
+                          "type": "string"
+                        },
+                        "declared_license": {
+                          "type": [
+                            "null",
+                            "string"
+                          ]
+                        },
+                        "declared_size_bytes": {
+                          "type": "integer"
+                        },
+                        "downloaded_bytes": {
+                          "type": "integer"
+                        },
+                        "file_key": {
+                          "type": "string"
+                        },
+                        "file_verification": {
+                          "type": "string"
+                        },
+                        "local_sha256": {
+                          "type": "string"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "record_doi": {
+                          "type": "string"
+                        },
+                        "record_id": {
+                          "type": "string"
+                        },
+                        "undisclosed_field_count": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "concept_doi",
+                        "declared_license",
+                        "file_key",
+                        "local_sha256",
+                        "record_doi",
+                        "record_id",
+                        "undisclosed_field_count"
+                      ],
+                      "type": "object"
+                    },
                     "record_count": {
                       "type": "integer"
                     },
@@ -7769,11 +7822,7 @@
                     }
                   },
                   "required": [
-                    "database",
-                    "record_count",
-                    "request_url",
-                    "retrieved_at",
-                    "undisclosed_field_count"
+                    "database"
                   ],
                   "type": "object"
                 },
