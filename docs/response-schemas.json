@@ -7760,8 +7760,14 @@
                         "concept_doi": {
                           "type": "string"
                         },
+                        "declared_checksum": {
+                          "type": "string"
+                        },
                         "declared_license": {
-                          "type": "null"
+                          "type": [
+                            "null",
+                            "string"
+                          ]
                         },
                         "declared_size_bytes": {
                           "type": "integer"
