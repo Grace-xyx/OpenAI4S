@@ -122,8 +122,12 @@ export function retrievalSourcePanel(src: Record<string, unknown>): HTMLElement 
       row.appendChild(valueNode);
       section.appendChild(row);
     });
-    if (Array.isArray(dataset.truncated_fields) && dataset.truncated_fields.length)
-      section.appendChild(el("div", "ver-src-note", translate("versions.retrievalTruncated", dataset.truncated_fields.join(", "))));
+    if (Array.isArray(dataset.truncated_fields) && dataset.truncated_fields.length) {
+      // Name a clipped field by the label its row carries, not its wire key.
+      const labels = new Map(fields);
+      const clipped = dataset.truncated_fields.map((field) => labels.get(String(field)) ?? String(field));
+      section.appendChild(el("div", "ver-src-note", translate("versions.retrievalTruncated", clipped.join(", "))));
+    }
     if (typeof dataset.undisclosed_field_count === "number" && dataset.undisclosed_field_count > 0)
       section.appendChild(el("div", "ver-src-note", translate("versions.retrievalWithheld", dataset.undisclosed_field_count)));
     box.appendChild(section);

@@ -192,12 +192,20 @@ class MetadataNode {
   click() {}
 }
 
+/** Render a version's source panel with the inert DOM stub and flatten it. */
+function sourcePanelNodes(src: Record<string, unknown>): MetadataNode[] {
+  vi.stubGlobal("document", { createElement: () => new MetadataNode() });
+  try {
+    const walk = (node: MetadataNode): MetadataNode[] => [node, ...node.children.flatMap(walk)];
+    return walk(retrievalSourcePanel(src) as unknown as MetadataNode);
+  } finally { vi.unstubAllGlobals(); }
+}
+
 it.each(["en", "zh"] as const)("shows dataset identities, unknowns and recorded hashes in %s", async (locale) => {
   const previousLanguage = LANG;
   await setLang(locale);
-  vi.stubGlobal("document", { createElement: () => new MetadataNode() });
   try {
-    const root = retrievalSourcePanel({
+    const nodes = sourcePanelNodes({
       database: "zenodo", response_sha256: "metadata-response-hash",
       dataset: {
         record_doi: "10.5281/zenodo.123", concept_doi: "10.5281/zenodo.122",
@@ -205,9 +213,7 @@ it.each(["en", "zh"] as const)("shows dataset identities, unknowns and recorded 
         declared_size_bytes: 0, local_sha256: "actual-file-hash", file_verification: "not_downloaded",
         title: '<img src=x onerror="bad()">',
       },
-    }) as unknown as MetadataNode;
-    const walk = (node: MetadataNode): MetadataNode[] => [node, ...node.children.flatMap(walk)];
-    const nodes = walk(root);
+    });
     const values = nodes.map((node) => node.textContent);
     expect(values).toContain("10.5281/zenodo.123");
     expect(values).toContain("10.5281/zenodo.122");
@@ -221,46 +227,45 @@ it.each(["en", "zh"] as const)("shows dataset identities, unknowns and recorded 
     expect(values).toContain('<img src=x onerror="bad()">');
     expect(nodes.every((node) => node.innerHTML === "")).toBe(true);
     expect(nodes.find((node) => node.href === "https://zenodo.org/records/123")).toBeDefined();
-  } finally { vi.unstubAllGlobals(); await setLang(previousLanguage); }
+  } finally { await setLang(previousLanguage); }
 });
 
 it.each(["javascript:alert(1)", "https://user:password@example.org/record"])("keeps unsafe source URL %s as text", (url) => {
-  vi.stubGlobal("document", { createElement: () => new MetadataNode() });
-  try {
-    const root = retrievalSourcePanel({ dataset: { record_url: url } }) as unknown as MetadataNode;
-    const walk = (node: MetadataNode): MetadataNode[] => [node, ...node.children.flatMap(walk)];
-    expect(walk(root).some((node) => !!node.href)).toBe(false);
-    expect(walk(root).map((node) => node.textContent)).toContain(url);
-  } finally { vi.unstubAllGlobals(); }
+  const nodes = sourcePanelNodes({ dataset: { record_url: url } });
+  expect(nodes.some((node) => !!node.href)).toBe(false);
+  expect(nodes.map((node) => node.textContent)).toContain(url);
 });
 
 it("does not link to a truncated record URL or infer a successful download", () => {
-  vi.stubGlobal("document", { createElement: () => new MetadataNode() });
+  const nodes = sourcePanelNodes({ dataset: {
+    record_url: "https://zenodo.org/records/12", truncated_fields: ["record_url"],
+    file_verification: null, local_sha256: null,
+  } });
+  expect(nodes.some((node) => !!node.href)).toBe(false);
+  expect(nodes.map((node) => node.textContent)).toContain(filesT("versions.datasetUnknown"));
+  expect(nodes.map((node) => node.textContent)).not.toContain(filesT("versions.datasetChecksMatched"));
+});
+
+it.each(["en", "zh"] as const)("names a clipped dataset field by its %s row label", async (locale) => {
+  const previousLanguage = LANG;
+  await setLang(locale);
   try {
-    const root = retrievalSourcePanel({ dataset: {
-      record_url: "https://zenodo.org/records/12", truncated_fields: ["record_url"],
-      file_verification: null, local_sha256: null,
-    } }) as unknown as MetadataNode;
-    const walk = (node: MetadataNode): MetadataNode[] => [node, ...node.children.flatMap(walk)];
-    const nodes = walk(root);
-    expect(nodes.some((node) => !!node.href)).toBe(false);
-    expect(nodes.map((node) => node.textContent)).toContain(filesT("versions.datasetUnknown"));
-    expect(nodes.map((node) => node.textContent)).not.toContain(filesT("versions.datasetChecksMatched"));
-  } finally { vi.unstubAllGlobals(); }
+    const values = sourcePanelNodes({ dataset: { title: "t", record_url: "u", truncated_fields: ["title", "record_url"] } })
+      .map((node) => node.textContent);
+    const note = translate("versions.retrievalTruncated",
+      `${filesT("versions.datasetTitle")}, ${filesT("versions.datasetRecordUrl")}`);
+    expect(values).toContain(note);
+    expect(values.some((value) => value.includes("record_url"))).toBe(false);
+  } finally { await setLang(previousLanguage); }
 });
 
 it("does not link to a source URL whose private query was redacted", () => {
-  vi.stubGlobal("document", { createElement: () => new MetadataNode() });
-  try {
-    const root = retrievalSourcePanel({ dataset: {
-      record_url: "https://zenodo.org/records/123?api_key=%3Credacted%3Aabc%3E",
-      redacted_fields: ["record_url"],
-    } }) as unknown as MetadataNode;
-    const walk = (node: MetadataNode): MetadataNode[] => [node, ...node.children.flatMap(walk)];
-    const nodes = walk(root);
-    expect(nodes.some((node) => !!node.href)).toBe(false);
-    expect(nodes.map((node) => node.textContent)).toContain("https://zenodo.org/records/123?api_key=%3Credacted%3Aabc%3E");
-  } finally { vi.unstubAllGlobals(); }
+  const nodes = sourcePanelNodes({ dataset: {
+    record_url: "https://zenodo.org/records/123?api_key=%3Credacted%3Aabc%3E",
+    redacted_fields: ["record_url"],
+  } });
+  expect(nodes.some((node) => !!node.href)).toBe(false);
+  expect(nodes.map((node) => node.textContent)).toContain("https://zenodo.org/records/123?api_key=%3Credacted%3Aabc%3E");
 });
 
 async function metadataExportFixture(art: ArtifactRow, read: (url: string) => Promise<Response>, check: (blobs: Blob[], urls: string[]) => Promise<void>) {
