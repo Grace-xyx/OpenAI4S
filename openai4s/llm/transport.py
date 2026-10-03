@@ -383,7 +383,17 @@ def _read_body(response, limit, exchange, state, *, provider, operation):
 def _urlopen(request, *, timeout, exchange):
     """The injectable open seam; real HTTP always uses the shared watchdog."""
     del timeout
-    return exchange.open(exchange.build_opener(), request)
+    # urllib forwards Authorization on a 301/302/303 even when the redirect
+    # changes hosts. A destination-scoped LLM key must not follow a provider's
+    # open redirect to an endpoint nobody configured.
+    return exchange.open(exchange.build_opener(_RejectRedirects), request)
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Keep every LLM request on the endpoint its credential was resolved for."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def _exchange(state, timeout, provider, operation):

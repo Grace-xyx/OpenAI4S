@@ -56,6 +56,29 @@ def is_loopback_endpoint(base_url: Any) -> bool:
         return False
 
 
+def keyless_endpoint(provider: str, model: str, base_url: str) -> bool:
+    """Whether a request to this endpoint is sent with no key at all.
+
+    The rule `chat()` applies (`ModelCapabilities.local_endpoint`: loopback,
+    private, link-local, `.local`), falling back to literal loopback when the
+    protocol is unknown. One implementation for everything that decides a
+    credential -- a model profile, a pinned revision, a delegated child -- so a
+    local server is never handed a cloud key by one of them alone.
+    """
+    try:
+        from openai4s.llm.capabilities import get_model_capabilities
+
+        return bool(
+            get_model_capabilities(
+                provider,
+                str(model or "").strip() or None,
+                base_url=str(base_url or "").strip() or None,
+            ).local_endpoint
+        )
+    except Exception:  # noqa: BLE001 - unknown protocol: the loopback rule
+        return is_loopback_endpoint(base_url)
+
+
 def store_overrides(store: Any) -> dict[str, str]:
     """The Customize → Models settings, read defensively.
 
@@ -123,4 +146,9 @@ def resolve_llm_config(
         return base
 
 
-__all__ = ["is_loopback_endpoint", "resolve_llm_config", "store_overrides"]
+__all__ = [
+    "is_loopback_endpoint",
+    "keyless_endpoint",
+    "resolve_llm_config",
+    "store_overrides",
+]

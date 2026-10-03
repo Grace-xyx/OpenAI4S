@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -105,6 +106,18 @@ _NATIVE_KEY_ENV = {
 }
 
 
+def _provider_env_alias_ambiguous(name: str) -> bool:
+    """Whether two registered ids would read the same shell-safe key name."""
+    registry = sys.modules.get("openai4s.llm.registry")
+    snapshot = getattr(registry, "provider_specs", None)
+    providers = snapshot() if callable(snapshot) else {}
+    alias = name.upper().replace("-", "_")
+    return any(
+        other != name and other.upper().replace("-", "_") == alias
+        for other in providers
+    )
+
+
 def provider_env_api_key(provider: str | None) -> str:
     """The key this process's environment holds for exactly one provider.
 
@@ -118,7 +131,12 @@ def provider_env_api_key(provider: str | None) -> str:
     if not name:
         return ""
     env_name = name.upper().replace("-", "_")
-    for variable in (f"OPENAI4S_{env_name}_API_KEY", *_NATIVE_KEY_ENV.get(name, ())):
+    # `lab-openai` and `lab_openai` are both valid ids but map to one env var.
+    # Neither may claim it when both are registered at different endpoints.
+    variables = (
+        () if _provider_env_alias_ambiguous(name) else (f"OPENAI4S_{env_name}_API_KEY",)
+    ) + _NATIVE_KEY_ENV.get(name, ())
+    for variable in variables:
         value = (os.environ.get(variable) or "").strip()
         if not is_placeholder_api_key(value):
             return value
@@ -276,10 +294,10 @@ class LLMConfig:
                 return field_val
             return os.environ.get(specific) or os.environ.get(generic, "")
 
-        def _resolve_api_key(field_val: str, specific: str, generic: str) -> str:
+        def _resolve_api_key(field_val: str, specific_val: str, generic: str) -> str:
             for raw in (
                 field_val,
-                os.environ.get(specific, ""),
+                specific_val,
                 os.environ.get(generic, ""),
             ):
                 val = (raw or "").strip()
@@ -287,8 +305,11 @@ class LLMConfig:
                     return val
             return ""
 
+        specific_key = ""
+        if not _provider_env_alias_ambiguous(self.provider.strip().lower()):
+            specific_key = os.environ.get(f"OPENAI4S_{p}_API_KEY", "")
         self.api_key = _resolve_api_key(
-            self.api_key, f"OPENAI4S_{p}_API_KEY", "OPENAI4S_LLM_API_KEY"
+            self.api_key, specific_key, "OPENAI4S_LLM_API_KEY"
         )
         self.base_url = _resolve(
             self.base_url, f"OPENAI4S_{p}_BASE_URL", "OPENAI4S_LLM_BASE_URL"

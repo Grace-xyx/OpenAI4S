@@ -7298,6 +7298,7 @@ class SessionRunner:
                     trusted_capture_admission=capture_admission,
                     trusted_capture_lease=capture_lease,
                     env=child_env,
+                    destination_credential=self._child_destination_credential(st),
                 )
                 st.delegation_runner = runner
             else:
@@ -9074,6 +9075,44 @@ class SessionRunner:
         # The Reviewer first resolves its own destination, then applies this
         # same member-key rule. An agent-only key must not refuse that review.
         return self._apply_user_llm_key(config, st) if apply_user_key else config
+
+    def _child_destination_credential(self, st: "SessionState"):
+        """What a delegated child moved off its parent's endpoint may carry.
+
+        The parent's configuration is `_llm_cfg`'s, its key decided for exactly
+        that `(provider, endpoint)`; `openai4s.agent.child_model` keeps it there.
+        A child whose override moves it is answered here by the rule a turn
+        sent to that destination gets: `ModelProfileService.
+        destination_credential` (a saved profile's endpoint, a provider's
+        own configured one, or the daemon's configured endpoint -- anything
+        else is `None` and the child is
+        refused), then the session owner's own key through
+        `_apply_user_llm_key`, the one place that rule lives.
+        """
+        from openai4s.agent.child_model import ChildCredential, ChildModelError
+
+        def resolve(child_llm):
+            credential = ModelProfileService(
+                self.store, self.cfg, providers=lambda: PROVIDERS
+            ).destination_credential(child_llm)
+            if credential is None:
+                return None
+            from dataclasses import replace
+
+            keyed = replace(child_llm)
+            # `replace` refills an empty key from the environment.
+            keyed.api_key = credential.api_key
+            try:
+                chosen = self._apply_user_llm_key(keyed, st)
+            except GatewayError as error:
+                raise ChildModelError(f"delegate: {error.message}") from error
+            if chosen is not keyed:
+                return ChildCredential(chosen.api_key, "member")
+            return ChildCredential(
+                credential.api_key, credential.source, credential.usable
+            )
+
+        return resolve
 
     def _apply_user_llm_key(self, cfg, st: "SessionState | None"):
         """Swap in the session owner's own credential, if they have one (M4-1).
