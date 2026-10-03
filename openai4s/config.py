@@ -125,6 +125,42 @@ def provider_env_api_key(provider: str | None) -> str:
     return ""
 
 
+#: Upper bound on ``OPENAI4S_LLM_MAX_RETRIES``. Quota and Auto Mode reserve
+#: one full request per possible send, so this also caps that multiplier.
+MAX_LLM_RETRIES = 20
+
+
+def _bounded_retry_count(value: object) -> int:
+    message = f"LLM max retries must be an integer from 0 to {MAX_LLM_RETRIES}"
+    # ``bool`` is an ``int``; ``True`` retries is a typo, not a count.
+    if isinstance(value, bool):
+        raise ValueError(message)
+    if isinstance(value, int):
+        count = value
+    elif isinstance(value, str):
+        try:
+            count = int(value.strip())
+        except ValueError as error:
+            raise ValueError(message) from error
+    else:
+        raise ValueError(message)
+    if not 0 <= count <= MAX_LLM_RETRIES:
+        raise ValueError(message)
+    return count
+
+
+def _bounded_seconds(value: object, low: float, high: float, message: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(message)
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(message) from error
+    if not math.isfinite(seconds) or not low <= seconds <= high:
+        raise ValueError(message)
+    return seconds
+
+
 @dataclass
 class LLMConfig:
     """Multi-provider base-model config.
@@ -165,6 +201,23 @@ class LLMConfig:
     total_timeout_s: float = field(
         default_factory=lambda: os.environ.get("OPENAI4S_LLM_TOTAL_TIMEOUT", "600")
     )
+    # Transport retry policy for one logical call; see ``llm/transport.py``.
+    # Parsed in ``__post_init__`` for the same reason as ``total_timeout_s``.
+    # All three stay inside ``total_timeout_s``: the deadline always wins.
+    #: Retries after a failed send that is retryable and committed nothing.
+    #: The send ceiling is this + 1, never below two (see transport).
+    max_retries: int = field(
+        default_factory=lambda: os.environ.get("OPENAI4S_LLM_MAX_RETRIES", "2")
+    )
+    #: Total seconds one logical call may spend waiting between sends.
+    retry_budget_s: float = field(
+        default_factory=lambda: os.environ.get("OPENAI4S_LLM_RETRY_BUDGET", "30")
+    )
+    #: Ceiling on one computed backoff wait. A server's ``Retry-After`` is
+    #: never shortened by it; only ``retry_budget_s`` limits that.
+    retry_max_delay_s: float = field(
+        default_factory=lambda: os.environ.get("OPENAI4S_LLM_RETRY_MAX_DELAY", "8")
+    )
 
     def __post_init__(self) -> None:
         # ``timeout_s`` reaches ``HTTPExchangeDeadline(idle_timeout=...)``,
@@ -201,6 +254,19 @@ class LLMConfig:
                 "LLM total timeout must be a finite number from 1 to 3600 seconds"
             )
         self.total_timeout_s = total_timeout
+        self.max_retries = _bounded_retry_count(self.max_retries)
+        self.retry_budget_s = _bounded_seconds(
+            self.retry_budget_s,
+            0,
+            3600,
+            "LLM retry budget must be a finite number from 0 to 3600 seconds",
+        )
+        self.retry_max_delay_s = _bounded_seconds(
+            self.retry_max_delay_s,
+            1,
+            600,
+            "LLM retry max delay must be a finite number from 1 to 600 seconds",
+        )
         # Provider ids may be hyphenated; environment-variable names use the
         # shell-safe underscore form (``lab-openai`` -> ``LAB_OPENAI``).
         p = self.provider.strip().upper().replace("-", "_")

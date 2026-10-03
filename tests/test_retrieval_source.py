@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from openai4s.server.retrieval_source import (
     ALLOWED_FIELDS,
     MAX_VALUE_CHARS,
@@ -114,6 +116,260 @@ def test_numeric_fields_survive_as_numbers():
     assert out["record_count"] == 42 and isinstance(out["record_count"], int)
 
 
+def test_dataset_projection_preserves_unknowns_and_distinct_hash_scopes():
+    import hashlib
+
+    file_hash = hashlib.sha256(b"measured data").hexdigest()
+    metadata_hash = hashlib.sha256(b"source record response").hexdigest()
+    out = public_source(
+        {
+            "database": "zenodo",
+            "response_sha256": metadata_hash,
+            "dataset": {
+                "record_id": "123",
+                "record_doi": "10.5281/zenodo.123",
+                "concept_doi": "10.5281/zenodo.122",
+                "declared_license": None,
+                "declared_size_bytes": 0,
+                "downloaded_bytes": 0,
+                "file_key": " spectrum.csv ",
+                "local_sha256": file_hash,
+            },
+        },
+        artifact_sha256=file_hash,
+    )
+    # Generic metadata-response digests retain the existing privacy projection.
+    assert "redacted" in out["response_sha256"]
+    assert out["dataset"]["local_sha256"] == file_hash
+    assert out["dataset"]["record_doi"] != out["dataset"]["concept_doi"]
+    assert out["dataset"]["declared_license"] is None
+    assert out["dataset"]["declared_size_bytes"] == 0
+    assert out["dataset"]["file_key"] == " spectrum.csv "
+
+
+def test_hash_shaped_source_value_needs_the_same_version_checksum():
+    import hashlib
+
+    claimed = hashlib.sha256(b"untrusted source field").hexdigest()
+    actual = hashlib.sha256(b"actual artifact").hexdigest()
+    for known in (None, actual):
+        out = public_source(
+            {"dataset": {"local_sha256": claimed}}, artifact_sha256=known
+        )
+        assert claimed not in json.dumps(out)
+        assert "redacted" in out["dataset"]["local_sha256"]
+
+
+def test_dataset_projection_never_serializes_private_or_complex_fields():
+    out = public_source(
+        {
+            "dataset": {
+                "record_id": "123",
+                "record_url": f"https://example.org/123?api_key={SECRET}",
+                "title": {"Authorization": f"Bearer {SECRET}"},
+                "path": "/private/workspace/input.csv",
+                "headers": {"Authorization": SECRET},
+                "declared_size_bytes": True,
+                "downloaded_bytes": float("inf"),
+            }
+        }
+    )
+    rendered = json.dumps(out)
+    assert SECRET not in rendered and "/private/workspace" not in rendered
+    assert out["dataset"]["redacted_fields"] == ["record_url"]
+    assert "headers" not in rendered and "Authorization" not in rendered
+    assert "declared_size_bytes" not in out["dataset"]
+    assert "downloaded_bytes" not in out["dataset"]
+    assert out["dataset"]["undisclosed_field_count"] == 5
+
+
+@pytest.mark.stubbed_backend
+def test_the_real_import_envelope_shows_every_declared_identity():
+    """Project what `science_import_dataset` actually records, not a hand copy.
+
+    Hand-written dataset dicts used short keys and no declared checksum, which
+    is how every Zenodo `md5:<hex>` and six of the fourteen PaRoutes file keys
+    (`uspto_rxn_n5_unique_templates.hdf5` …) shipped as `<redacted:…>`: the
+    whole-value opacity rule reads a long, space-free, letter-and-digit string
+    as a credential. This runs the captured record through the real resolver.
+    """
+    import hashlib
+    from pathlib import Path
+
+    from openai4s.host.datasets import resolve_selection, validate_selection
+    from openai4s.host.science import ScienceConnectorService
+
+    fixture = Path(__file__).parent / "fixtures/zenodo/record-6275421.json"
+    row = json.loads(fixture.read_text(encoding="utf-8"))["hits"]["hits"][0]
+    raw = json.dumps(row).encode()
+    service = ScienceConnectorService(
+        lambda *_args: {
+            "content": raw.decode(),
+            "raw_sha256": hashlib.sha256(raw).hexdigest(),
+            "raw_bytes": len(raw),
+        }
+    )
+    assert len(row["files"]) == 14
+    for item in row["files"]:
+        source = resolve_selection(
+            validate_selection("6275421", item["key"]),
+            expected_size=item["size"],
+            expected_checksum=item["checksum"],
+            timeout=30,
+            service=service,
+        )
+        # What the import tool adds once the bytes are verified.
+        local = hashlib.sha256(item["key"].encode()).hexdigest()
+        source["dataset"].update(
+            file_verification="size_and_source_checksum_verified",
+            local_sha256=local,
+            downloaded_bytes=item["size"],
+        )
+        dataset = public_source(json.dumps(source), artifact_sha256=local)["dataset"]
+        assert "redacted_fields" not in dataset, (item["key"], dataset)
+        assert dataset["file_key"] == item["key"]
+        assert dataset["declared_checksum"] == item["checksum"]
+        assert dataset["record_doi"] == "10.5281/zenodo.6275421"
+        assert dataset["concept_doi"] == "10.5281/zenodo.6275420"
+        assert dataset["local_sha256"] == local
+        assert dataset["declared_license"] == "cc-by-4.0"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # No extension: a bare token is not a file name.
+        ("file_key", SECRET),
+        # A JWT ends in a signature, not a short extension.
+        ("file_key", f"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.{SECRET}"),
+        ("file_key", f"{SECRET}.{SECRET}"),
+        # The algorithm's exact digest length or nothing.
+        ("declared_checksum", f"md5:{SECRET}"),
+        ("declared_checksum", "sha1:" + "a1" * 20),
+        # A DOI prefix does not launder an opaque suffix.
+        ("record_doi", f"10.5281/{SECRET}"),
+        ("concept_doi", f"10.5281/zenodo.{SECRET}"),
+    ],
+)
+def test_identifier_grammars_do_not_release_credential_shapes(field, value):
+    dataset = public_source({"dataset": {field: value}})["dataset"]
+    assert SECRET not in json.dumps(dataset)
+    assert dataset["redacted_fields"] == [field]
+
+
+def test_a_dataset_that_projects_to_nothing_is_still_counted():
+    for dataset in (f"Bearer {SECRET}", {"path": "/private/x", "headers": {}}):
+        out = public_source({"database": "zenodo", "dataset": dataset})
+        assert "dataset" not in out
+        assert out["undisclosed_field_count"] == 1
+        assert SECRET not in json.dumps(out)
+    assert "undisclosed_field_count" not in public_source(
+        {"database": "zenodo", "dataset": {}}
+    )
+
+
+def test_dataset_projection_clips_with_an_explicit_field_name():
+    out = public_source({"dataset": {"title": "x" * (MAX_VALUE_CHARS + 50)}})
+    assert len(out["dataset"]["title"]) == MAX_VALUE_CHARS
+    assert out["dataset"]["truncated_fields"] == ["title"]
+
+
+def test_dataset_sources_remain_version_and_session_bound_after_reopen(tmp_path):
+    """A later input must not change an earlier version's recorded selection."""
+    import hashlib
+
+    from openai4s.config import Config, LLMConfig
+    from openai4s.server.gateway import SessionRunner, WSHub, make_handler
+    from openai4s.store import get_store
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    store = get_store(cfg.db_path)
+    frame = store.new_frame(kind="turn", project_id="p")
+    other_frame = store.new_frame(kind="turn", project_id="p")
+    records = []
+    sources = []
+    for index, owner in enumerate((frame, frame, other_frame)):
+        # Reimporting the same bytes with a fresh source declaration creates a
+        # new immutable native version, not a rewrite of the first source.
+        body = b"same input\n" if index < 2 else b"other input\n"
+        snapshot = tmp_path / f"snapshot-{index}.txt"
+        snapshot.write_bytes(body)
+        checksum = hashlib.sha256(body).hexdigest()
+        source = json.dumps(
+            {
+                "database": "zenodo",
+                "dataset": {
+                    "record_id": str(100 + index),
+                    "record_doi": f"10.5281/zenodo.{100 + index}",
+                    "concept_doi": "10.5281/zenodo.99",
+                    "file_key": "input.txt",
+                    "declared_license": None,
+                    "downloaded_bytes": len(body),
+                    "local_sha256": checksum,
+                    "file_verification": "size_and_source_checksum_verified",
+                    "private_debug": SECRET,
+                },
+            }
+        )
+        sources.append(source)
+        records.append(
+            store.record_cell_artifact(
+                path=str(tmp_path / "input.txt"),
+                filename="input.txt",
+                content_type="text/plain",
+                size_bytes=len(body),
+                checksum=checksum,
+                producing_cell_id=None,
+                frame_id=owner,
+                root_frame_id=owner,
+                project_id="p",
+                snapshot_path=str(snapshot),
+                source=source,
+            )
+        )
+    assert records[0]["artifact_id"] == records[1]["artifact_id"]
+    assert records[0]["version_id"] != records[1]["version_id"]
+    assert records[2]["artifact_id"] != records[0]["artifact_id"]
+    store.close()
+
+    hub = WSHub()
+    runner = SessionRunner(cfg, hub, start_idle_sweeper=False)
+    handler_class = make_handler(cfg, hub, runner)
+    try:
+        handler = object.__new__(handler_class)
+        handler.headers = {}
+        artifact_id = records[0]["artifact_id"]
+        handler.path = f"/api/v1/artifacts/{artifact_id}/versions"
+        seen = []
+        handler._json = lambda obj, code=200: seen.append(obj)
+        handler._body = lambda: {}
+        handler._api("GET", f"/artifacts/{artifact_id}/versions")
+        rows = seen[-1]["versions"]
+        assert [row["version_id"] for row in rows] == [
+            records[1]["version_id"],
+            records[0]["version_id"],
+        ]
+        for row, index in zip(rows, (1, 0)):
+            dataset = row["retrieval_source"]["dataset"]
+            assert dataset["record_id"] == str(100 + index)
+            assert dataset["record_doi"] == f"10.5281/zenodo.{100 + index}"
+            assert dataset["local_sha256"] == row["checksum"]
+            assert dataset["declared_license"] is None
+            assert dataset["file_verification"] == "size_and_source_checksum_verified"
+            stored = runner.store.version_meta(row["version_id"])
+            assert stored["source"] == sources[index]
+        assert SECRET not in json.dumps(seen)
+        assert "102" not in [
+            row["retrieval_source"]["dataset"]["record_id"] for row in rows
+        ]
+    finally:
+        runner.close()
+        runner.store.close()
+
+
 def test_the_route_sends_provenance_and_never_the_credential(tmp_path):
     """End to end, because the unit test alone proved less than it looked like.
 
@@ -129,6 +385,8 @@ def test_the_route_sends_provenance_and_never_the_credential(tmp_path):
 
     from openai4s.config import Config, LLMConfig
     from openai4s.server import gateway as gateway_mod
+
+    DECLARED_MD5 = "md5:" + hashlib.md5(b"a\n1\n", usedforsecurity=False).hexdigest()
     from openai4s.store import get_store
 
     class _Hub:
@@ -166,6 +424,20 @@ def test_the_route_sends_provenance_and_never_the_credential(tmp_path):
                 "retrieved_at": "2026-07-27T14:02:00Z",
                 "record_count": 42,
                 "internal_debug": {"Authorization": f"Bearer {SECRET}"},
+                "dataset": {
+                    "provider": "zenodo",
+                    "record_id": "123",
+                    "record_doi": "10.5281/zenodo.123",
+                    "concept_doi": "10.5281/zenodo.122",
+                    # A real PaRoutes key and Zenodo's own checksum shape:
+                    # both read as credentials to a whole-value opacity check.
+                    "file_key": "uspto_rxn_n5_unique_templates.hdf5",
+                    "declared_license": "cc-by-4.0",
+                    "declared_size_bytes": 4,
+                    "declared_checksum": DECLARED_MD5,
+                    "local_sha256": hashlib.sha256(b"a\n1\n").hexdigest(),
+                    "private_debug": SECRET,
+                },
             }
         ),
     )
@@ -187,6 +459,15 @@ def test_the_route_sends_provenance_and_never_the_credential(tmp_path):
         assert provenance is not None, "the provenance never reached the client"
         assert provenance["database"] == "UniProt"
         assert provenance["record_count"] == 42
+        assert provenance["dataset"]["record_id"] == "123"
+        assert provenance["dataset"]["declared_license"] == "cc-by-4.0"
+        assert provenance["dataset"]["declared_checksum"] == DECLARED_MD5
+        assert provenance["dataset"]["file_key"] == "uspto_rxn_n5_unique_templates.hdf5"
+        assert "redacted_fields" not in provenance["dataset"]
+        assert (
+            provenance["dataset"]["local_sha256"]
+            == hashlib.sha256(b"a\n1\n").hexdigest()
+        )
         assert SECRET not in _json.dumps(body)
         assert "internal_debug" not in _json.dumps(body)
         assert provenance["undisclosed_field_count"] == 1

@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skills
 
 @pytest.fixture(scope="module", autouse=True)
 def _skills_on_path():
-    path = str(get_config().skills_dir)
+    path = str(get_config(initialize_dirs=False).skills_dir)
     sys.path.insert(0, path)
     yield
     sys.path.remove(path)

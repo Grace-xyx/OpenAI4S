@@ -1658,3 +1658,33 @@ def test_a_deeply_nested_request_still_gets_a_bound():
     # would let it through: 600 nested nodes at the per-node allowance.
     assert prompt > 64 * 600
     assert (completion, attempts) == (64, 3)
+
+
+@pytest.mark.parametrize(("retries", "sends"), [(0, 2), (2, 3), (6, 7)])
+def test_the_token_bound_prices_every_send_the_retry_policy_allows(retries, sends):
+    """The reservation multiplies by the attempt ceiling. It read the
+    transport's constant 3 while the transport now allows ``max_retries + 1``
+    sends (never below two, for the stream-compatibility request): raising
+    OPENAI4S_LLM_MAX_RETRIES to 6 would have reserved for 3 of 7 possible
+    sends."""
+    from openai4s.config import LLMConfig
+    from openai4s.llm.transport import CallState
+    from openai4s.server.auto_budget import token_upper_bound_parts
+
+    cfg = LLMConfig(provider="ark", api_key="k", max_tokens=64, max_retries=retries)
+    parts = token_upper_bound_parts(
+        cfg, messages=[{"role": "user", "content": "x"}], max_tokens=64
+    )
+    assert parts is not None
+    _prompt, _completion, attempts = parts
+    assert attempts == sends == CallState.from_config(cfg).max_attempts
+
+
+def test_an_adapter_without_a_retry_policy_keeps_the_default_attempt_bound():
+    from openai4s.llm.transport import DEFAULT_MAX_ATTEMPTS
+    from openai4s.server.auto_budget import token_upper_bound_parts
+
+    parts = token_upper_bound_parts(
+        {"input_token_upper_bound": 10, "max_tokens": 5}, max_tokens=5
+    )
+    assert parts == (10, 5, DEFAULT_MAX_ATTEMPTS)

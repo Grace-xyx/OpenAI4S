@@ -66,6 +66,15 @@ class TransportError(LLMError):
         self.retry_after = retry_after
         self.output_committed = output_committed
         self.body = body
+        #: Backoff waits the logical call took before this error ended it, set
+        #: by the transport's retry loop (``None``: not recorded, e.g. raised
+        #: outside it). What "retries were attempted" may truthfully rest on.
+        self.retries_attempted: int | None = None
+        #: Why the retry loop stopped *early*, as a local, closed value:
+        #: ``"budget"`` (the next wait exceeded the retry budget) or
+        #: ``"deadline"`` (it exceeded what was left of the total timeout), or
+        #: ``"request_limit"`` (this invocation's explicit attempt cap).
+        self.retry_stop: str | None = None
 
     @property
     def is_rate_limit(self) -> bool:
@@ -135,6 +144,27 @@ def llm_failure_code(exc: BaseException) -> str | None:
     if getattr(exc, "status", None) == 429:
         return "llm_rate_limited"
     return None
+
+
+def llm_retry_outcome(exc: BaseException) -> str | None:
+    """How the transport's retry policy ended a failed call, from typed fields.
+
+    ``"committed"`` (output reached the caller, so replay was vetoed),
+    ``"deadline"`` / ``"budget"`` (the next wait did not fit), ``"not_retried"``
+    or ``"retried"``, or ``"request_limit"`` (an invocation exhausted its own
+    cap); ``None`` when the error carries no record of it. Lets a user-facing
+    message say "retries were attempted" only when they were.
+    """
+
+    if getattr(exc, "output_committed", False):
+        return "committed"
+    stop = getattr(exc, "retry_stop", None)
+    if stop in ("deadline", "budget", "request_limit"):
+        return str(stop)
+    retries = getattr(exc, "retries_attempted", None)
+    if type(retries) is not int:
+        return None
+    return "retried" if retries > 0 else "not_retried"
 
 
 # 408 request timeout, 429 rate limit, 5xx server-side. 5xx is retryable for a

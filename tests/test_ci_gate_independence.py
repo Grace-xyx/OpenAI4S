@@ -22,6 +22,8 @@ about what it returned this time.
 
 from __future__ import annotations
 
+import re
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -167,3 +169,110 @@ def test_every_job_has_a_timeout():
     jobs = (_workflow().get("jobs") or {}).items()
     missing = sorted(job_id for job_id, job in jobs if not job.get("timeout-minutes"))
     assert not missing, missing
+
+
+def _assert_browser_driver_install_timeouts(workflow: dict) -> None:
+    """`playwright install --with-deps` runs apt-get with no timeout of its own.
+    A stalled mirror held one such step until the 45-minute job limit, so each
+    carries its own bound. A missing bound is that hang again, and a bound at or
+    over the job's never fires: the job is cancelled first, with no verdict on
+    the step that hung."""
+    checked = set()
+    for job_id, job in (workflow.get("jobs") or {}).items():
+        for step in job.get("steps") or []:
+            if "playwright install --with-deps" not in str(step.get("run") or ""):
+                continue
+            checked.add(job_id)
+            bound = step.get("timeout-minutes")
+            assert (
+                bound is not None
+            ), f"{job_id}: {step.get('name')!r} has no timeout-minutes"
+            # Support literals and the workflow's per-engine conditional only.
+            # Extracting every digit would accept -15, 15.5, and 3e2 (300),
+            # or an env-derived timeout whose only literal is its fallback.
+            if type(bound) is int:
+                minutes = [bound]
+            else:
+                assert isinstance(bound, str), (
+                    f"{job_id}: step timeout must be an integer or a supported "
+                    f"expression, got {bound!r}"
+                )
+                literal = re.fullmatch(r"[0-9]+", bound)
+                conditional = re.fullmatch(
+                    r"\$\{\{\s*matrix\.engine\s*==\s*'[^']+'\s*"
+                    r"&&\s*([0-9]+)\s*\|\|\s*([0-9]+)\s*\}\}",
+                    bound,
+                )
+                assert literal or conditional, (
+                    f"{job_id}: unsupported step timeout {bound!r}; "
+                    "extend the validator before using a new expression form"
+                )
+                minutes = (
+                    [int(bound)]
+                    if literal
+                    else [int(value) for value in conditional.groups()]
+                )
+            for value in minutes:
+                assert 0 < value < job["timeout-minutes"], (
+                    f"{job_id}: step bound {value} does not fire before the "
+                    f"job's {job['timeout-minutes']}-minute limit"
+                )
+    expected = {"browser-smoke", "browser-stage0", "browser-team-mode"}
+    assert (
+        expected <= checked
+    ), f"missing browser installs: {sorted(expected - checked)}"
+
+
+def test_every_browser_driver_install_is_bounded_below_its_job():
+    _assert_browser_driver_install_timeouts(_workflow())
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        None,
+        True,
+        0,
+        -15,
+        15.5,
+        45,
+        60,
+        "15 minutes",
+        "${{ matrix.engine == 'webkit' && -35 || 20 }}",
+        "${{ matrix.engine == 'webkit' && 35.5 || 20 }}",
+        "${{ matrix.engine == 'webkit' && 3e2 || 20 }}",
+        "${{ matrix.engine == 'webkit' && 45 || 20 }}",
+        "${{ matrix.engine == 'webkit' && 35 || 45 }}",
+        "${{ env.INSTALL_TIMEOUT || 20 }}",
+    ],
+)
+def test_browser_timeout_guard_rejects_invalid_bounds(bound):
+    workflow = _workflow()
+    step = next(
+        step
+        for step in workflow["jobs"]["browser-smoke"]["steps"]
+        if "playwright install --with-deps" in step.get("run", "")
+    )
+    step["timeout-minutes"] = bound
+    with pytest.raises(AssertionError, match="browser-smoke:"):
+        _assert_browser_driver_install_timeouts(workflow)
+
+
+@pytest.mark.parametrize(
+    "job_id", ["browser-smoke", "browser-stage0", "browser-team-mode"]
+)
+def test_duplicate_installs_cannot_hide_a_missing_browser_job(job_id):
+    workflow = _workflow()
+    jobs = workflow["jobs"]
+    for step in jobs[job_id]["steps"]:
+        if "playwright install --with-deps" in step.get("run", ""):
+            step["run"] = "echo browser dependencies are cached"
+    other = jobs["browser-stage0" if job_id == "browser-smoke" else "browser-smoke"]
+    duplicate = next(
+        step
+        for step in other["steps"]
+        if "playwright install --with-deps" in step.get("run", "")
+    )
+    other["steps"].append(deepcopy(duplicate))
+    with pytest.raises(AssertionError, match=f"missing browser installs:.*{job_id}"):
+        _assert_browser_driver_install_timeouts(workflow)
