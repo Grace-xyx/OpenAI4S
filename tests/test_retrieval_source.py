@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from openai4s.server.retrieval_source import (
     ALLOWED_FIELDS,
     MAX_VALUE_CHARS,
@@ -181,6 +183,91 @@ def test_dataset_projection_never_serializes_private_or_complex_fields():
     assert out["dataset"]["undisclosed_field_count"] == 5
 
 
+@pytest.mark.stubbed_backend
+def test_the_real_import_envelope_shows_every_declared_identity():
+    """Project what `science_import_dataset` actually records, not a hand copy.
+
+    Hand-written dataset dicts used short keys and no declared checksum, which
+    is how every Zenodo `md5:<hex>` and six of the fourteen PaRoutes file keys
+    (`uspto_rxn_n5_unique_templates.hdf5` …) shipped as `<redacted:…>`: the
+    whole-value opacity rule reads a long, space-free, letter-and-digit string
+    as a credential. This runs the captured record through the real resolver.
+    """
+    import hashlib
+    from pathlib import Path
+
+    from openai4s.host.datasets import resolve_selection, validate_selection
+    from openai4s.host.science import ScienceConnectorService
+
+    fixture = Path(__file__).parent / "fixtures/zenodo/record-6275421.json"
+    row = json.loads(fixture.read_text(encoding="utf-8"))["hits"]["hits"][0]
+    raw = json.dumps(row).encode()
+    service = ScienceConnectorService(
+        lambda *_args: {
+            "content": raw.decode(),
+            "raw_sha256": hashlib.sha256(raw).hexdigest(),
+            "raw_bytes": len(raw),
+        }
+    )
+    assert len(row["files"]) == 14
+    for item in row["files"]:
+        source = resolve_selection(
+            validate_selection("6275421", item["key"]),
+            expected_size=item["size"],
+            expected_checksum=item["checksum"],
+            timeout=30,
+            service=service,
+        )
+        # What the import tool adds once the bytes are verified.
+        local = hashlib.sha256(item["key"].encode()).hexdigest()
+        source["dataset"].update(
+            file_verification="size_and_source_checksum_verified",
+            local_sha256=local,
+            downloaded_bytes=item["size"],
+        )
+        dataset = public_source(json.dumps(source), artifact_sha256=local)["dataset"]
+        assert "redacted_fields" not in dataset, (item["key"], dataset)
+        assert dataset["file_key"] == item["key"]
+        assert dataset["declared_checksum"] == item["checksum"]
+        assert dataset["record_doi"] == "10.5281/zenodo.6275421"
+        assert dataset["concept_doi"] == "10.5281/zenodo.6275420"
+        assert dataset["local_sha256"] == local
+        assert dataset["declared_license"] == "cc-by-4.0"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # No extension: a bare token is not a file name.
+        ("file_key", SECRET),
+        # A JWT ends in a signature, not a short extension.
+        ("file_key", f"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.{SECRET}"),
+        ("file_key", f"{SECRET}.{SECRET}"),
+        # The algorithm's exact digest length or nothing.
+        ("declared_checksum", f"md5:{SECRET}"),
+        ("declared_checksum", "sha1:" + "a1" * 20),
+        # A DOI prefix does not launder an opaque suffix.
+        ("record_doi", f"10.5281/{SECRET}"),
+        ("concept_doi", f"10.5281/zenodo.{SECRET}"),
+    ],
+)
+def test_identifier_grammars_do_not_release_credential_shapes(field, value):
+    dataset = public_source({"dataset": {field: value}})["dataset"]
+    assert SECRET not in json.dumps(dataset)
+    assert dataset["redacted_fields"] == [field]
+
+
+def test_a_dataset_that_projects_to_nothing_is_still_counted():
+    for dataset in (f"Bearer {SECRET}", {"path": "/private/x", "headers": {}}):
+        out = public_source({"database": "zenodo", "dataset": dataset})
+        assert "dataset" not in out
+        assert out["undisclosed_field_count"] == 1
+        assert SECRET not in json.dumps(out)
+    assert "undisclosed_field_count" not in public_source(
+        {"database": "zenodo", "dataset": {}}
+    )
+
+
 def test_dataset_projection_clips_with_an_explicit_field_name():
     out = public_source({"dataset": {"title": "x" * (MAX_VALUE_CHARS + 50)}})
     assert len(out["dataset"]["title"]) == MAX_VALUE_CHARS
@@ -298,6 +385,8 @@ def test_the_route_sends_provenance_and_never_the_credential(tmp_path):
 
     from openai4s.config import Config, LLMConfig
     from openai4s.server import gateway as gateway_mod
+
+    DECLARED_MD5 = "md5:" + hashlib.md5(b"a\n1\n", usedforsecurity=False).hexdigest()
     from openai4s.store import get_store
 
     class _Hub:
@@ -340,9 +429,12 @@ def test_the_route_sends_provenance_and_never_the_credential(tmp_path):
                     "record_id": "123",
                     "record_doi": "10.5281/zenodo.123",
                     "concept_doi": "10.5281/zenodo.122",
-                    "file_key": "data.csv",
-                    "declared_license": None,
+                    # A real PaRoutes key and Zenodo's own checksum shape:
+                    # both read as credentials to a whole-value opacity check.
+                    "file_key": "uspto_rxn_n5_unique_templates.hdf5",
+                    "declared_license": "cc-by-4.0",
                     "declared_size_bytes": 4,
+                    "declared_checksum": DECLARED_MD5,
                     "local_sha256": hashlib.sha256(b"a\n1\n").hexdigest(),
                     "private_debug": SECRET,
                 },
@@ -368,7 +460,10 @@ def test_the_route_sends_provenance_and_never_the_credential(tmp_path):
         assert provenance["database"] == "UniProt"
         assert provenance["record_count"] == 42
         assert provenance["dataset"]["record_id"] == "123"
-        assert provenance["dataset"]["declared_license"] is None
+        assert provenance["dataset"]["declared_license"] == "cc-by-4.0"
+        assert provenance["dataset"]["declared_checksum"] == DECLARED_MD5
+        assert provenance["dataset"]["file_key"] == "uspto_rxn_n5_unique_templates.hdf5"
+        assert "redacted_fields" not in provenance["dataset"]
         assert (
             provenance["dataset"]["local_sha256"]
             == hashlib.sha256(b"a\n1\n").hexdigest()

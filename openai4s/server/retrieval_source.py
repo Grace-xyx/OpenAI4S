@@ -83,6 +83,32 @@ DATASET_FIELDS = frozenset(
 )
 _DATASET_INTEGER_FIELDS = frozenset({"declared_size_bytes", "downloaded_bytes"})
 
+#: A version checksum as the Store records it (and as Artifact receipts must
+#: carry it): bare SHA-256 hex.
+_SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
+
+#: Public grammars for dataset identifiers. A value that matches its field's
+#: grammar is shown as written; anything else is free text and goes through
+#: the same shape-based redaction as every other source value.
+#:
+#: The whole-value opacity rule exists for strings that are nothing but a
+#: credential-shaped run, and these identifiers have exactly that shape while
+#: being public: Zenodo declares every file as `md5:<hex>`, and data file names
+#: are long, space-free and mix letters with digits
+#: (`uspto_rxn_n5_unique_templates.hdf5`). Judged whole, every declared
+#: checksum and six of the fourteen PaRoutes file keys rendered as
+#: `<redacted:…>`. Each grammar still refuses the shapes real credentials
+#: take: a checksum is an algorithm plus that algorithm's exact digest length
+#: (the importer's own `md5:`/`sha256:` contract), a DOI's suffix is still
+#: judged for opacity, and a file name must end in a short alphabetic
+#: extension, which no bare key, token prefix or JWT signature does.
+_DECLARED_CHECKSUM = re.compile(r"md5:[0-9a-fA-F]{32}|sha256:[0-9a-fA-F]{64}")
+_DOI = re.compile(r"10\.\d{4,9}/(\S+)")
+_FILE_NAME = re.compile(r"[\w.-]+(?:/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}")
+#: The importer's own bound on a file key; DOIs are shorter still. Longer
+#: values are not identifiers this projection recognises.
+_MAX_IDENTIFIER_CHARS = 512
+
 #: Per-value ceiling. A query can be a large POST body, and a provenance panel
 #: is not where anyone should discover that.
 MAX_VALUE_CHARS = 2000
@@ -92,6 +118,20 @@ def _clip(value: str) -> tuple[str, bool]:
     if len(value) <= MAX_VALUE_CHARS:
         return value, False
     return value[:MAX_VALUE_CHARS], True
+
+
+def _is_public_identifier(field: str, value: str) -> bool:
+    """Whether `value` is a well-formed public identifier for `field`."""
+    if len(value) > _MAX_IDENTIFIER_CHARS:
+        return False
+    if field == "declared_checksum":
+        return _DECLARED_CHECKSUM.fullmatch(value) is not None
+    if field in ("record_doi", "concept_doi"):
+        doi = _DOI.fullmatch(value)
+        return doi is not None and not _looks_opaque(doi.group(1))
+    if field == "file_key":
+        return _FILE_NAME.fullmatch(value) is not None
+    return False
 
 
 def _public_dataset(value: Any, artifact_sha256: str | None) -> dict[str, Any] | None:
@@ -124,13 +164,15 @@ def _public_dataset(value: Any, artifact_sha256: str | None) -> dict[str, Any] |
             if (
                 field == "local_sha256"
                 and isinstance(artifact_sha256, str)
-                and re.fullmatch(r"[0-9a-fA-F]{64}", artifact_sha256)
+                and _SHA256_HEX.fullmatch(artifact_sha256)
                 and item.lower() == artifact_sha256.lower()
             ):
                 # This value is already public as the same version's checksum.
                 # An untrusted source cannot use a hash-shaped field to release
                 # a different opaque value; those still pass through redaction.
                 item = artifact_sha256.lower()
+            elif _is_public_identifier(field, item):
+                pass
             else:
                 safe = redact_url(item) if field == "record_url" else redact_text(item)
                 if safe != item:
@@ -171,6 +213,7 @@ def public_source(
 
     out: dict[str, Any] = {}
     truncated: list[str] = []
+    unprojected = 0
     for field in ALLOWED_FIELDS:
         if field not in envelope:
             continue
@@ -179,6 +222,11 @@ def public_source(
             dataset = _public_dataset(value, artifact_sha256)
             if dataset is not None:
                 out[field] = dataset
+            elif value not in (None, "", {}, []):
+                # Present but nothing in it could be shown: not an object, or
+                # only fields outside the allowlist. Counted like any other
+                # withheld field, or the panel reads as "no dataset declared".
+                unprojected += 1
             continue
         if value is None or value == "":
             continue
@@ -201,7 +249,7 @@ def public_source(
         out["truncated_fields"] = sorted(truncated)
     # What was dropped, counted rather than listed: the names themselves come
     # from unaudited retrieval code and are not safe to render.
-    dropped = len([k for k in envelope if k not in ALLOWED_FIELDS])
+    dropped = len([k for k in envelope if k not in ALLOWED_FIELDS]) + unprojected
     if dropped:
         out["undisclosed_field_count"] = dropped
     return out

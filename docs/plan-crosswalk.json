@@ -231,7 +231,7 @@
       "tests": "tests/test_retrieval_source.py,tests/test_retrieval_provenance.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "86844f7c734f50806f84d9006c8bce63f20427bc87c10128074367931da718e3"
+      "evidence_digest": "c9b04e56f9c936b5a3ef85e9579469e771f94d39cceab90f599c696879f63b78"
     },
     {
       "source": "R3",
