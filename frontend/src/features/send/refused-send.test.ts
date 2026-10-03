@@ -19,7 +19,8 @@ import { t } from "../../i18n/runtime";
 import { _openGen, currentId, project } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { running } from "../../stores/stream";
-import { UPLOAD_STATE } from "../chrome/upload";
+import { UPLOAD_STATE, type UploadBatch, type UploadResult } from "../chrome/upload";
+import { chooseComposerModel, modelT, resetSessionModelState, sessionModelPin } from "../customize/models";
 import { rebindConfirmText, rebindDoneText, send } from "./send";
 import { closeTurnTicket } from "./ticket";
 
@@ -93,6 +94,7 @@ describe("send(): a message the server refuses before admission", () => {
 
   beforeEach(() => {
     resetStoreFields();
+    resetSessionModelState();
     UPLOAD_STATE.pending.clear();
     UPLOAD_STATE.failures.clear();
     UPLOAD_STATE.creations.clear();
@@ -129,6 +131,51 @@ describe("send(): a message the server refuses before admission", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it.each(["before sending", "during preflight"])("keeps the draft when a model choice starts %s", async (timing) => {
+    const originalFetch = globalThis.fetch;
+    let finishChoice: (value: Response) => void = () => {};
+    const fetch = vi.fn((url: string, init?: RequestInit) =>
+      url.endsWith("/model-binding")
+        ? new Promise<Response>((resolve) => { finishChoice = resolve; })
+        : originalFetch(url, init),
+    );
+    vi.stubGlobal("fetch", fetch);
+    let sending: Promise<void> | undefined;
+    let finishUpload: (value: UploadResult[]) => void = () => {};
+    const upload: UploadBatch = {
+      frameAtSelection: "frame_1", targetFrameId: "frame_1", projectId: "proj_1",
+      targetSource: null, targetPromise: null,
+      promise: new Promise((resolve) => { finishUpload = resolve; }),
+    };
+    if (timing === "during preflight") {
+      UPLOAD_STATE.pending.add(upload);
+      sending = send("hello");
+      await vi.waitFor(() => expect(lastHint()).toBe(t("upload.pendingSend")));
+    }
+    const choice = chooseComposerModel("mp-beta");
+    await vi.waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith("/model-binding"))).toBe(true));
+
+    if (sending) {
+      UPLOAD_STATE.pending.delete(upload);
+      finishUpload([]);
+      await sending;
+    } else {
+      await send("hello");
+    }
+
+    const sentMessages = () => fetch.mock.calls.filter(([url]) => url.endsWith("/message"));
+    expect(sentMessages()).toHaveLength(0);
+    expect(nodes.composer!.value).toBe("hello");
+    expect(nodes.messages!.children).toHaveLength(0);
+    expect(running.value).toBe(false);
+    expect(lastHint()).toBe(modelT("model.session.pending"));
+
+    finishChoice(new Response(JSON.stringify({ binding: { model_profile_id: "mp-beta", model_profile_revision: 1 } })));
+    await choice;
+    await send("hello");
+    expect(sentMessages()).toHaveLength(1);
   });
 
   it("keeps the text and shows the server's reason for model_profile_needs_key", async () => {
@@ -193,6 +240,26 @@ describe("send(): a message the server refuses before admission", () => {
     expect(lastHint()).toBe(rebindDoneText({ binding: { bound: false } }));
     expect(lastHint()).not.toBe(t("model.rebind.done"));
     expect(running.value).toBe(false);
+  });
+
+  it("a confirmed rebind moves the composer selector to the session's new pin", async () => {
+    routes["/frames/frame_1/message"] = refusal("model_revision_unavailable", "no longer usable; rebind it");
+    routes["/frames/frame_1/model-binding"] = {
+      status: 200,
+      body: { ok: true, binding: { model_profile_id: "mp-b", model_profile_revision: 3, bound: true } },
+    };
+    vi.stubGlobal("confirm", () => true);
+    const bodies: unknown[] = [];
+    const routed = globalThis.fetch;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/model-binding")) bodies.push(init?.body);
+      return routed(url, init);
+    });
+    await send("hello");
+
+    expect(sessionModelPin.value).toEqual({ frameId: "frame_1", profileId: "mp-b", revision: 3 });
+    // The prompt re-binds to the ACTIVE configuration, as it says: no target.
+    expect(bodies).toEqual([undefined]);
   });
 
   it("shows the rebind's own refusal and opens Models for model_profile_needs_active", async () => {

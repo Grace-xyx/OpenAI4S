@@ -93,7 +93,7 @@ def test_the_session_list_places_a_moved_session_in_its_folder(tmp_path):
             conn.request(method, API + path, body=payload, headers=headers)
             response = conn.getresponse()
             data = json.loads(response.read() or b"{}")
-            assert response.status == 200, (method, path, response.status, data)
+            assert response.status in (200, 201), (method, path, response.status, data)
             return data
         finally:
             conn.close()
@@ -103,6 +103,17 @@ def test_the_session_list_places_a_moved_session_in_its_folder(tmp_path):
         return {row["id"]: row for row in page["frames"]}
 
     try:
+        profile = call(
+            "POST",
+            "/model-profiles",
+            {
+                "name": "pinned",
+                "provider": "openai_responses",
+                "model": "gpt-4o",
+                "api_key": "sk-test",
+            },
+        )
+        call("POST", f"/model-profiles/{profile['id']}/activate", {})
         project = call("POST", "/projects", {"name": "Folder grouping"})
         project_id = project["project_id"]
         sessions = {}
@@ -120,6 +131,9 @@ def test_the_session_list_places_a_moved_session_in_its_folder(tmp_path):
             )
             # What a finished turn would have metered.
             runner.store.add_frame_tokens(frame_id, input_tokens=12, output_tokens=3)
+            # And the model configuration a first send pins (D2).
+            pinned = call("POST", f"/frames/{frame_id}/model-binding", {})
+            assert pinned["binding"]["bound"] is True, pinned
             sessions[label] = frame_id
         filed, loose = sessions["Filed"], sessions["Loose"]
         folder = call("POST", f"/projects/{project_id}/folders", {"name": "Assays"})

@@ -48,6 +48,7 @@ import {
 import { loadSkillsCatalog } from "../autocomplete/catalog";
 import { acHoldSend, acPending } from "../autocomplete/composer";
 import { effProject } from "../customize/host";
+import { composerChoiceMark, composerModelChoicePending, modelT, noteAdmittedModelBinding, noteSessionModelBinding } from "../customize/models";
 import { $, el } from "../messages/dom";
 import { down } from "../messages/scroll";
 import { runtimeSummary } from "../notebook/kernel";
@@ -183,6 +184,10 @@ export const SUBMISSION_GRACE_MS = 5000;
 export async function send(text?: string | null, opts?: { execute?: boolean }): Promise<void> {
   text = (text || "").trim();
   opts = opts || {};
+  if (composerModelChoicePending()) {
+    hint(modelT("model.session.pending"), false, true);
+    return;
+  }
   const queueing = running.value;
   const runtime = runtimeSummary();
   if (currentId.value && runtime.viewOnly && runtime.trustState === "quarantined") {
@@ -354,6 +359,12 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
   // there is no dispatch frame. It is here so the pinned id is a `string` for
   // every use below, where reading `currentId` again is the bug being fixed.
   if (!dispatchFrameId) return;
+  // A choice may have started during the upload/catalog/session preflight.
+  // Keep the draft and annotations until that configuration is saved.
+  if (composerModelChoicePending()) {
+    hint(modelT("model.session.pending"), false, true);
+    return;
+  }
   // Mint the admission id before this send changes any state: minting can
   // refuse (no platform CSPRNG), and refusing after the draft was cleared and
   // the turn locked would strand the composer behind a turn never posted.
@@ -427,6 +438,8 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
   // Guarantee this client is subscribed BEFORE the POST spawns the turn
   // thread, on the pinned id the POST is about.
   sub(dispatchFrameId);
+  // Taken before the POST: a model chosen while it is out is newer than its 202.
+  const choiceMark = composerChoiceMark();
   try {
     const accepted = (await api(`/frames/${dispatchFrameId}/message`, {
       method: "POST",
@@ -444,8 +457,13 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
       queue_position?: unknown;
       annotations?: unknown;
       annotation_reservation_id?: unknown;
+      model_binding?: unknown;
     };
     if (accepted?.request_id) confirmHistorySubmission();
+    // Admission is what pins a fresh session (its first send binds the
+    // default), and the 202 names the pair: the composer shows it rather than
+    // keep calling the session unpinned -- i.e. whatever the default is later.
+    if (accepted?.model_binding) noteAdmittedModelBinding(dispatchFrameId, accepted.model_binding, choiceMark);
     if (accepted && accepted.execution_id) w.dataset.executionId = String(accepted.execution_id);
     if (planTurn && planPendingTurn.value === planTurn && accepted && accepted.execution_id) {
       planPendingTurn.value = { ...planTurn, executionId: String(accepted.execution_id) };
@@ -543,6 +561,7 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
           const rebound = await api(`/frames/${encodeURIComponent(dispatchFrameId)}/model-binding`, {
             method: "POST",
           });
+          noteSessionModelBinding(dispatchFrameId, rebound);
           if (ownsTurnTicket(turnTicketToken)) turnDone("failed");
           if (onDispatchFrame()) hint(rebindDoneText(rebound));
           void loadSessions();

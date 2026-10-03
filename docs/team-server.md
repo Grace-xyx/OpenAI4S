@@ -153,7 +153,13 @@ operator's regardless of who is logged in:
 
 - writing instance configuration — the LLM provider, its endpoint and
   credential, model profiles, the default model. Rewriting `llm_base_url`
-  points every user's traffic at a host of the writer's choosing;
+  points every user's traffic at a host of the writer's choosing. Choosing
+  which of the admin's *saved* profiles one's **own** session runs on is not
+  instance configuration: the composer selector re-pins the open session
+  (`POST /frames/{id}/model-binding {model_id}`), which its owner or an admin
+  may do and another member may not (`403 owner_only`); the same selector's
+  `PUT /models/default` stays admin-only, so a member's switch never moves
+  the default or anyone else's session;
 - the legacy compute-job runner (`/compute/jobs`), which executes
   `bash -c <command>` as the daemon's own uid — reads included, since a
   job's row is somebody's command line;
