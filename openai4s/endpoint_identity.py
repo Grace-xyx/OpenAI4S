@@ -58,10 +58,14 @@ def normalize_endpoint(url: str | None) -> str:
     host = parts.hostname
     if ":" in host:
         host = f"[{host}]"
-    if parts.port:
+    # A default port is the same TCP destination; an explicit port 0 is not
+    # the implicit default and must never disappear from a credential scope.
+    if parts.port is not None and parts.port != {"http": 80, "https": 443}.get(
+        parts.scheme.lower()
+    ):
         host = f"{host}:{parts.port}"
     path = parts.path.rstrip("/")
-    return urllib.parse.urlunsplit((parts.scheme, host, path, "", ""))
+    return urllib.parse.urlunsplit((parts.scheme.lower(), host, path, "", ""))
 
 
 def endpoint_sha256(url: str | None) -> str:

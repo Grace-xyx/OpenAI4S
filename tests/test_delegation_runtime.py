@@ -621,6 +621,9 @@ def test_child_model_steps_and_policy_overrides_remain_visible(monkeypatch):
         return _submitted()
 
     monkeypatch.setattr(loop_mod.Agent, "run", fake_run)
+    # A child moved to another provider takes that provider's own credential,
+    # never its parent's (tests/test_delegation_credential_scope.py).
+    monkeypatch.setenv("OPENAI4S_CHATGPT_API_KEY", "chatgpt-child-key")
     runner = DelegationRunner(get_config())
     runner(
         {

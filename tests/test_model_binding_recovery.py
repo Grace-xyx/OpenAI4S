@@ -1118,6 +1118,8 @@ def test_an_environment_key_is_not_sent_to_an_endpoint_the_profile_left(
     proxy revision must not go on sending the daemon's key there."""
     runner, call = api
     monkeypatch.setenv("OPENAI4S_CHATGPT_API_KEY", _ENV_KEY)
+    # The environment key is scoped to the endpoint it also configures.
+    monkeypatch.setenv("OPENAI4S_CHATGPT_BASE_URL", "https://llm-proxy.example.org/v1")
     seen = _dispatch_spy(runner, monkeypatch)
     created = call(
         "POST",
@@ -1138,7 +1140,11 @@ def test_an_environment_key_is_not_sent_to_an_endpoint_the_profile_left(
     assert seen[-1].base_url == "https://llm-proxy.example.org/v1"
     seen.clear()
 
-    call("PATCH", f"/model-profiles/{profile_id}", {"base_url": ""})
+    call(
+        "PATCH",
+        f"/model-profiles/{profile_id}",
+        {"base_url": "https://api.openai.com/v1"},
+    )
     refused = call("POST", f"/frames/{frame}/message", {"request": "x", "wait": False})
     assert refused["code"] == 409, refused
     assert refused["body"].get("code") == "model_revision_unavailable", refused

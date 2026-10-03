@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from openai4s.agent.cell_record import DelegatedCellRecorder, compose_cell_hooks
+from openai4s.agent.child_model import (
+    ChildModelError,
+    CredentialResolver,
+    child_llm_config,
+)
 from openai4s.agent.delegation_workspace import (
     materialize_outputs_into_parent,
     prepare_child_scratch,
@@ -896,6 +901,7 @@ class _DelegationTree:
         persistence_sink: Callable[[_Child], None] | None = None,
         trusted_capture_admission: Callable[[], str | None] | None = None,
         trusted_capture_lease: Callable[[], Any] | None = None,
+        destination_credential: CredentialResolver | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.lock = threading.RLock()
@@ -917,6 +923,11 @@ class _DelegationTree:
         self.persistence_sink = persistence_sink
         self.trusted_capture_admission = trusted_capture_admission
         self.trusted_capture_lease = trusted_capture_lease
+        # Answers what a child moved off its parent's model destination may be
+        # dispatched under (see `openai4s.agent.child_model`). On the tree, so
+        # a grandchild's nested runner -- which an Agent builds without it --
+        # is judged by the same owner. None: the process environment answers.
+        self.destination_credential = destination_credential
         self.clock = clock
 
     def allocate(
@@ -1209,6 +1220,7 @@ class DelegationRunner:
         env: KernelEnvSpec | None = None,
         private_scratch: bool | None = None,
         cancelled: Callable[[], bool] | None = None,
+        destination_credential: CredentialResolver | None = None,
     ) -> None:
         if depth < 0 or depth > MAX_DEPTH:
             raise ValueError(f"delegation depth must be between 0 and {MAX_DEPTH}")
@@ -1313,7 +1325,10 @@ class DelegationRunner:
             persistence_sink=persistence_sink,
             trusted_capture_admission=trusted_capture_admission,
             trusted_capture_lease=trusted_capture_lease,
+            destination_credential=destination_credential,
         )
+        if destination_credential is not None:
+            self._tree.destination_credential = destination_credential
         if trusted_capture_admission is not None:
             self._tree.trusted_capture_admission = trusted_capture_admission
         if trusted_capture_lease is not None:
@@ -1445,14 +1460,41 @@ class DelegationRunner:
 
     def _run_one(self, child: _Child) -> dict[str, Any]:
         spec = child.spec
-        child_cfg = _child_config(self.cfg, spec)
         execution_policy = child_execution_policy(spec)
-        max_turns = _child_turn_budget(spec, self.child_max_turns, child_cfg.max_turns)
+        max_turns = _child_turn_budget(spec, self.child_max_turns, self.cfg.max_turns)
         if not child.begin(max_turns):
             self._persist_status(child, "stopped")
             self._tree.emit("stopped", child)
             return child.stopped_result()
         self._tree.emit("running", child)
+        try:
+            child_cfg = _child_config(self.cfg, spec, self._tree.destination_credential)
+        except DelegationError as error:
+            # Admission already refused this for a new request; a restored or
+            # retried child can still meet it when the destination's
+            # credential went away in between. Failed before any provider
+            # request, never dispatched under the parent's key instead.
+            detail = str(error)
+            failed = {
+                "child_id": child.child_id,
+                "name": child.name,
+                "stop_reason": "error",
+                "task_status": "failed",
+                "output": None,
+                "completion_bullets": [],
+                "error": detail,
+                "frame_id": None,
+                "turns": None,
+                "max_turns": max_turns,
+                "environment": self._child_environment(None),
+                "limitations": [],
+                "artifacts": [],
+                "artifact_refs": [],
+            }
+            child.finish_failed(detail, failed)
+            self._persist_status(child, "failed")
+            self._tree.emit("failed", child)
+            return failed
 
         child_frame_id: str | None = None
         if self.store is not None:
@@ -1878,6 +1920,10 @@ class DelegationRunner:
                 raise DelegationError(
                     f"invalid child execution policy: {error}"
                 ) from error
+            # Before any budget is reserved or row written: a model override
+            # that would move the child somewhere no credential was entered
+            # for is refused here, in the delegating Cell, at no cost.
+            _child_config(self.cfg, child_spec, self._tree.destination_credential)
             _validated_require_artifacts(child_spec)
             if _retry_budget(child_spec) > 0 and not wait:
                 # An asynchronous child is collected once through its own
@@ -2536,28 +2582,22 @@ def _apply_trusted_capture_ceiling(spec: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _child_config(cfg: Config, spec: Mapping[str, Any]) -> Config:
-    """Copy model/provider overrides without mutating the parent configuration."""
+def _child_config(
+    cfg: Config,
+    spec: Mapping[str, Any],
+    destination_credential: CredentialResolver | None = None,
+) -> Config:
+    """The child's configuration, never mutating the parent's.
+
+    Model/provider overrides apply, and the credential follows the endpoint
+    rather than the parent: see :func:`openai4s.agent.child_model.child_llm_config`.
+    """
 
     child = dataclasses.replace(cfg)
-    llm = dataclasses.replace(cfg.llm)
-    model = spec.get("model")
-    if isinstance(model, Mapping):
-        for key in (
-            "provider",
-            "model",
-            "base_url",
-            "max_tokens",
-            "temperature",
-            "timeout_s",
-        ):
-            if key in model and model[key] is not None:
-                setattr(llm, key, model[key])
-    elif model:
-        llm.model = str(model)
-    if spec.get("provider"):
-        llm.provider = str(spec["provider"])
-    child.llm = llm
+    try:
+        child.llm = child_llm_config(cfg.llm, spec, destination_credential)
+    except ChildModelError as error:
+        raise DelegationError(str(error)) from error
     return child
 
 

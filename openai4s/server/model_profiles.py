@@ -29,7 +29,7 @@ from openai4s.llm.capabilities import (
     tool_call_matches_schema,
 )
 from openai4s.llm.catalog import ModelPreset, model_presets
-from openai4s.llm.resolve import is_loopback_endpoint
+from openai4s.llm.resolve import keyless_endpoint
 from openai4s.security.secret_broker import is_ref
 from openai4s.storage.model_capability_receipts import (
     EVIDENCE_FALSE,
@@ -351,7 +351,7 @@ class ModelProfileService:
             provider, str(target.get("model") or ""), str(target.get("base_url") or "")
         ):
             return ProfileCredential("", CREDENTIAL_LOCAL)
-        inherited = self._provider_key(provider)
+        inherited = self._provider_key(provider, self._credential_scope(target))
         if inherited:
             return ProfileCredential(inherited, CREDENTIAL_ENVIRONMENT)
         return ProfileCredential("", CREDENTIAL_MISSING)
@@ -385,6 +385,54 @@ class ModelProfileService:
             spec = self._providers().get(provider, {})
             endpoint = normalize_endpoint(str(spec.get("base_url") or ""))
         return provider, endpoint
+
+    def destination_credential(self, configuration: Any) -> ProfileCredential | None:
+        """What a request to exactly this destination may carry, if configured.
+
+        `configuration` is the `LLMConfig` a delegated child would be
+        dispatched under (read for `provider`, `base_url`, `model`) after an
+        override moved it off its parent's destination. The parent's key was
+        resolved for the parent's `(provider, endpoint)` and never follows.
+
+        A destination is configured when a saved profile's current scope is
+        that destination -- its `credential` answers, the first usable one
+        winning, since each was entered for this very endpoint -- or when it is
+        a registered provider's own endpoint or the daemon's configured
+        endpoint, answered by the same rule for a configuration with no key of
+        its own: keyless when local, then the key scoped to that endpoint.
+        Anything else is
+        `None`: no credential was ever entered for it, and the caller refuses
+        rather than sending the request there at all.
+        """
+        provider = str(getattr(configuration, "provider", "") or "").strip().lower()
+        target = {
+            "provider": provider,
+            "base_url": str(getattr(configuration, "base_url", "") or ""),
+            "model": str(getattr(configuration, "model", "") or ""),
+        }
+        scope = self._credential_scope(target)
+        if not provider or not scope[1]:
+            return None
+        found: ProfileCredential | None = None
+        for profile in self.store.list_model_profiles():
+            if profile.get("deleted_at") or self._credential_scope(profile) != scope:
+                continue
+            credential = self.credential(profile)
+            if credential.usable:
+                return credential
+            found = found or credential
+        provider_scope = self._credential_scope({"provider": provider, "base_url": ""})
+        daemon_scope = self._credential_scope(
+            {
+                "provider": str(getattr(self.cfg.llm, "provider", "") or ""),
+                "base_url": str(getattr(self.cfg.llm, "base_url", "") or ""),
+            }
+        )
+        if provider in self._providers() and scope in {provider_scope, daemon_scope}:
+            credential = self.credential(target)
+            if credential.usable or found is None:
+                return credential
+        return found
 
     def user_key_applies(self, configuration: Any) -> bool:
         """Whether a member's own key (team mode, M4-1) may go out under this.
@@ -445,14 +493,27 @@ class ModelProfileService:
             provider, str(getattr(configuration, "model", "") or ""), target
         )
 
-    def _provider_key(self, provider: str) -> str:
+    def _provider_key(self, provider: str, target_scope: tuple[str, str]) -> str:
         if not provider:
             return ""
-        key = provider_env_api_key(provider)
-        if key:
-            return key
+        # A provider-specific env key belongs to that provider's configured
+        # endpoint, not every saved same-provider proxy profile.
+        own_scope = self._credential_scope({"provider": provider, "base_url": ""})
+        if target_scope == own_scope:
+            key = provider_env_api_key(provider)
+            if key:
+                return key
         base = str(getattr(self.cfg.llm, "provider", "") or "").strip().lower()
         if provider != base:
+            return ""
+        # The daemon's resolved (possibly generic) key belongs to its own
+        # endpoint. A saved profile at another same-provider endpoint must
+        # supply its own key instead of borrowing the daemon's; delegated
+        # children can select any saved profile, including an inactive one.
+        daemon_scope = self._credential_scope(
+            {"provider": base, "base_url": getattr(self.cfg.llm, "base_url", "")}
+        )
+        if target_scope != daemon_scope:
             return ""
         # The daemon's own provider: its resolved key (the only place the
         # generic `OPENAI4S_LLM_API_KEY` may apply), then an operator-injected
@@ -480,16 +541,7 @@ class ModelProfileService:
 
     @staticmethod
     def _keyless_endpoint(provider: str, model: str, base_url: str) -> bool:
-        try:
-            from openai4s.llm.capabilities import get_model_capabilities
-
-            return bool(
-                get_model_capabilities(
-                    provider, model.strip() or None, base_url=base_url.strip() or None
-                ).local_endpoint
-            )
-        except Exception:  # noqa: BLE001 - unknown protocol: the loopback rule
-            return is_loopback_endpoint(base_url)
+        return keyless_endpoint(provider, model, base_url)
 
     def _store_key(self, profile_id: str, key: str) -> str:
         """Put a profile's key behind a reference. Returns what to persist."""
