@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { t, LANG, setLang } from "../../i18n";
+import { t, LANG, langPreference, setLang, type LangPreference } from "../../i18n";
 import { getTheme, setTheme, type ThemeMode } from "../../features/theme/theme";
 import { api } from "../../features/customize/api";
 import { custTab } from "../../features/customize/actions";
@@ -10,6 +10,15 @@ import { DiagnosticsTab } from "./DiagnosticsTab";
 import { ExperimentsTab } from "./ExperimentsTab";
 import { CustRow, Hdr, Seg } from "./ui";
 
+/**
+ * Feature-local on purpose: `i18n/en.ts` / `zh.ts` are generated extracts of
+ * the legacy dictionary and are byte-checked.
+ */
+const COPY = {
+  en: { langSystem: "System" },
+  zh: { langSystem: "跟随系统" },
+} as const;
+
 export function GeneralTab() {
   const alive = useAlive();
   const [keyLine, setKeyLine] = useState(t("cust.models.key.missing"));
@@ -18,6 +27,10 @@ export function GeneralTab() {
   // move the highlighted segment.
   const [theme, setThemeChoice] = useState<ThemeMode>(getTheme);
   const [layout, setLayoutChoice] = useState<LayoutName>(getLayout);
+  // Read on every render, not cached at mount: the Shell repaints on each
+  // language change, including one made in another tab. The tick only
+  // repaints this tab at once after a pick here.
+  const [, setLangTick] = useState(0);
 
   useEffect(() => {
     void (async () => {
@@ -71,13 +84,15 @@ export function GeneralTab() {
       </CustRow>
       <CustRow name={t("cust.general.language")} desc={t("cust.general.languageDesc")}>
         <Seg
-          value={LANG}
+          value={langPreference()}
           options={[
             ["zh", "中文"],
             ["en", "English"],
+            ["system", (LANG === "zh" ? COPY.zh : COPY.en).langSystem],
           ]}
           onPick={(val) => {
-            void setLang(val);
+            void setLang(val as LangPreference);
+            setLangTick((tick) => tick + 1);
           }}
         />
       </CustRow>

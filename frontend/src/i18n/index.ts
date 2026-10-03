@@ -6,16 +6,21 @@ export {
   applyStaticI18n,
   detectLang,
   i18nReady,
+  langPreference,
   languageRevision,
   loadLocale,
   onLanguageChange,
   planModePayload,
   refreshLangToggle,
+  savedLang,
   setLang,
+  syncSavedLanguage,
+  syncSystemLanguage,
+  systemLang,
   t,
   tOptional,
 } from "./runtime";
-export type { I18nDict, Lang } from "./runtime";
+export type { I18nDict, Lang, LangPreference } from "./runtime";
 
 // F-07 window export. `t` is in the E2E contract (10 references across three
 // browser files), and F-05 reserves it with a stub that throws. The owning
