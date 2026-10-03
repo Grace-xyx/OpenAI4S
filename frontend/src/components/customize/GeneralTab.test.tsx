@@ -38,12 +38,15 @@ const mocks = vi.hoisted(() => ({
   alive: (): boolean => true,
   theme: "light",
   layout: "comfortable",
+  lang: "system",
+  setLang: vi.fn(),
 }));
 vi.mock("../../i18n", () => ({
   LANG: "en",
   t: (key: string, ...args: unknown[]) => [key, ...args].join(" "),
   tOptional: () => null,
-  setLang: vi.fn(),
+  langPreference: () => mocks.lang,
+  setLang: mocks.setLang,
   onLanguageChange: () => () => undefined,
 }));
 vi.mock("./use-timer-lease", () => ({ useAlive: () => mocks.alive, useTimerLease: () => ({}) }));
@@ -95,6 +98,10 @@ beforeEach(() => {
   effects.length = 0;
   mocks.theme = "light";
   mocks.layout = "comfortable";
+  mocks.lang = "system";
+  mocks.setLang.mockReset().mockImplementation((value: string) => {
+    mocks.lang = value;
+  });
   mocks.custTab.mockReset();
   mocks.fetch.mockReset().mockImplementation(() => Promise.resolve(new Response("{}")));
   vi.stubGlobal("fetch", mocks.fetch);
@@ -119,5 +126,23 @@ describe("General theme and layout", () => {
     expect(mocks.custTab).not.toHaveBeenCalled();
     expect(effects).toHaveLength(0);
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("General language", () => {
+  it("offers following the system and shows it until a language is picked", () => {
+    const [, , language] = segments(render());
+    expect(language!.props!.value).toBe("system");
+    const options = language!.props!.options as Array<[string, string]>;
+    expect(options.map(([value]) => value)).toEqual(["zh", "en", "system"]);
+    expect(options[2]![1]).toBe("System");
+
+    language!.props!.onPick!("en");
+    expect(mocks.setLang).toHaveBeenLastCalledWith("en");
+    expect(segments(render())[2]!.props!.value).toBe("en");
+
+    language!.props!.onPick!("system");
+    expect(mocks.setLang).toHaveBeenLastCalledWith("system");
+    expect(segments(render())[2]!.props!.value).toBe("system");
   });
 });

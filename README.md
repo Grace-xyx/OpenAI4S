@@ -179,7 +179,7 @@ Data lives in `~/.openai4s`. If you close the tab, `openai4s url` prints the aut
 **First run — point it at a model, then at search.** No key ships, so once the workbench is open:
 
 1. **Model API** — open **Settings ⚙ → Models**, pick a protocol (**Ark-compatible** for Doubao/GLM/Kimi/DeepSeek/MiniMax, or **OpenAI-** / **Anthropic-compatible**), paste your **API Key**, click **Add**, then **Set active**. Cheapest path: the `ark` protocol on Volcengine Ark's ¥9.9/mo plan.
-2. **Search API** *(optional, recommended)* — open **Settings ⚙ → Network**, keep **Allow network access** on, and paste your Ark **Agent Plan Key** into the primary **Doubao Search Custom** card → **Save credential**. If the active Ark model already uses that key, OpenAI4S reuses it automatically. Tavily and keyless engines remain backup options; the dedicated Doubao health check never reports a fallback result as Doubao.
+2. **Search API** *(optional, recommended)* — open **Settings ⚙ → Network**, keep **Allow network access** on, and paste your Ark **Agent Plan Key** into the primary **Doubao Search Custom** card → **Save credential**. If the active model is an Ark **Agent Plan**, you can skip this step: OpenAI4S saves that key as the default for both Doubao Search and DataPro professional datasets, and they keep working after you switch to another model. Tavily and keyless engines remain backup options; the dedicated Doubao health check never reports a fallback result as Doubao.
 
 Full walkthrough (install → model → search → R kernel, plus the Gatekeeper steps for the v0.2.0 preview image): **[Startup guide](docs/startup-guide.md)**.
 

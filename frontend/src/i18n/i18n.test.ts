@@ -16,10 +16,12 @@ import {
   applyStaticI18n,
   detectLang,
   i18nReady,
+  langPreference,
   loadLocale,
   onLanguageChange,
   planModePayload,
   setLang,
+  syncSystemLanguage,
   t,
   tOptional,
 } from "./runtime";
@@ -184,7 +186,7 @@ describe("F-07 setLang / detectLang / applyStaticI18n", () => {
     expect(store["os-lang"]).toBe("zh");
   });
 
-  it("detectLang reads os-lang then navigator.languages /^zh/i", () => {
+  it("detectLang reads os-lang, then the browser's languages in order", () => {
     const store: Record<string, string> = { "os-lang": "en" };
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
@@ -204,6 +206,100 @@ describe("F-07 setLang / detectLang / applyStaticI18n", () => {
       value: { languages: ["zh-CN"], language: "zh-CN" },
     });
     expect(detectLang()).toBe("zh");
+  });
+
+  describe("first-launch language", () => {
+    const original = {
+      localStorage: Object.getOwnPropertyDescriptor(globalThis, "localStorage"),
+      navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+    };
+    let store: Record<string, string> = {};
+
+    function browser(languages: string[], language = languages[0] ?? ""): void {
+      Object.defineProperty(globalThis, "navigator", {
+        configurable: true,
+        value: { languages, language },
+      });
+    }
+
+    function storage(initial: Record<string, string> = {}): void {
+      store = { ...initial };
+      Object.defineProperty(globalThis, "localStorage", {
+        configurable: true,
+        value: {
+          getItem: (k: string) => store[k] ?? null,
+          setItem: (k: string, v: string) => {
+            store[k] = v;
+          },
+          removeItem: (k: string) => {
+            delete store[k];
+          },
+        },
+      });
+    }
+
+    afterEach(() => {
+      for (const [name, descriptor] of Object.entries(original)) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete (globalThis as Record<string, unknown>)[name];
+      }
+    });
+
+    it("takes the browser's languages in the user's order", () => {
+      storage();
+      // Any Chinese entry used to win: English-first browsers opened in Chinese.
+      browser(["en-US", "en", "zh-CN"]);
+      expect(detectLang()).toBe("en");
+      browser(["zh-TW", "en-US"]);
+      expect(detectLang()).toBe("zh");
+      browser(["fr-FR", "zh-CN", "en"]);
+      expect(detectLang()).toBe("zh");
+      browser(["zh_Hans_CN"]);
+      expect(detectLang()).toBe("zh");
+      browser(["ja-JP"]);
+      expect(detectLang()).toBe("en");
+      // An empty list is still a list: fall back to navigator.language.
+      browser([], "zh-CN");
+      expect(detectLang()).toBe("zh");
+    });
+
+    it("a saved pick still wins over the browser", () => {
+      storage({ "os-lang": "zh" });
+      browser(["en-US"]);
+      expect(detectLang()).toBe("zh");
+      expect(langPreference()).toBe("zh");
+    });
+
+    it("setLang('system') forgets the saved pick and follows the browser", async () => {
+      await i18nReady();
+      storage({ "os-lang": "zh" });
+      browser(["en-GB", "zh-CN"]);
+
+      await setLang("system");
+
+      expect(store["os-lang"]).toBeUndefined();
+      expect(LANG).toBe("en");
+      expect(langPreference()).toBe("system");
+      expect(t("theme.toggle")).toBe("Toggle theme");
+    });
+
+    it("follows a browser language change only while nothing is saved", async () => {
+      await i18nReady();
+      storage();
+      browser(["zh-CN"]);
+      await setLang("system");
+      expect(LANG).toBe("zh");
+
+      browser(["en-US"]);
+      await syncSystemLanguage();
+      expect(LANG).toBe("en");
+
+      await setLang("zh");
+      browser(["en-US"]);
+      await syncSystemLanguage();
+      expect(LANG).toBe("zh");
+      expect(store["os-lang"]).toBe("zh");
+    });
   });
 
   it("i18nReady and setLang write document.documentElement.lang", async () => {
