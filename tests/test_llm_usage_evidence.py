@@ -279,6 +279,80 @@ def test_local_resource_errors_use_safe_bilingual_projection(kind):
         assert friendly and "private" not in friendly
 
 
+@pytest.mark.parametrize("language", ["zh", "en"])
+def test_a_rate_limit_names_the_retry_knobs_and_never_claims_a_vetoed_retry(
+    language,
+):
+    """A user on an RPM-limited relay kept seeing "continue later" with no hint
+    that anything was tunable. And when output was already committed the
+    transport cannot replay, so "retries were attempted" would be false."""
+    from openai4s.llm.models import TransportError, llm_failure_code
+    from openai4s.server.gateway import SessionRunner
+
+    limited = TransportError("private upstream body", status=429, retryable=True)
+    assert llm_failure_code(limited) == "llm_rate_limited"
+    friendly = SessionRunner._friendly_error(limited, language=language)
+    assert "OPENAI4S_LLM_MAX_RETRIES" in friendly
+    assert "OPENAI4S_LLM_RETRY_BUDGET" in friendly
+    assert "private" not in friendly
+
+    committed = TransportError(
+        "private upstream body", status=429, retryable=True, output_committed=True
+    )
+    friendly = SessionRunner._friendly_error(committed, language=language)
+    assert "private" not in friendly
+    assert ("没有自动重试" if language == "zh" else "not retried") in friendly
+    assert ("已按重试策略" if language == "zh" else "were attempted") not in friendly
+
+
+@pytest.mark.parametrize("language", ["zh", "en"])
+@pytest.mark.parametrize(
+    ("retries", "stop", "names", "claims_retry"),
+    [
+        (None, None, "OPENAI4S_LLM_MAX_RETRIES", False),
+        (2, None, "OPENAI4S_LLM_MAX_RETRIES", True),
+        (0, None, "OPENAI4S_LLM_MAX_RETRIES", False),
+        (0, "budget", "OPENAI4S_LLM_RETRY_BUDGET", False),
+        (1, "deadline", "OPENAI4S_LLM_TOTAL_TIMEOUT", False),
+    ],
+)
+def test_a_rate_limit_message_matches_what_the_retry_policy_did(
+    language, retries, stop, names, claims_retry
+):
+    """Only a recorded retry may be reported as one, and the advice names the
+    setting that actually stopped the call: a Retry-After longer than the
+    budget is fixed by the budget, a wait past the deadline by the timeout."""
+    from openai4s.llm.models import TransportError
+    from openai4s.server.gateway import SessionRunner
+
+    error = TransportError("private upstream body", status=429, retryable=True)
+    error.retries_attempted = retries
+    error.retry_stop = stop
+    friendly = SessionRunner._friendly_error(error, language=language)
+    assert names in friendly
+    assert "private" not in friendly
+    claim = "已按重试策略自动退避重试" if language == "zh" else "were attempted"
+    assert (claim in friendly) is claims_retry
+
+
+@pytest.mark.parametrize("language", ["zh", "en"])
+@pytest.mark.parametrize("code", ["RequestBurstTooFast", "ServerOverloaded"])
+@pytest.mark.parametrize("retries", [None, 0])
+def test_capacity_messages_do_not_claim_an_unrecorded_retry(language, code, retries):
+    from openai4s.llm.models import TransportError
+    from openai4s.server.gateway import SessionRunner
+
+    error = TransportError(
+        "private upstream body", status=429, error_code=code, retryable=True
+    )
+    error.retries_attempted = retries
+    friendly = SessionRunner._friendly_error(error, language=language)
+    for claim in ("退避重试", "retried automatically", "retried with backoff"):
+        assert claim not in friendly
+    if code == "RequestBurstTooFast":
+        assert ("突发流量保护" if language == "zh" else "burst-traffic") in friendly
+
+
 @pytest.mark.parametrize("wire", ["review", "scientific"])
 @pytest.mark.parametrize(
     "attested,total",
