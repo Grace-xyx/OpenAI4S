@@ -10,6 +10,8 @@
 import { signal } from "@preact/signals";
 
 export type Lang = "zh" | "en";
+/** A saved pick, or "system": follow the browser's language list. */
+export type LangPreference = Lang | "system";
 export type I18nDict = Record<string, string>;
 
 /**
@@ -27,23 +29,55 @@ export const languageRevision = signal(0);
 // I18N.zh / I18N.en are populated by loadLocale (dynamic import of zh.ts / en.ts).
 export const I18N: { zh: I18nDict; en: I18nDict } = { zh: {}, en: {} };
 
-export function detectLang(): Lang {
+/**
+ * The pick made in this page, kept for when storage refuses it: with site data
+ * blocked, a pick used to be forgotten at once, so the language control showed
+ * "system" over an explicit choice and a browser language change undid it.
+ */
+let sessionPick: LangPreference | null = null;
+
+/** The language the user picked in this browser, or null when they never did. */
+export function savedLang(): Lang | null {
   try {
     const s = localStorage.getItem("os-lang");
     if (s === "zh" || s === "en") return s;
   } catch {
     /* localStorage missing or blocked */
   }
+  return null;
+}
+
+/**
+ * The first of the browser's preferred languages this UI has, in the user's
+ * order. This asked whether *any* entry was Chinese, so a browser set to
+ * English with Chinese further down its list opened in Chinese. A list naming
+ * neither gets English. `theme-bootstrap.js` applies the same rule to
+ * `<html lang>` before this module loads.
+ */
+export function systemLang(): Lang {
   try {
-    return (navigator.languages || [navigator.language || ""]).some((l) =>
-      /^zh/i.test(l),
-    )
-      ? "zh"
-      : "en";
+    const listed =
+      navigator.languages && navigator.languages.length
+        ? navigator.languages
+        : [navigator.language || ""];
+    for (const tag of listed) {
+      if (/^zh(?:[-_]|$)/i.test(tag)) return "zh";
+      if (/^en(?:[-_]|$)/i.test(tag)) return "en";
+    }
+    return "en";
   } catch {
     /* navigator missing */
   }
   return "zh";
+}
+
+export function detectLang(): Lang {
+  return savedLang() ?? systemLang();
+}
+
+/** What the language control shows: a saved pick, or "system" when there is none. */
+export function langPreference(): LangPreference {
+  return sessionPick ?? savedLang() ?? "system";
 }
 
 export let LANG: Lang = detectLang();
@@ -149,6 +183,16 @@ applyDocumentLang(LANG);
 // starts the load, and must not report a failed chunk as an uncaught rejection.
 void i18nReady().catch(() => undefined);
 
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("languagechange", () => {
+    void syncSystemLanguage().catch(() => undefined);
+  });
+  window.addEventListener("storage", (event: StorageEvent) => {
+    if (event.key !== null && event.key !== "os-lang") return;
+    void syncSavedLanguage().catch(() => undefined);
+  });
+}
+
 // t("key", ...args) — current-language string with {0},{1}… positional interpolation; falls back to zh, then the key.
 // `t` falls back to the key itself, which is right for a missing translation
 // (a developer sees the key) and wrong for an optional label (a user would see
@@ -234,15 +278,62 @@ export function onLanguageChange(hook: (lang: Lang) => void): () => void {
   };
 }
 
+/**
+ * Apply and save a language pick. "system" removes the saved pick instead, so
+ * the UI follows the browser's language list again -- until then one click on
+ * a language, even the one already shown, fixed it for good.
+ */
 export async function setLang(lang: string): Promise<void> {
+  if (lang === "system") {
+    sessionPick = null;
+    try {
+      localStorage.removeItem("os-lang");
+    } catch {
+      // The old value may still be readable even though removal was refused.
+      sessionPick = "system";
+    }
+    await applyLang(systemLang());
+    return;
+  }
   LANG = lang === "en" ? "en" : "zh";
+  sessionPick = null;
   try {
     localStorage.setItem("os-lang", LANG);
   } catch {
-    /* ignore quota / missing storage */
+    // Storage refused the pick: keep it for this page. A pick storage took
+    // is shared, so another tab choosing "System" must be able to clear it.
+    sessionPick = LANG;
   }
   await loadDictionaries(LANG);
   repaintLanguage();
+}
+
+async function applyLang(lang: Lang): Promise<void> {
+  LANG = lang;
+  await loadDictionaries(LANG);
+  repaintLanguage();
+}
+
+/**
+ * Follow a change of the browser's language list, unless the user picked a
+ * language here. Wired to the window's `languagechange` event below.
+ */
+export async function syncSystemLanguage(): Promise<void> {
+  if (langPreference() !== "system") return;
+  const next = systemLang();
+  if (next !== LANG) await applyLang(next);
+}
+
+/**
+ * Follow a pick made in another tab (the window's `storage` event, which only
+ * fires when storage works). Without it a tab kept its language while its
+ * language control showed the other tab's pick, and ignored the browser.
+ */
+export async function syncSavedLanguage(): Promise<void> {
+  sessionPick = null;
+  const next = savedLang() ?? systemLang();
+  if (next !== LANG) await applyLang(next);
+  else repaintLanguage();
 }
 
 /** Everything that shows the active language: static labels, toggle, hooks, subscribers. */

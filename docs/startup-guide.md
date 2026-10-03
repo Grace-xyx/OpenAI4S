@@ -139,9 +139,11 @@ Custom is the primary option** and uses an Ark Agent Plan Key:
 2. Make sure **Allow network access** is toggled **on** — this master switch
    gates the agent's `web_search` / `web_fetch` / download tools.
 3. Paste your Ark **Agent Plan Key** into the **Doubao Search Custom** card and
-   click **Save credential**. If the active Ark model profile already uses that
-   same key, OpenAI4S reuses it automatically; the password field is cleared
-   immediately after saving and the key is never displayed back.
+   click **Save credential**. The password field is cleared immediately after
+   saving and the key is never displayed back. If your model is an Ark
+   **Agent Plan** (set up in §3), this step is already done: activating it
+   saves the same key as the default for Doubao Search and DataPro, and both
+   keep it after you switch to another model.
 4. Run one query in the card. The UI marks Doubao available only after the
    direct provider returns at least one real result; this check never falls
    back to another search engine.
@@ -304,8 +306,9 @@ Custom 版是主选项**，使用火山方舟 Agent Plan Key：
 2. 确认 **允许联网** 开关处于**打开**状态——这个总开关控制智能体的
    `web_search` / `web_fetch` / 下载工具。
 3. 把火山方舟 **Agent Plan Key** 粘贴到**豆包搜索 Custom 版**卡片，点**保存凭证**。
-   当前 Ark 模型配置已经使用同一个 Key 时，OpenAI4S 会自动复用；保存后密码输入框立即
-   清空，Key 也不会回显。
+   保存后密码输入框立即清空，Key 也不会回显。如果你的模型是火山方舟 **Agent Plan**
+   （第 3 节配置的），这一步已经自动完成：启用它时 OpenAI4S 会把同一个 Key 设为豆包搜索
+   和 DataPro 的默认凭证，之后换用别的模型也会保留。
 4. 在卡片里真实查询一次。只有豆包直连返回至少一条真实结果时，UI 才标记豆包可用；
    这个专用检查绝不回退到其他搜索引擎。
 

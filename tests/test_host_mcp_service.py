@@ -48,6 +48,9 @@ class FakeStore:
     def get_setting(self, key, default=None):
         return self.settings.get(key, default)
 
+    def set_setting(self, key, value):
+        self.settings[key] = value
+
     def get_secret_setting(self, key):
         return self.secret_settings.get(key, "")
 
