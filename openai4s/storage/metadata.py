@@ -306,13 +306,13 @@ class FolderRepository:
 
     def rename(self, folder_id: str, name: str) -> bool:
         """False when no folder has that id -- the UPDATE matched nothing."""
-        return (
-            self._execute(
+        with self._lock:
+            cursor = self._connection.execute(
                 "UPDATE folders SET name=? WHERE folder_id=?",
                 (name, folder_id),
             )
-            > 0
-        )
+            self._connection.commit()
+        return cursor.rowcount > 0
 
     def delete(self, folder_id: str) -> None:
         # Keep the historical two-transaction boundary: frames are un-filed and
@@ -332,11 +332,10 @@ class FolderRepository:
             (folder_id, frame_id),
         )
 
-    def _execute(self, sql: str, params: tuple = ()) -> int:
+    def _execute(self, sql: str, params: tuple = ()) -> None:
         with self._lock:
-            cursor = self._connection.execute(sql, params)
+            self._connection.execute(sql, params)
             self._connection.commit()
-        return cursor.rowcount
 
 
 class EndpointRepository:

@@ -210,13 +210,13 @@ class ConnectorRepository:
 
     def set_enabled(self, connector_id: str, enabled: bool) -> bool:
         """False when no connector has that id -- the UPDATE matched nothing."""
-        return (
-            self._execute(
+        with self._lock:
+            cursor = self._connection.execute(
                 "UPDATE connectors SET enabled=?,updated_at=? WHERE connector_id=?",
                 (1 if enabled else 0, self._clock_ms(), connector_id),
             )
-            > 0
-        )
+            self._connection.commit()
+        return cursor.rowcount > 0
 
     def delete(self, connector_id: str) -> None:
         self._execute(
@@ -224,11 +224,10 @@ class ConnectorRepository:
             (connector_id,),
         )
 
-    def _execute(self, sql: str, params: tuple = ()) -> int:
+    def _execute(self, sql: str, params: tuple = ()) -> None:
         with self._lock:
-            cursor = self._connection.execute(sql, params)
+            self._connection.execute(sql, params)
             self._connection.commit()
-        return cursor.rowcount
 
 
 __all__ = [
