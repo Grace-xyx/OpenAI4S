@@ -14893,7 +14893,11 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 except Exception:  # noqa: BLE001 — undecidable is refused
                     raise GatewayError(404, "not found") from None
                 if project_id is None:
-                    return  # unknown id: the handler answers for it
+                    # Not left to the handler: it answers a missing id with
+                    # its own body -- a rename's `folder not found`, an
+                    # idempotent DELETE's 200 -- which told a member whether
+                    # a guessed id exists in a project they cannot read.
+                    raise GatewayError(404, "not found")
                 if not team_policy.may_read_project(store, identity, project_id):
                     raise GatewayError(404, "not found")
                 return
@@ -17002,13 +17006,16 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             if m:
                 folder_id = m.group(1)
                 if method in ("PUT", "PATCH"):
-                    # `rename_folder` is a bare UPDATE: naming no row still
-                    # answered 200, indistinguishable from a rename that
-                    # landed — the same defect #206 closed for project edits.
-                    # DELETE below stays idempotent by design.
-                    if store.project_of_folder(folder_id) is None:
+                    # A rename naming no row answered 200, indistinguishable
+                    # from one that landed — the same defect #206 closed for
+                    # project edits. Keyed on whether the UPDATE itself matched,
+                    # so a DELETE racing a separate existence check cannot turn
+                    # it back into a false success. DELETE below stays
+                    # idempotent by design.
+                    if not store.rename_folder(
+                        folder_id, self._body().get("name") or ""
+                    ):
                         raise GatewayError(404, "folder not found")
-                    store.rename_folder(folder_id, self._body().get("name") or "")
                     self._json({"ok": True})
                     return
                 if method == "DELETE":
@@ -19383,13 +19390,13 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             m = re.fullmatch(r"/connectors/([^/]+)/enabled", sub)
             if m and method in ("PUT", "PATCH"):
                 enabled = bool(self._body().get("enabled", True))
-                # `set_enabled` is a bare UPDATE: an unknown id matched no row
-                # and still answered ok, while the edit and probe siblings
-                # answer 404 for the same id.
-                if store.get_connector(m.group(1)) is None:
+                # An unknown id matched no row and still answered ok, while the
+                # edit and probe siblings answer 404 for the same id. Keyed on
+                # whether the UPDATE itself matched, not on a separate read a
+                # concurrent DELETE could invalidate.
+                if not store.set_connector_enabled(m.group(1), enabled):
                     self._json({"error": "connector not found"}, 404)
                     return
-                store.set_connector_enabled(m.group(1), enabled)
                 if not enabled:
                     # Disabling wrote the row and left the child running. A
                     # connector the user has switched off should not still be a

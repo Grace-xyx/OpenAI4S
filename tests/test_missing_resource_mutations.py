@@ -12,8 +12,11 @@ indistinguishable from a write that landed, and the same defect class
 - ``PUT|PATCH /connectors/{id}/enabled`` flipped a bare UPDATE that matches
   no row, while the edit and probe siblings answer 404 for the same id.
 
-Every test here fails if the refusal is removed: the route goes back to a
-200 that either writes nothing (rename) or writes an orphan row (enabled).
+Every refusal test here fails if the refusal is removed: the route goes back
+to a 200 that either writes nothing (rename) or writes an orphan row
+(enabled). The happy-path tests pin that a real row still lands, through both
+verbs -- including a rename to the name it already has, which matches a row
+without changing it and must not be mistaken for a miss.
 """
 
 from __future__ import annotations
@@ -83,18 +86,20 @@ def test_renaming_a_missing_folder_is_refused(tmp_path, method):
         runner.close()
 
 
-def test_renaming_an_existing_folder_still_lands(tmp_path):
+@pytest.mark.parametrize("method", ["PUT", "PATCH"])
+@pytest.mark.parametrize("new_name", ["after", "before"])
+def test_renaming_an_existing_folder_still_lands(tmp_path, method, new_name):
     cfg = _cfg(tmp_path)
     runner = gateway_mod.SessionRunner(cfg, _Hub())
-    store = get_store(cfg.db_path)
-    folder = store.create_folder(project_id="default", name="before")
     try:
+        store = get_store(cfg.db_path)
+        folder = store.create_folder(project_id="default", name="before")
         handler, seen = _handler(cfg, runner)
-        handler._body = lambda: {"name": "after"}
-        handler._api("PATCH", f"/folders/{folder['folder_id']}")
+        handler._body = lambda: {"name": new_name}
+        handler._api(method, f"/folders/{folder['folder_id']}")
         assert seen[-1] == ({"ok": True}, 200)
         renamed = store.list_folders("default")
-        assert [f["name"] for f in renamed] == ["after"]
+        assert [f["name"] for f in renamed] == [new_name]
     finally:
         runner.close()
 
@@ -103,8 +108,8 @@ def test_renaming_an_existing_folder_still_lands(tmp_path):
 def test_enabling_a_missing_agent_is_refused(tmp_path, method):
     cfg = _cfg(tmp_path)
     runner = gateway_mod.SessionRunner(cfg, _Hub())
-    store = get_store(cfg.db_path)
     try:
+        store = get_store(cfg.db_path)
         handler, seen = _handler(cfg, runner)
         handler._body = lambda: {"enabled": False}
         handler._api(method, "/agents/no-such-agent/enabled")
@@ -116,15 +121,16 @@ def test_enabling_a_missing_agent_is_refused(tmp_path, method):
         runner.close()
 
 
-def test_enabling_a_known_agent_still_lands(tmp_path):
+@pytest.mark.parametrize("method", ["PUT", "PATCH"])
+def test_enabling_a_known_agent_still_lands(tmp_path, method):
     cfg = _cfg(tmp_path)
     runner = gateway_mod.SessionRunner(cfg, _Hub())
-    store = get_store(cfg.db_path)
     name = gateway_mod._BUILTIN_AGENTS[0]["name"]
     try:
+        store = get_store(cfg.db_path)
         handler, seen = _handler(cfg, runner)
         handler._body = lambda: {"enabled": False}
-        handler._api("PATCH", f"/agents/{name}/enabled")
+        handler._api(method, f"/agents/{name}/enabled")
         body, code = seen[-1]
         assert code == 200
         assert body["ok"] is True and body["enabled"] is False
@@ -146,20 +152,21 @@ def test_enabling_a_missing_connector_is_refused(tmp_path, method):
         runner.close()
 
 
-def test_enabling_an_existing_connector_still_lands(tmp_path):
+@pytest.mark.parametrize("method", ["PUT", "PATCH"])
+def test_enabling_an_existing_connector_still_lands(tmp_path, method):
     cfg = _cfg(tmp_path)
     runner = gateway_mod.SessionRunner(cfg, _Hub())
-    store = get_store(cfg.db_path)
-    store.upsert_connector(
-        connector_id="conn-x",
-        name="X",
-        command=["x"],
-        enabled=True,
-    )
     try:
+        store = get_store(cfg.db_path)
+        store.upsert_connector(
+            connector_id="conn-x",
+            name="X",
+            command=["x"],
+            enabled=True,
+        )
         handler, seen = _handler(cfg, runner)
         handler._body = lambda: {"enabled": False}
-        handler._api("PATCH", "/connectors/conn-x/enabled")
+        handler._api(method, "/connectors/conn-x/enabled")
         assert seen[-1] == ({"ok": True}, 200)
         assert store.get_connector("conn-x")["enabled"] is False
     finally:
