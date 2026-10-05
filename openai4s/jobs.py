@@ -86,6 +86,7 @@ TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled", "timeout", "abando
 JOB_FAILURE_STATUS: dict[str, int] = {
     "job_empty_command": 400,
     "job_bad_command": 400,
+    "job_bad_kind": 400,
     "job_bad_deadline": 400,
     "job_bad_cwd": 400,
     "job_cwd_escape": 400,
@@ -459,7 +460,11 @@ class JobManager:
         command = (command or "").strip()
         if not command:
             return {"error": "empty command", "code": "job_empty_command"}
-        kind = kind if kind in ("bash", "python") else "bash"
+        # Refused, not coerced. A mistyped kind used to fall back to bash, so
+        # `{"kind": "Python", "command": "import os"}` ran Python source under
+        # `bash -c` and was reported as an accepted job.
+        if kind not in ("bash", "python"):
+            return {"error": 'kind must be "bash" or "python"', "code": "job_bad_kind"}
         try:
             deadline = float(
                 DEFAULT_JOB_DEADLINE_S if deadline_s is None else deadline_s

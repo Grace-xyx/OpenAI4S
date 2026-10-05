@@ -15,8 +15,8 @@ missing or unmapped is 400 rather than 200.
 - `job_not_found` (unknown id on read or cancel) → 404.
 - `job_cancel_failed` → 500: the job exists and is still running. Deciding
   404 from the mere presence of `error` answered this one "no such job".
-- Client input (`job_empty_command`, `job_bad_command`, `job_bad_deadline`,
-  `job_bad_cwd`, `job_cwd_escape`) → 400, `job_capacity` → 429,
+- Client input (`job_empty_command`, `job_bad_command`, `job_bad_kind`,
+  `job_bad_deadline`, `job_bad_cwd`, `job_cwd_escape`) → 400, `job_capacity` → 429,
   `job_workspace_unavailable` → 500, `job_manager_closed` → 503.
 
 Every refusal test here fails if its table entry is removed: the route
@@ -153,6 +153,9 @@ def test_submitting_an_escaping_cwd_is_a_400(route):
         ({"command": "echo hi", "cwd": 5}, "job_bad_cwd"),
         ({"command": "echo hi", "cwd": ["a"]}, "job_bad_cwd"),
         ({"command": "echo hi", "cwd": "a\x00b"}, "job_bad_cwd"),
+        # A mistyped kind used to run the command under bash instead.
+        ({"command": "import os", "kind": "Python"}, "job_bad_kind"),
+        ({"command": "echo hi", "kind": "R"}, "job_bad_kind"),
     ],
 )
 def test_a_mistyped_field_is_a_400_not_a_crash(route, body, expected):
