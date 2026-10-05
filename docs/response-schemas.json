@@ -10478,9 +10478,6 @@
                               "sidecar_sha256": {
                                 "type": "null"
                               },
-                              "source": {
-                                "type": "string"
-                              },
                               "version": {
                                 "type": "null"
                               }
@@ -12184,9 +12181,6 @@
                                     },
                                     "sidecar_sha256": {
                                       "type": "null"
-                                    },
-                                    "source": {
-                                      "type": "string"
                                     },
                                     "version": {
                                       "type": "null"
@@ -23212,6 +23206,31 @@
         "type": "object"
       }
     },
+    "PATCH /folders/([^/]+) [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "PATCH /folders/([^/]+) [ok]": {
       "schema": {
         "properties": {
@@ -32276,9 +32295,6 @@
                             "sidecar_sha256": {
                               "type": "null"
                             },
-                            "source": {
-                              "type": "string"
-                            },
                             "version": {
                               "type": "null"
                             }
@@ -35615,9 +35631,6 @@
                             "sidecar_sha256": {
                               "type": "null"
                             },
-                            "source": {
-                              "type": "string"
-                            },
                             "version": {
                               "type": "null"
                             }
@@ -36142,9 +36155,6 @@
                                         "sidecar_sha256": {
                                           "type": "null"
                                         },
-                                        "source": {
-                                          "type": "string"
-                                        },
                                         "version": {
                                           "type": "null"
                                         }
@@ -36201,9 +36211,6 @@
                                         },
                                         "sidecar_sha256": {
                                           "type": "null"
-                                        },
-                                        "source": {
-                                          "type": "string"
                                         },
                                         "version": {
                                           "type": "null"
@@ -43846,6 +43853,31 @@
           "error",
           "method",
           "path",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "PUT /folders/([^/]+) [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
           "request_id",
           "status"
         ],
