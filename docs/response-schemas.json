@@ -8605,6 +8605,68 @@
       "schema": {
         "properties": {
           "connectors": {
+            "items": {
+              "properties": {
+                "args": {
+                  "type": "array"
+                },
+                "command": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "command_display": {
+                  "type": "string"
+                },
+                "connector_id": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "integer"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "env_keys": {
+                  "type": "array"
+                },
+                "has_env": {
+                  "type": "boolean"
+                },
+                "managed": {
+                  "type": "boolean"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "transport": {
+                  "type": "string"
+                },
+                "updated_at": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "args",
+                "command",
+                "command_display",
+                "connector_id",
+                "created_at",
+                "description",
+                "enabled",
+                "env_keys",
+                "has_env",
+                "managed",
+                "name",
+                "transport",
+                "updated_at"
+              ],
+              "type": "object"
+            },
             "type": "array"
           }
         },
@@ -10565,6 +10627,9 @@
                               "sidecar_sha256": {
                                 "type": "null"
                               },
+                              "source": {
+                                "type": "string"
+                              },
                               "version": {
                                 "type": "null"
                               }
@@ -12268,6 +12333,9 @@
                                     },
                                     "sidecar_sha256": {
                                       "type": "null"
+                                    },
+                                    "source": {
+                                      "type": "string"
                                     },
                                     "version": {
                                       "type": "null"
@@ -32488,6 +32556,9 @@
                             "sidecar_sha256": {
                               "type": "null"
                             },
+                            "source": {
+                              "type": "string"
+                            },
                             "version": {
                               "type": "null"
                             }
@@ -35824,6 +35895,9 @@
                             "sidecar_sha256": {
                               "type": "null"
                             },
+                            "source": {
+                              "type": "string"
+                            },
                             "version": {
                               "type": "null"
                             }
@@ -36348,6 +36422,9 @@
                                         "sidecar_sha256": {
                                           "type": "null"
                                         },
+                                        "source": {
+                                          "type": "string"
+                                        },
                                         "version": {
                                           "type": "null"
                                         }
@@ -36404,6 +36481,9 @@
                                         },
                                         "sidecar_sha256": {
                                           "type": "null"
+                                        },
+                                        "source": {
+                                          "type": "string"
                                         },
                                         "version": {
                                           "type": "null"
