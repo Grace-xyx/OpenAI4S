@@ -17025,9 +17025,16 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     # so a DELETE racing a separate existence check cannot turn
                     # it back into a false success. DELETE below stays
                     # idempotent by design.
-                    if not store.rename_folder(
-                        folder_id, self._body().get("name") or ""
-                    ):
+                    name = self._body().get("name")
+                    if not isinstance(name, str) or not name.strip():
+                        # `{}` blanked the name and a non-string reached
+                        # sqlite3 as a bound parameter (a 500). Existence is
+                        # answered first, as the connector edit route does, so
+                        # an unknown id stays a 404 whatever the body says.
+                        if store.project_of_folder(folder_id) is None:
+                            raise GatewayError(404, "folder not found")
+                        raise GatewayError(400, "folder name cannot be empty")
+                    if not store.rename_folder(folder_id, name):
                         raise GatewayError(404, "folder not found")
                     self._json({"ok": True})
                     return
@@ -19054,8 +19061,14 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 enabled = bool(self._body().get("enabled", True))
                 # The GET sibling answers 404 for a name no known agent has,
                 # while this route wrote a capability row for ANY name and
-                # answered ok — an orphan state row and a false success.
-                if name not in {a["name"] for a in self._agents_payload()}:
+                # answered ok — an orphan state row and a false success. Asked
+                # of the two sources directly: `_agents_payload` builds every
+                # descriptor and swallows a store failure, which would answer
+                # a real custom agent 404 on a transient error.
+                if (
+                    not any(a["name"] == name for a in _BUILTIN_AGENTS)
+                    and store.get_agent(name, include_disabled=True) is None
+                ):
                     self._json({"error": "unknown agent"}, 404)
                     return
                 state = store.set_capability_enabled(

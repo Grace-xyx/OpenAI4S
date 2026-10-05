@@ -525,7 +525,7 @@ identifiers, tokens, authorization codes, and API Keys are never returned.
 | `DELETE /notes/{note_id}` | `{"ok":true}`, also for an unknown id. Team mode answers a non-admin's unknown id `404` `not found`, the same as a note in a project they cannot read (INV-13). |
 | `GET /projects/{pid}/folders` | `{"folders":[…]}`. |
 | `POST /projects/{pid}/folders` | Body `{name}` → folder row. |
-| `PUT|PATCH /folders/{fid}` | Rename → `{"ok":true}`. An unknown id is `404` `folder not found` and nothing is written; it used to answer `200 {"ok":true}`, which a client could not tell from a rename that landed. Team mode answers a non-admin's unknown id and a folder in a project they cannot read with the same `404` `not found` (INV-13). |
+| `PUT|PATCH /folders/{fid}` | Rename → `{"ok":true}`. An unknown id is `404` `folder not found` and nothing is written; it used to answer `200 {"ok":true}`, which a client could not tell from a rename that landed. A missing, blank or non-string `name` is `400` `folder name cannot be empty` (an unknown id is still `404`); `{}` used to blank the name and a non-string answered `500`. Team mode answers a non-admin's unknown id and a folder in a project they cannot read with the same `404` `not found` (INV-13). |
 | `DELETE /folders/{fid}` | `{"ok":true}`, also for an unknown id. Team mode answers a non-admin's unknown id `404` `not found`, the same as a folder in a project they cannot read (INV-13). |
 | `POST|PUT|PATCH /frames/{fid}/folder` | Body `{folder_id}` (or null) → `{"ok":true}`. |
 | `GET /example/session` | `{seeded,frame_id,project_id,started,running,seeds_at_startup,error}` — state of the bundled example analysis. `started` is always `false` on a GET. |

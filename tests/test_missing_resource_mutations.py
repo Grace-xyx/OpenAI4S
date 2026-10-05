@@ -104,6 +104,34 @@ def test_renaming_an_existing_folder_still_lands(tmp_path, method, new_name):
         runner.close()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"name": ""}, {"name": "   "}, {"name": {"a": 1}}, {"name": 5}],
+)
+def test_renaming_a_folder_without_a_usable_name_is_refused(tmp_path, body):
+    cfg = _cfg(tmp_path)
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    try:
+        store = get_store(cfg.db_path)
+        folder = store.create_folder(project_id="default", name="before")
+        handler, seen = _handler(cfg, runner)
+        handler._body = lambda: dict(body)
+        handler.headers = _auth_headers(cfg)
+        handler.path = f"/api/v1/folders/{folder['folder_id']}"
+        handler._route("PATCH")
+        # `{}` used to blank the name; a non-string reached sqlite3 as a bound
+        # parameter and answered 500.
+        assert seen[-1] == ({"error": "folder name cannot be empty"}, 400)
+        assert [f["name"] for f in store.list_folders("default")] == ["before"]
+        # Existence is still answered first: an unknown id is a 404 whatever
+        # the body says, as the connector edit route does.
+        handler.path = "/api/v1/folders/fold_does_not_exist"
+        handler._route("PATCH")
+        assert seen[-1] == ({"error": "folder not found"}, 404)
+    finally:
+        runner.close()
+
+
 @pytest.mark.parametrize("method", ["PUT", "PATCH"])
 def test_enabling_a_missing_agent_is_refused(tmp_path, method):
     cfg = _cfg(tmp_path)
@@ -135,6 +163,31 @@ def test_enabling_a_known_agent_still_lands(tmp_path, method):
         assert code == 200
         assert body["ok"] is True and body["enabled"] is False
         assert not store.capability_state().is_enabled("specialist", name)
+    finally:
+        runner.close()
+
+
+@pytest.mark.stubbed_backend
+def test_a_custom_agent_toggles_while_the_agent_listing_fails(tmp_path, monkeypatch):
+    """The membership check used `_agents_payload`, which swallows a failing
+    `list_agents` -- so a transient store error answered a real custom agent
+    `404 unknown agent`."""
+    cfg = _cfg(tmp_path)
+    runner = gateway_mod.SessionRunner(cfg, _Hub())
+    try:
+        store = get_store(cfg.db_path)
+        store.upsert_agent(name="custom-reviewer", description="reviews")
+
+        def listing_fails(*_args, **_kwargs):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(store, "list_agents", listing_fails)
+        handler, seen = _handler(cfg, runner)
+        handler._body = lambda: {"enabled": False}
+        handler._api("PATCH", "/agents/custom-reviewer/enabled")
+        body, code = seen[-1]
+        assert code == 200 and body["enabled"] is False
+        assert not store.capability_state().is_enabled("specialist", "custom-reviewer")
     finally:
         runner.close()
 
