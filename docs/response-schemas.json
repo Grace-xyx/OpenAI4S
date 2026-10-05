@@ -20975,6 +20975,31 @@
         "type": "object"
       }
     },
+    "PATCH /agents/([^/]+)/enabled [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "PATCH /agents/([^/]+)/enabled [ok]": {
       "schema": {
         "properties": {
@@ -22352,6 +22377,31 @@
           "error",
           "method",
           "path",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "PATCH /connectors/([^/]+)/enabled [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
           "request_id",
           "status"
         ],
@@ -41626,6 +41676,31 @@
         "type": "object"
       }
     },
+    "PUT /agents/([^/]+)/enabled [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "PUT /agents/([^/]+)/enabled [ok]": {
       "schema": {
         "properties": {
@@ -42939,6 +43014,31 @@
           "error",
           "method",
           "path",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "PUT /connectors/([^/]+)/enabled [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
           "request_id",
           "status"
         ],

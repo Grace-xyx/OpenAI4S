@@ -17002,6 +17002,12 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             if m:
                 folder_id = m.group(1)
                 if method in ("PUT", "PATCH"):
+                    # `rename_folder` is a bare UPDATE: naming no row still
+                    # answered 200, indistinguishable from a rename that
+                    # landed — the same defect #206 closed for project edits.
+                    # DELETE below stays idempotent by design.
+                    if store.project_of_folder(folder_id) is None:
+                        raise GatewayError(404, "folder not found")
                     store.rename_folder(folder_id, self._body().get("name") or "")
                     self._json({"ok": True})
                     return
@@ -19026,6 +19032,12 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             if m and method in ("PUT", "PATCH"):
                 name = unquote(m.group(1))
                 enabled = bool(self._body().get("enabled", True))
+                # The GET sibling answers 404 for a name no known agent has,
+                # while this route wrote a capability row for ANY name and
+                # answered ok — an orphan state row and a false success.
+                if name not in {a["name"] for a in self._agents_payload()}:
+                    self._json({"error": "unknown agent"}, 404)
+                    return
                 state = store.set_capability_enabled(
                     "specialist",
                     name,
@@ -19371,6 +19383,12 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             m = re.fullmatch(r"/connectors/([^/]+)/enabled", sub)
             if m and method in ("PUT", "PATCH"):
                 enabled = bool(self._body().get("enabled", True))
+                # `set_enabled` is a bare UPDATE: an unknown id matched no row
+                # and still answered ok, while the edit and probe siblings
+                # answer 404 for the same id.
+                if store.get_connector(m.group(1)) is None:
+                    self._json({"error": "connector not found"}, 404)
+                    return
                 store.set_connector_enabled(m.group(1), enabled)
                 if not enabled:
                     # Disabling wrote the row and left the child running. A
