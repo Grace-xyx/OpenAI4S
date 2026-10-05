@@ -425,7 +425,7 @@ class JobManager:
     ) -> dict:
         command = (command or "").strip()
         if not command:
-            return {"error": "empty command"}
+            return {"error": "empty command", "code": "job_empty_command"}
         kind = kind if kind in ("bash", "python") else "bash"
         try:
             deadline = float(
@@ -456,7 +456,7 @@ class JobManager:
             # nothing was gained by making it first.
             wd = os.path.realpath(candidate)
             if wd != base and os.path.commonpath((base, wd)) != base:
-                return {"error": "cwd escapes the jobs root"}
+                return {"error": "cwd escapes the jobs root", "code": "job_cwd_escape"}
         else:
             wd = base
         try:

@@ -522,6 +522,22 @@ MAX_SOURCE_IMAGE_BYTES = 64 * 1024 * 1024
 #: sessions or restarts, and narrow enough to be safe as a key.
 _CLIENT_RESERVATION = re.compile(r"[A-Za-z0-9_-]{24,96}")
 
+#: The status a compute-jobs failure is answered with, keyed by the stable
+#: `code` the JobManager puts in its soft refusal dicts. The gateway is where
+#: a domain failure becomes an HTTP one: answered as 200, an unknown job read
+#: as a successful lookup and a refused submit as an accepted one — and
+#: `api()` in the web client only throws on non-2xx, so both surfaced to the
+#: user as success. The 404 pair needs no entry here: `get`/`cancel` carry no
+#: code, and the route maps their sole error body directly.
+_JOB_FAILURE_STATUS = {
+    "job_empty_command": 400,
+    "job_bad_deadline": 400,
+    "job_cwd_escape": 400,
+    "job_capacity": 429,
+    "job_workspace_unavailable": 500,
+    "job_manager_closed": 503,
+}
+
 # Written in the same transaction as the pins they describe, so they are
 # evidence rather than a cached guess, and reconciliation does not re-derive
 # them from rows that have since moved on.
@@ -19680,25 +19696,33 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 return
             if sub == "/compute/jobs" and method == "POST":
                 b = self._body()
+                payload = _jobs_mgr.submit(
+                    b.get("command") or b.get("code") or "",
+                    kind=b.get("kind") or "bash",
+                    cwd=b.get("cwd"),
+                    # Optional, and bounded by the manager. Omitting it
+                    # takes the default deadline rather than the unbounded
+                    # run this route used to give every caller.
+                    deadline_s=b.get("deadline_s"),
+                )
                 self._json(
-                    _jobs_mgr.submit(
-                        b.get("command") or b.get("code") or "",
-                        kind=b.get("kind") or "bash",
-                        cwd=b.get("cwd"),
-                        # Optional, and bounded by the manager. Omitting it
-                        # takes the default deadline rather than the unbounded
-                        # run this route used to give every caller.
-                        deadline_s=b.get("deadline_s"),
-                    )
+                    payload,
+                    _JOB_FAILURE_STATUS.get(str(payload.get("code")), 200),
                 )
                 return
             m = re.fullmatch(r"/compute/jobs/([^/]+)/cancel", sub)
             if m and method == "POST":
-                self._json(_jobs_mgr.cancel(m.group(1)))
+                # The manager answers a soft ``{"error": ...}`` for a job that
+                # does not exist; the gateway is where that domain failure
+                # becomes an HTTP one. As 200 it read as a successful cancel —
+                # `api()` only throws on non-2xx.
+                payload = _jobs_mgr.cancel(m.group(1))
+                self._json(payload, 404 if payload.get("error") else 200)
                 return
             m = re.fullmatch(r"/compute/jobs/([^/]+)", sub)
             if m and method == "GET":
-                self._json(_jobs_mgr.get(m.group(1)))
+                payload = _jobs_mgr.get(m.group(1))
+                self._json(payload, 404 if payload.get("error") else 200)
                 return
             if sub == "/environments/status" and method == "GET":
                 self._json(self._environments_status())
