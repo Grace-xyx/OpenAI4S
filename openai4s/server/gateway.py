@@ -487,9 +487,22 @@ def _skill_result_status(payload: object) -> int:
     the thing this change exists to remove, and an unrecognised code answers
     400 rather than 200 -- a failure whose kind is unknown is still a failure.
     """
+    return _soft_failure_status(payload, SKILL_FAILURE_STATUS)
+
+
+def _soft_failure_status(payload: object, statuses: Mapping[str, int]) -> int:
+    """Project a service's soft ``{"error", "code"}`` dict onto an HTTP status.
+
+    One projection for every surface that returns soft dictionaries (skills,
+    local compute jobs), so they cannot drift on the rule that matters: keyed
+    on the code, and an error whose code is missing or unmapped is 400, never
+    200. The compute-jobs routes had their own copy that defaulted to 200 and
+    decided "not found" from the mere presence of ``error`` -- which answered
+    a cancel that could not stop a live job with 404.
+    """
     if not isinstance(payload, dict) or not payload.get("error"):
         return 200
-    return SKILL_FAILURE_STATUS.get(str(payload.get("code") or ""), 400)
+    return statuses.get(str(payload.get("code") or ""), 400)
 
 
 #: What one turn may attach as images, in three dimensions. None of these
@@ -521,22 +534,6 @@ MAX_SOURCE_IMAGE_BYTES = 64 * 1024 * 1024
 #: A client-generated admission id: long enough not to collide across
 #: sessions or restarts, and narrow enough to be safe as a key.
 _CLIENT_RESERVATION = re.compile(r"[A-Za-z0-9_-]{24,96}")
-
-#: The status a compute-jobs failure is answered with, keyed by the stable
-#: `code` the JobManager puts in its soft refusal dicts. The gateway is where
-#: a domain failure becomes an HTTP one: answered as 200, an unknown job read
-#: as a successful lookup and a refused submit as an accepted one — and
-#: `api()` in the web client only throws on non-2xx, so both surfaced to the
-#: user as success. The 404 pair needs no entry here: `get`/`cancel` carry no
-#: code, and the route maps their sole error body directly.
-_JOB_FAILURE_STATUS = {
-    "job_empty_command": 400,
-    "job_bad_deadline": 400,
-    "job_cwd_escape": 400,
-    "job_capacity": 429,
-    "job_workspace_unavailable": 500,
-    "job_manager_closed": 503,
-}
 
 # Written in the same transaction as the pins they describe, so they are
 # evidence rather than a cached guess, and reconciliation does not re-derive
@@ -14243,7 +14240,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 "before " + operation,
             )
 
-    from openai4s.jobs import JobManager
+    from openai4s.jobs import JOB_FAILURE_STATUS, JobManager
 
     _jobs_mgr = JobManager(cfg.data_dir / "compute-jobs")
     # M2: the daemon exposes code-exec endpoints (kernel/execute, compute/jobs,
@@ -19705,24 +19702,24 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     # run this route used to give every caller.
                     deadline_s=b.get("deadline_s"),
                 )
-                self._json(
-                    payload,
-                    _JOB_FAILURE_STATUS.get(str(payload.get("code")), 200),
-                )
+                # The manager refuses with soft dicts; the gateway is where a
+                # domain failure becomes an HTTP one. As 200 a refused submit
+                # read as an accepted one -- `api()` only throws on non-2xx.
+                self._json(payload, _soft_failure_status(payload, JOB_FAILURE_STATUS))
                 return
             m = re.fullmatch(r"/compute/jobs/([^/]+)/cancel", sub)
             if m and method == "POST":
-                # The manager answers a soft ``{"error": ...}`` for a job that
-                # does not exist; the gateway is where that domain failure
-                # becomes an HTTP one. As 200 it read as a successful cancel —
-                # `api()` only throws on non-2xx.
+                # Two failures, told apart by code: `job_not_found` is 404, and
+                # `job_cancel_failed` -- the job exists and is still running --
+                # is 500. Deciding 404 from the mere presence of `error`
+                # answered the second one as "no such job".
                 payload = _jobs_mgr.cancel(m.group(1))
-                self._json(payload, 404 if payload.get("error") else 200)
+                self._json(payload, _soft_failure_status(payload, JOB_FAILURE_STATUS))
                 return
             m = re.fullmatch(r"/compute/jobs/([^/]+)", sub)
             if m and method == "GET":
                 payload = _jobs_mgr.get(m.group(1))
-                self._json(payload, 404 if payload.get("error") else 200)
+                self._json(payload, _soft_failure_status(payload, JOB_FAILURE_STATUS))
                 return
             if sub == "/environments/status" and method == "GET":
                 self._json(self._environments_status())
