@@ -186,13 +186,15 @@
 
   const BARE_NUMBER = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i;
 
-  // Each test rests on a column the formats cannot share.  A VCF ALT (5th) or
-  // INFO (8th) column is never a bare number, where BED keeps its score and
-  // thickEnd; a GFF 7th column is always a strand, where BED keeps thickStart.
+  // Standard BED score/thickEnd columns exclude VCF; custom BED6+N extras
+  // need more evidence. Require VCF reference bases and QUAL, or GFF's
+  // integer coordinates and strand, before abandoning BED.
   function sniffGenomeFormat(fields) {
-    if (fields.length >= 8 && /^\d+$/.test(fields[1]) && fields[3] && fields[4]
+    if (fields.length >= 8 && /^\d+$/.test(fields[1]) && /^[ACGTN]+$/i.test(fields[3]) && fields[4]
+      && (fields[5] === "." || BARE_NUMBER.test(fields[5]) || /^[-+]?(?:inf(?:inity)?|nan)$/i.test(fields[5]))
       && !BARE_NUMBER.test(fields[4]) && !BARE_NUMBER.test(fields[7])) return "VCF";
-    if (fields.length >= 9 && /^[-+.?]$/.test(fields[6])) return "GFF";
+    if (fields.length >= 9 && /^\d+$/.test(fields[3]) && /^\d+$/.test(fields[4])
+      && /^[-+.?]$/.test(fields[6])) return "GFF";
     return "BED";
   }
 
