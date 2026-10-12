@@ -781,6 +781,9 @@ when the open session is the root. The status lines follow the GET
 
 The read-only status block sits at the foot of the session options menu,
 after a separator, and does not replace the Auto review row.
+If the conversation switches or reopens while the menu's settings read is
+pending, that opening is discarded. The next menu opening reads the current
+conversation's settings and Auto Mode status together.
 
 ### 6. Audit entry
 

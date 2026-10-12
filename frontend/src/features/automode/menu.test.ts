@@ -33,7 +33,7 @@ vi.mock("../sessions/conversation", () => ({ openConversation: vi.fn(), resumeWa
 vi.mock("../sessions/compute", () => ({ openRunLocationDialog: vi.fn() }));
 
 import { setLang, t } from "../../i18n";
-import { currentId } from "../../stores/session";
+import { _openGen, currentId } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { _modalMode } from "../../stores/ui";
 import { closeMenu, openMenu, repositionMenu, type MenuItem } from "../sessions/chrome";
@@ -47,6 +47,7 @@ import {
   auditPageBody,
   auditRowBody,
   autoModeBody,
+  deferred,
   json,
   meter,
   routeFetch,
@@ -118,6 +119,18 @@ afterEach(() => {
 });
 
 describe("the menu block", () => {
+  it.each(["switch", "reopen"])("drops a menu whose settings read outlives a conversation %s", async (change) => {
+    vi.mocked(openMenu).mockClear();
+    const settings = deferred<Response>();
+    calls = routeFetch((url) => url.pathname.endsWith("/review-settings") ? settings.promise : json(autoModeBody()));
+    const opening = sessionOptionsMenu({} as Element);
+    if (change === "switch") currentId.value = "f-other";
+    else _openGen.value += 1;
+    settings.resolve(json({ auto_review: true }));
+    await opening;
+    expect(openMenu).not.toHaveBeenCalled();
+  });
+
   it("sits at the foot of the menu, after a separator, and keeps the menu's own rows", async () => {
     const { items } = await openOptions();
     expect(items.at(-2)).toEqual({ sep: true });

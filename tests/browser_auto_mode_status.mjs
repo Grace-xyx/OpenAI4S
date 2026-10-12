@@ -878,6 +878,22 @@ async function phaseB(browser, owned, tripwire, previous) {
     await branchReads.stop();
     await closeStatus(page);
 
+    // The menu's separate settings request can outlive a branch reopen.
+    const staleSettings = await holdNext(page, matcher(`/api/v1/frames/${id.branch}/review-settings`));
+    await page.locator("#session-options-btn").click();
+    await staleSettings.observed;
+    const views = () => handle.sockets.reduce((total, entry) => total + entry.views.length, 0);
+    const beforeReopen = views();
+    inject(handle, { type: "branch_activation_state", root_frame_id: id.branch, branch_id: activated.branch_id });
+    await waitUntil("conversation reopened under pending menu", async () => views() > beforeReopen);
+    staleSettings.release();
+    await waitUntil("stale menu settings delivered", async () => staleSettings.delivered());
+    await sleep(100);
+    check("B/stale menu opening discarded after branch reopen", (await block(page).count()) === 0);
+    await openStatus(handle);
+    check("B/fresh menu reads reopened branch", (await lineValue(page, "run")) === c.branchB);
+    await closeStatus(page);
+
     // Reconnect: the socket closes under an open block, and the block reads again.
     await openConversation(handle, base, previous.projectId, previous.worked);
     await openStatus(handle);
