@@ -722,3 +722,53 @@ def test_a_permission_check_handed_no_config_leaves_the_process_default_alone(
     finally:
         store.close()
     assert _written(process_default) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_registry_writes_harden_new_and_existing_data_dirs(
+    process_default, tmp_path, explicit, existing
+):
+    """Reads preserve permissions; writes restore the owner-only boundary."""
+    from openai4s.compute import registry
+
+    root = tmp_path / "B" if explicit else process_default / ".openai4s"
+    data_dir = root if explicit else None
+    if existing:
+        root.mkdir()
+        root.chmod(0o755)
+        (root / "existing.txt").write_text("preserve existing data", "utf-8")
+    before = _snapshot(root)
+
+    assert registry.list_hosts(data_dir) == {}
+    assert _snapshot(root) == before
+    assert root.exists() is existing
+    if existing:
+        assert stat.S_IMODE(root.stat().st_mode) == 0o755
+
+    registry.add_host("gpu-test", data_dir=data_dir)
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert list(registry.list_hosts(data_dir)) == ["gpu-test"]
+    if existing:
+        assert (root / "existing.txt").read_text("utf-8") == "preserve existing data"
+
+
+def test_legacy_fold_environment_seeds_only_the_named_registry(
+    process_default, tmp_path, monkeypatch
+):
+    """Legacy environment seeding is a write, still confined to the run."""
+    from openai4s.compute import registry
+
+    monkeypatch.setenv("OPENAI4S_FOLD_SSH", "gpu-legacy")
+    monkeypatch.setenv("OPENAI4S_FOLD_SCRIPT", "/opt/legacy/fold.sh")
+    root = tmp_path / "B"
+
+    host, capability = registry.DataDirRegistry(root).capability_host("fold")
+
+    assert host == "gpu-legacy"
+    assert capability["script"] == "/opt/legacy/fold.sh"
+    assert capability["verified_at"] is None
+    assert (root / "remote_compute.json").is_file()
+    assert _written(process_default) == []

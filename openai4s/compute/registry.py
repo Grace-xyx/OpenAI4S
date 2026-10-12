@@ -49,8 +49,8 @@ def _data_dir() -> Path:
     process default -- the daemon. Everything serving its own Config passes
     that Config's data dir (`DataDirRegistry` binds one). Resolved without
     ``ensure_dirs``: ``get_config()`` creates and chmods the default
-    directory, and reading a registry is no reason to; `_write` hardens the
-    directory itself if it has to create it.
+    directory, and reading a registry is no reason to. Legacy fold-env
+    seeding still writes; `_write` hardens the directory on every write.
     """
     from openai4s.config import get_config
 
@@ -119,15 +119,13 @@ def load(data_dir: Path | None = None) -> dict:
 
 
 def _write(data: dict, data_dir: Path | None = None) -> None:
-    p = _path(data_dir)
-    if not p.parent.is_dir():
-        # The data dir also holds the credential database, so a registry
-        # write that creates it gives it the owner-only mode
-        # `Config.ensure_dirs` would have.
-        from openai4s.security.permissions import harden_dir
+    from openai4s.security.permissions import harden_dir
 
-        p.parent.mkdir(parents=True, exist_ok=True)
-        harden_dir(p.parent)
+    p = _path(data_dir)
+    # Match Config.ensure_dirs even for an existing, permissive data dir.
+    # Read-only lookups must not chmod it, but writes retain this boundary.
+    p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    harden_dir(p.parent)
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
     tmp.replace(p)
