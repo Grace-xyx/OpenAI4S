@@ -17011,6 +17011,10 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     limit = int((q.get("limit") or ["500"])[0])
                 except (TypeError, ValueError):
                     raise GatewayError(400, "limit must be an integer", "invalid_limit")
+                if limit < 1:
+                    raise GatewayError(
+                        400, "limit must be a positive integer", "invalid_limit"
+                    )
                 self._json(
                     global_views.timeline_view(
                         unquote(m.group(1)),
@@ -17025,6 +17029,10 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     limit = int((q.get("limit") or ["2000"])[0])
                 except (TypeError, ValueError):
                     raise GatewayError(400, "limit must be an integer", "invalid_limit")
+                if limit < 1:
+                    raise GatewayError(
+                        400, "limit must be a positive integer", "invalid_limit"
+                    )
                 self._json(
                     global_views.lineage_view(
                         unquote(m.group(1)),
