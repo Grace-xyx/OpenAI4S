@@ -4,7 +4,7 @@
 
 会话选项菜单里只读的 Auto Mode 状态区块及其审计视图（issue #217）。它实现了 [`docs/auto-mode.md`](../../../../docs/auto-mode.md) 中的“Workbench status surface”：三行彼此独立的事实（可用性、已保存的选择、运行），部署上限与用量计量，以及审计入口。它只读取 `GET /frames/{id}/auto-mode` 与 `GET /frames/{id}/auto-audits`——不发 PATCH、不调用状态转换、不触发模型调用、审核、修复、恢复或取消。菜单里旧的“自动审核”一行保持原样，仍然只访问 `review-settings`。
 
-状态读取发生在：打开菜单、显式重试、规范事件提示、重连，以及重新打开会话（`_openGen` 变化）。属于其他会话或更早一次打开的响应会被丢弃；同时在途的读取依次按该分支的 `last_event_ordinal`、选择的 `revision`、发出顺序排序；在当前显示结果到达之后才发出的读取总是胜出（回退可能让游标变小）。事件注册表每种类型只允许一个处理器：本模块注册五种规范事件，send 模块的 `candidate_ready` / `auto_run_terminal` 处理器则通过 `autoModeHint` 把事件转交过来。
+状态读取发生在：打开菜单、显式重试、规范事件提示、重连，以及重新打开会话（`_openGen` 变化）。属于其他会话或更早一次打开的响应会被丢弃；同时在途的读取依次按该分支的 `last_event_ordinal`、选择的 `revision`、同一来源的 `source_revision`、发出顺序排序。在当前显示结果到达之后才发出的读取总是胜出（回退可能让游标变小）。审计分页发现服务器的活动分支改变时会重新读取首页，避免混合不同分支的记录。事件注册表每种类型只允许一个处理器：本模块注册五种规范事件，send 模块的 `candidate_ready` / `auto_run_terminal` 处理器则通过 `autoModeHint` 把事件转交过来。
 
 ## 文件
 

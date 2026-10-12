@@ -111,6 +111,38 @@ describe("ordering", () => {
     expect(status.phase === "ready" && status.view.selection.source).toBe("legacy_result_review");
   });
 
+  it.each([false, true])("keeps the newer inherited project revision when reads cross (newer first: %s)", async (newerFirst) => {
+    const first = refreshAutoModeStatus();
+    const second = refreshAutoModeStatus();
+    const projectBody = (sourceRevision: number) => body(3, 0, {
+      selection: selectionBody({ source: "project", source_revision: sourceRevision }),
+    });
+    if (newerFirst) {
+      pending[0]!.respond(json(projectBody(2)));
+      await first;
+      pending[1]!.respond(json(projectBody(1)));
+      await second;
+    } else {
+      pending[1]!.respond(json(projectBody(1)));
+      await second;
+      pending[0]!.respond(json(projectBody(2)));
+      await first;
+    }
+    const status = autoModeStatus();
+    expect(status.phase === "ready" && status.view.selection.source_revision).toBe(2);
+  });
+
+  it("does not compare revisions from different selection sources", async () => {
+    const first = refreshAutoModeStatus();
+    const second = refreshAutoModeStatus();
+    pending[0]!.respond(json(body(3, 0, { selection: selectionBody({ source: "project", source_revision: 9 }) })));
+    await first;
+    pending[1]!.respond(json(body(3, 0)));
+    await second;
+    const status = autoModeStatus();
+    expect(status.phase === "ready" && status.view.selection.source).toBe("built_in_defaults");
+  });
+
   it("believes a read issued after the shown one arrived, even with a lower cursor (a revert)", async () => {
     const first = refreshAutoModeStatus();
     pending[0]!.respond(json(body(9)));

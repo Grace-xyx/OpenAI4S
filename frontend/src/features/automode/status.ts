@@ -19,8 +19,8 @@
  *   new -- and a revert can legitimately move a branch's cursor backwards.
  * - Reads that were in flight together are ordered by the durable cursor
  *   (`last_event_ordinal`) of the same branch, then by the frame selection's
- *   `revision` (a selection save emits no event, so the cursor alone would
- *   reject it), then by the order they were issued.
+ *   `revision`, then the winning row's `source_revision` when the source is
+ *   unchanged (selection saves emit no event), then by issue order.
  */
 
 import { _openGen, currentId } from "../../stores/session";
@@ -44,6 +44,8 @@ type Shown = {
   branchId: string | null;
   ordinal: number;
   revision: number;
+  source: AutoModeView["selection"]["source"] | null;
+  sourceRevision: number;
 };
 
 let status: AutoModeStatus = { phase: "idle" };
@@ -106,6 +108,9 @@ function wins(candidate: Shown, prior: Shown | null): boolean {
   if (candidate.ok && prior.ok && candidate.branchId === prior.branchId) {
     if (candidate.ordinal !== prior.ordinal) return candidate.ordinal > prior.ordinal;
     if (candidate.revision !== prior.revision) return candidate.revision > prior.revision;
+    if (candidate.source === prior.source && candidate.sourceRevision !== prior.sourceRevision) {
+      return candidate.sourceRevision > prior.sourceRevision;
+    }
   }
   return candidate.seq > prior.seq;
 }
@@ -140,6 +145,8 @@ export async function refreshAutoModeStatus(): Promise<void> {
     branchId: usable ? usable.branch_id : null,
     ordinal: usable && usable.last_event_ordinal !== null ? usable.last_event_ordinal : -1,
     revision: usable ? usable.selection.revision : -1,
+    source: usable ? usable.selection.source : null,
+    sourceRevision: usable ? usable.selection.source_revision : -1,
   };
   if (!wins(candidate, shown)) return;
   shown = candidate;

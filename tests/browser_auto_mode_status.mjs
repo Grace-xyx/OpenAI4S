@@ -664,6 +664,29 @@ async function phaseB(browser, owned, tripwire, previous) {
     runFixture(owned.dataDir, "frame_autonomous", id.bump, projectId);
 
     const budgetChecks = (c) => async (status, label) => {
+      const page = status.page();
+      const viewport = page.viewportSize();
+      await page.setViewportSize({ width: 375, height: 667 });
+      await page.keyboard.press("Escape");
+      await page.locator("#session-options-btn").click();
+      await waitUntil("mobile status loaded", async () => (await status.getAttribute("data-phase")) === "ready");
+      const fits = async (state) => {
+        const geometry = await status.evaluate((node) => {
+          const menu = node.closest(".ctx-menu");
+          const rect = menu.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, width: window.innerWidth, scrollWidth: menu.scrollWidth, clientWidth: menu.clientWidth };
+        });
+        check(`${label}/mobile ${state} menu fits`, geometry.left >= 0 && geometry.right <= geometry.width
+          && geometry.scrollWidth <= geometry.clientWidth + 1, JSON.stringify(geometry));
+      };
+      await fits("closed");
+      await status.locator(".am-budget-table > summary").click();
+      await fits("expanded");
+      await status.locator(".am-budget-table > summary").click();
+      await page.setViewportSize(viewport);
+      await page.keyboard.press("Escape");
+      await page.locator("#session-options-btn").click();
+      await waitUntil("desktop status loaded", async () => (await status.getAttribute("data-phase")) === "ready");
       check(`${label}/table stays closed`, (await status.locator(".am-budget-table").getAttribute("open")) === null);
       check(`${label}/warnings shown without opening`, await status.locator('.am-alert[data-field="max_extra_cells"][data-flag="near"]').isVisible()
         && await status.locator('.am-alert[data-field="max_review_rounds"][data-flag="at"]').isVisible());
@@ -702,6 +725,26 @@ async function phaseB(browser, owned, tripwire, previous) {
     const { page } = handle;
     const c = COPY.en;
     const mark = handle.requests.length;
+
+    // A project save changes source_revision, not the frame revision or cursor.
+    await openConversation(handle, base, otherProject, id.project);
+    await openStatus(handle);
+    const projectCrossing = await intercept(page, statusPath(id.project));
+    inject(handle, { type: "auto_audit_completed", root_frame_id: id.project });
+    const projectEarlier = await projectCrossing.next(0);
+    inject(handle, { type: "repair_completed", root_frame_id: id.project });
+    const projectLater = await projectCrossing.next(1);
+    await projectLater.fetch();
+    runFixture(owned.dataDir, "project_autonomous", id.project, otherProject);
+    await projectEarlier.fetch();
+    await projectLater.deliver();
+    await waitUntil("old project selection shown", async () => (await lineValue(page, "selection")) === c.project);
+    await projectEarlier.deliver();
+    const projectSelection = "Autonomous; result review Auto-fix; approvals Auto review of asks. Saved on this project.";
+    await waitUntil("new project selection shown", async () => (await lineValue(page, "selection")) === projectSelection);
+    check("B/project source revision orders crossing reads", (await lineValue(page, "selection")) === projectSelection);
+    await projectCrossing.stop();
+    await closeStatus(page);
 
     // Loading, then a failed read, an explicit retry, an unknown schema and 404.
     await openConversation(handle, base, previous.projectId, previous.worked);
@@ -954,6 +997,12 @@ async function phaseB(browser, owned, tripwire, previous) {
     await modal.locator(".am-retry").click();
     await waitUntil("audits retried", async () => (await listReady()) && (await rows.count()) === 20);
     await page.unroute(auditPath(id.audits), auditDown);
+    // A branch switch in another client does not change this tab's openGen.
+    runFixture(owned.dataDir, "audit_branch_activate", id.audits, projectId);
+    await modal.locator(".am-more").click();
+    await waitUntil("new branch's first audit page", async () => (await listReady()) && (await rows.count()) === 1
+      && (await rows.first().getAttribute("data-audit-id")) === "audit-result-audit-branch-00");
+    check("B/audit paging stays within one branch", (await rows.count()) === 1);
     await page.keyboard.press("Escape");
     await page.locator("#modal.hidden").waitFor({ state: "attached", timeout: 5000 });
 

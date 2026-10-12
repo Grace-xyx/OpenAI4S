@@ -32,6 +32,7 @@ type Failure = "unavailable" | "not_found";
 type AuditViewState = {
   frameId: string;
   openGen: number;
+  branchId: string | null;
   filter: AuditSubjectKind | null;
   rows: AuditRow[];
   nextBefore: string | null;
@@ -95,6 +96,7 @@ async function loadFirstPage(v: AuditViewState, { clear }: { clear: boolean }): 
   const version = v.listVersion;
   v.pageInFlight = false;
   if (clear) {
+    v.branchId = null;
     v.rows = [];
     v.nextBefore = null;
     v.hasMore = false;
@@ -141,6 +143,7 @@ async function loadFirstPage(v: AuditViewState, { clear }: { clear: boolean }): 
     return;
   }
   const seen = new Set<string>();
+  v.branchId = page.branch_id;
   v.rows = page.audits.filter((row) => !seen.has(row.audit_id) && !!seen.add(row.audit_id));
   v.nextBefore = page.has_more ? page.next_before : null;
   v.hasMore = page.has_more;
@@ -178,6 +181,12 @@ async function loadNextPage(v: AuditViewState): Promise<void> {
     v.hasMore = false;
     v.nextBefore = null;
     paint(v);
+    return;
+  }
+  // Another tab can activate a branch without changing this tab's openGen.
+  // Numeric cursors are valid on either branch, but the pages cannot mix.
+  if (page.branch_id !== v.branchId) {
+    await loadFirstPage(v, { clear: true });
     return;
   }
   const seen = new Set(v.rows.map((row) => row.audit_id));
@@ -344,6 +353,7 @@ export async function openAutoModeAudits(): Promise<void> {
   const v: AuditViewState = {
     frameId,
     openGen: _openGen.value,
+    branchId: null,
     filter: null,
     rows: [],
     nextBefore: null,

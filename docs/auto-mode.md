@@ -799,6 +799,10 @@ filter (All kinds, Result review, Permission review) and pages of 20.
 
 Response keys are `schema_version`, `root_frame_id`, `branch_id`,
 `subject_kind`, `audits`, `next_before`, and `has_more`.
+If a next page names a different `branch_id` (for example, another tab
+activated a branch), the panel discards that page and reloads the first
+page. A numeric cursor may be valid on both branches; it does not establish
+that their audit rows belong in the same list.
 
 | HTTP | Code | Panel |
 | --- | --- | --- |
@@ -869,7 +873,7 @@ Which GET body the lines show:
 | --- | --- |
 | The conversation was switched or reopened (`_openGen` moved: a branch activation and a revert both reopen it) | Everything held is dropped and the lines read “Loading…” until a read issued under the new opening answers. A response to a read issued before is dropped, even if it is the only one to arrive. |
 | A read was issued after the shown read arrived | It replaces the shown one whatever its cursor says. The server answered it later, and a revert can legitimately move a branch's cursor back. |
-| Two reads were in flight together, for the same branch | The higher `last_event_ordinal` wins. At an equal cursor the higher `selection.revision` wins: a selection save emits no event, so the cursor alone would reject it. At a full tie the later-issued read wins, which is how a project, deployment or legacy change with no revision of its own still lands. |
+| Two reads were in flight together, for the same branch | The higher `last_event_ordinal` wins. At an equal cursor the higher `selection.revision` wins, then the higher `selection.source_revision` when both name the same source: frame and project selection saves emit no event. Revisions from different sources are not compared. At a full tie the later-issued read wins, so deployment and legacy changes with no revision still land. |
 | Two reads in flight together named different branches | The later-issued read wins. |
 | A failed read | It follows the same rules, so a stale success cannot hide that the latest read failed, and a failure older than the shown answer cannot replace it. |
 
