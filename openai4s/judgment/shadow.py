@@ -104,20 +104,12 @@ def _capability_on(cfg: Config) -> bool:
 
 
 def _live_config(cfg: Config) -> Any:
-    from dataclasses import replace
-
-    from openai4s.config import ExperimentalJudgmentFlags
     from openai4s.judgment.settings import resolve_settings_config
     from openai4s.store import get_store
 
-    base = cfg
-    live = ExperimentalJudgmentFlags()
-    if live != base.experimental_judgment:
-        try:
-            base = replace(base, experimental_judgment=live)
-        except Exception:
-            pass
-    return resolve_settings_config(base, get_store(base.db_path))
+    # Preserve the run's explicit flags, provider, model and timeout. Only
+    # persisted settings are refreshed, as in the task-mode shadow service.
+    return resolve_settings_config(cfg, get_store(cfg.db_path))
 
 
 def _store(cfg: Config) -> Any:

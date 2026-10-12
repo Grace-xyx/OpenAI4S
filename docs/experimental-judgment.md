@@ -76,6 +76,8 @@ each screener hand over that run's Config, and a caller that hands over none
 gets no shadow. Neither falls back to the process-default data dir, which
 outside the daemon is not the run's: a benchmark case once opened and migrated
 a developer's real `~/.openai4s` that way.
+The worker also preserves the run's explicit judgment flags, provider, model
+and timeout; persisted settings in that data dir are still read afresh.
 
 ## How to enable
 

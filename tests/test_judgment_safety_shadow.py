@@ -233,6 +233,7 @@ def test_verdicts_identical_with_shadow_off_and_on(
     off = collect()
     backend = _install_backend(ScriptedBackend(noul=0.91, choice="ALLOW"))
     _enable_shadow(monkeypatch)
+    cfg = get_config()
     on = collect()
     assert off == on
     wait_idle(timeout_s=8.0)
@@ -253,6 +254,7 @@ def test_classify_code_is_not_blocked_by_slow_backend(
 
     _install_backend(ScriptedBackend(delay=5.0))
     _enable_shadow(monkeypatch)
+    cfg = get_config()
     t1 = time.perf_counter()
     for _ in range(100):
         classify_code(snippet, cfg)

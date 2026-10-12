@@ -137,6 +137,7 @@ def run_case(workflow: Workflow, case: Case, root: Path | None = None) -> CaseRe
     process_default = Path(scratch.name) / "data"
     observed: dict[str, Any] = {}
     failure: Exception | None = None
+    skipped: SkipCase | None = None
     try:
         with _process_default_data_dir(process_default):
             for name, step in resolved:
@@ -146,17 +147,7 @@ def run_case(workflow: Workflow, case: Case, root: Path | None = None) -> CaseRe
                 if "path" in observed:
                     context.state.setdefault("package_path", observed["path"])
     except SkipCase as skip:
-        if temporary is not None:
-            temporary.cleanup()
-        return CaseResult(
-            case.id,
-            workflow.id,
-            case.outcome,
-            passed=True,
-            skipped=True,
-            detail=str(skip),
-            duration_ms=int((time.time() - started) * 1000),
-        )
+        skipped = skip
     except Exception as error:  # noqa: BLE001 - the case decides if this is right
         failure = error
     finally:
@@ -180,6 +171,16 @@ def run_case(workflow: Workflow, case: Case, root: Path | None = None) -> CaseRe
             ),
             duration_ms=duration,
             observed=observed,
+        )
+    if skipped is not None:
+        return CaseResult(
+            case.id,
+            workflow.id,
+            case.outcome,
+            passed=True,
+            skipped=True,
+            detail=str(skipped),
+            duration_ms=duration,
         )
     expects_error = case.outcome in ("failure", "permission_denied")
 

@@ -136,8 +136,9 @@ def test_the_delegation_case_passes_and_writes_nothing_to_the_default(
     assert _written(process_default) == []
 
 
+@pytest.mark.parametrize("ending", ["success", "refusal", "skip"])
 def test_a_case_that_resolves_the_process_default_fails_without_touching_it(
-    process_default, monkeypatch
+    process_default, monkeypatch, ending
 ):
     """The runner answers `get_config()` from a scratch dir for each case and
     fails the case when anything lands there. The next lookup of this kind
@@ -147,6 +148,7 @@ def test_a_case_that_resolves_the_process_default_fails_without_touching_it(
 
     from openai4s.benchmark import runner
     from openai4s.benchmark.model import Case, Workflow
+    from openai4s.benchmark.steps import SkipCase
     from openai4s.config import get_config
     from openai4s.store import get_store
 
@@ -155,6 +157,10 @@ def test_a_case_that_resolves_the_process_default_fails_without_touching_it(
     def resolves_the_default(context, inputs):
         seen_env.append(os.environ.get("OPENAI4S_DATA_DIR"))
         get_store(get_config().db_path)
+        if ending == "skip":
+            raise SkipCase("no optional interpreter")
+        if ending == "refusal":
+            raise PermissionError("expected refusal")
         return {"done": True}
 
     monkeypatch.setitem(runner.STEPS, "_resolves_the_default", resolves_the_default)
@@ -162,9 +168,11 @@ def test_a_case_that_resolves_the_process_default_fails_without_touching_it(
         id="probe/default",
         workflow="probe",
         title="probe",
-        outcome="success",
+        outcome="permission_denied" if ending == "refusal" else "success",
         steps=("_resolves_the_default",),
-        expect={"done": True},
+        expect=(
+            {"error_type": "PermissionError"} if ending == "refusal" else {"done": True}
+        ),
     )
     workflow = Workflow(
         id="probe",
@@ -181,12 +189,33 @@ def test_a_case_that_resolves_the_process_default_fails_without_touching_it(
     result = runner.run_case(workflow, case)
 
     assert result.passed is False
+    assert result.skipped is False
     assert "process-global data dir" in result.detail
     assert "openai4s.db" in result.detail
     assert _written(process_default) == []
     assert seen_env == [str(process_default / ".openai4s")]
     # And the caller's own default is back once the case is over.
     assert get_config(initialize_dirs=False).data_dir == process_default / ".openai4s"
+
+
+def test_a_clean_skip_remains_skipped(process_default, monkeypatch):
+    from dataclasses import replace
+
+    from openai4s.benchmark import runner
+    from openai4s.benchmark.steps import SkipCase
+
+    def unavailable(context, inputs):
+        raise SkipCase("no optional interpreter")
+
+    monkeypatch.setitem(runner.STEPS, "_unavailable", unavailable)
+    workflow = _delegation_workflow()
+    case = replace(workflow.cases[0], steps=("_unavailable",))
+    result = runner.run_case(workflow, case)
+
+    assert result.passed is True
+    assert result.skipped is True
+    assert result.detail == "no optional interpreter"
+    assert _written(process_default) == []
 
 
 def _drive_web_turn(cfg: Config, monkeypatch, text: str) -> None:
@@ -377,4 +406,40 @@ def test_the_background_judgment_reads_the_run_data_dir(process_default, tmp_pat
         other = service_for(second)
         assert other is not service
         assert other._store() is get_store(second.db_path)
+    assert _written(process_default) == []
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize("provider", ["typesafe", "llm"])
+def test_safety_shadow_preserves_explicit_run_judgment_config(
+    process_default, tmp_path, provider
+):
+    """A programmatic opt-in must reach the backend with its model and budget."""
+    from openai4s.config import ExperimentalJudgmentFlags
+    from openai4s.security.classifier import classify_code
+
+    cfg = _run_config(tmp_path / "B")
+    cfg.llm.model = "run-llm-model"
+    cfg.experimental_judgment = ExperimentalJudgmentFlags(
+        master=True,
+        safety_shadow=True,
+        provider=provider,
+        model="run-judgment-model",
+        timeout_s=17.0,
+    )
+    calls: list[dict] = []
+
+    class RecordingBackend(_OfflineBackend):
+        def evaluate(self, **kwargs):
+            calls.append(kwargs)
+            return super().evaluate(**kwargs)
+
+    shadow.set_backend_factory(RecordingBackend)
+    verdict = classify_code("print(1)", cfg)
+    assert verdict.decision == "SAFE"
+    shadow.wait_idle(timeout_s=5.0)
+    assert len(calls) == 1
+    expected_model = "run-llm-model" if provider == "llm" else "run-judgment-model"
+    assert calls[0]["model"] == expected_model
+    assert calls[0]["timeout"] == 17.0
     assert _written(process_default) == []
