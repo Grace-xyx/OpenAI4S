@@ -385,6 +385,22 @@ def seed_project_review_only(
     return {"revision": row["revision"]}
 
 
+def seed_project_autonomous(
+    store: Store, config: Config, root: str, project: str
+) -> dict:
+    current = store.get_auto_mode_selection("project", project)
+    row = store.set_auto_mode_selection(
+        "project",
+        project,
+        {
+            key: _AUTONOMOUS[key]
+            for key in ("preset", "result_review_mode", "approvals_reviewer")
+        },
+        current["revision"] if current else 0,
+    )
+    return {"revision": row["revision"]}
+
+
 def seed_legacy_review(store: Store, config: Config, root: str, project: str) -> dict:
     """The old per-frame Auto review switch, which Auto Mode inherits from."""
 
@@ -549,6 +565,19 @@ def seed_branch_activate(store: Store, config: Config, root: str, project: str) 
     return {"branch_id": store.active_session_branch(root)}
 
 
+def seed_audit_branch_activate(
+    store: Store, config: Config, root: str, project: str
+) -> dict:
+    """Switch to a branch with its own audit after a client read the old page."""
+
+    run_id = _start_run(
+        store, config, root, key="audit-branch", branch_id=_branch_id(root)
+    )
+    evidence = _candidate(store, run_id, key="audit-branch")
+    _review(store, run_id, evidence, key="audit-branch", index=0)
+    return seed_branch_activate(store, config, root, project)
+
+
 def seed_source_for_import(
     store: Store, config: Config, root: str, project: str
 ) -> dict:
@@ -579,6 +608,7 @@ SCENARIOS: dict[str, Callable[[Store, Config, str, str], dict]] = {
     "frame_autonomous": seed_frame_autonomous,
     "selection_bump": seed_selection_bump,
     "project_review_only": seed_project_review_only,
+    "project_autonomous": seed_project_autonomous,
     "legacy_review": seed_legacy_review,
     "budget_meters": seed_budget_meters,
     "measurement_unavailable": seed_measurement_unavailable,
@@ -588,6 +618,7 @@ SCENARIOS: dict[str, Callable[[Store, Config, str, str], dict]] = {
     "audits": seed_audits,
     "branch_runs": seed_branch_runs,
     "branch_activate": seed_branch_activate,
+    "audit_branch_activate": seed_audit_branch_activate,
     "source_for_import": seed_source_for_import,
 }
 
@@ -794,6 +825,34 @@ def test_audit_scenario_pages_and_filters_like_the_workbench(scope):
         assert row["public_summary"].endswith(".")
     # Fifteen attempts at one candidate are still its first review round.
     assert service.get(root)["run"]["review_round"] == 0
+
+
+def test_project_selection_changes_only_the_winning_source_revision(scope):
+    store, config, root, project = scope
+    seed_project_review_only(store, config, root, project)
+    service = _service(store)
+    before = service.get(root)
+    seed_project_autonomous(store, config, root, project)
+    after = service.get(root)
+    assert before["selection"]["revision"] == after["selection"]["revision"] == 0
+    assert before["selection"]["source_revision"] == 1
+    assert after["selection"]["source_revision"] == 2
+    assert after["selection"]["preset"] == "autonomous"
+    assert before["last_event_ordinal"] == after["last_event_ordinal"]
+
+
+def test_audit_numeric_cursor_does_not_pin_the_active_branch(scope):
+    store, config, root, project = scope
+    seed_audits(store, config, root, project)
+    service = _service(store)
+    first = service.list_audits(root, limit=20)
+    seed_audit_branch_activate(store, config, root, project)
+    page = service.list_audits(root, before=first["next_before"], limit=20)
+    assert page["branch_id"] != first["branch_id"]
+    fresh = service.list_audits(root, limit=20)
+    assert [row["audit_id"] for row in fresh["audits"]] == [
+        "audit-result-audit-branch-00"
+    ]
 
 
 def test_branch_scenarios_project_the_selected_branch(scope):

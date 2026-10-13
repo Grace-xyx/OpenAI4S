@@ -66,6 +66,22 @@ afterEach(() => {
 });
 
 describe("paging", () => {
+  it("reloads the first page when the server's active branch changes between pages", async () => {
+    let switched = false;
+    respond = (url) => {
+      if (!switched) return json(auditPageBody([auditRowBody(1)], { branch_id: "branch-a", next_before: "90", has_more: true }));
+      return json(auditPageBody([auditRowBody(url.searchParams.has("before") ? 3 : 2)], { branch_id: "branch-b" }));
+    };
+    await openAutoModeAudits();
+    switched = true;
+    body().byClass("am-more")!.click();
+    await settle();
+    // Numeric cursors are valid on either branch. Never append B's older
+    // audits to A's first page, or omit B's newest page.
+    expect(shownIds()).toEqual(["audit-2"]);
+    expect(calls.at(-1)!.path).toBe(`/api/v1/frames/f-root/auto-audits?limit=${AUDIT_PAGE_SIZE}`);
+  });
+
   it("reads newest first and walks the server cursor until has_more is false", async () => {
     respond = (url) => {
       const before = url.searchParams.get("before");

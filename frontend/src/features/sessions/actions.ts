@@ -176,7 +176,9 @@ export async function requestReview(): Promise<void> {
 }
 
 export async function sessionOptionsMenu(anchor: Element): Promise<void> {
-  if (!currentId.value) return;
+  const frameId = currentId.value;
+  const openGen = _openGen.value;
+  if (!frameId) return;
   // Beside the review-settings read, not after it: opening the menu is one
   // of the moments the read-only Auto Mode block re-reads from the server.
   void beginAutoModeStatusRead();
@@ -186,10 +188,13 @@ export async function sessionOptionsMenu(anchor: Element): Promise<void> {
     delegation_enabled: true,
   };
   try {
-    review = (await api(`/frames/${currentId.value}/review-settings`)) as typeof review;
+    review = (await api(`/frames/${frameId}/review-settings`)) as typeof review;
   } catch {
     /* defaults */
   }
+  // A delayed settings response must not open a menu after navigation or a
+  // branch reopen. Its Auto Mode read belongs to the previous opening too.
+  if (currentId.value !== frameId || _openGen.value !== openGen) return;
   const checked = (on: boolean) => (on ? "✓  " : "");
   openMenu(anchor, [
     {
