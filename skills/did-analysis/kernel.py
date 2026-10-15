@@ -879,14 +879,7 @@ def event_study(
                 )
             except ValueError:
                 joint["reason"] = "rank-deficient joint pretrend covariance"
-    result = _finish(
-        "event_study",
-        fits[0],
-        info,
-        audit,
-        _units(sample, membership, [reference], [comparison[0]]),
-        alpha=alpha,
-    )
+    result = _finish("event_study", fits[0], info, audit, [], alpha=alpha)
     for key in (
         "estimate",
         "se",
