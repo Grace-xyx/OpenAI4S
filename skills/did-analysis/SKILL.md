@@ -3,6 +3,8 @@ name: did-analysis
 description: Analyze researcher-defined panel interventions with traditional difference-in-differences first, dynamic event studies, fake-time and fake-group placebo checks, and design-specific staggered group-time ATT or triple differences. Audit observed data, comparison groups and assignment clusters before estimation; export assumptions, uncertainty and every prespecified result.
 origin: openai4s
 category: empirical-analysis
+origin: openai4s
+category: empirical-analysis
 capabilities:
   network:
     mode: none
