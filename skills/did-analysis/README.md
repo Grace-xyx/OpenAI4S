@@ -72,7 +72,7 @@ additional justified estimators; the sidecar does not claim those capabilities.
 | [`kernel.py`](kernel.py) | Audited stdlib estimation, cluster inference, dynamic/placebo/derivative results, provenance and deterministic exports; optional diagnostic figures. |
 | [`method-notes.md`](method-notes.md) | Formulas, estimands, uncertainty conventions, comparison/weight rules and primary methodological sources. |
 
-Development is recorded in [`doc/skill-development.md`](../../doc/skill-development.md).
-The independent experiment is [`experiments/did-skill-validation/`](../../experiments/did-skill-validation/README.md).
+Development is recorded in [`docs/skill-development.md`](https://github.com/PKU-YuanGroup/OpenAI4S/blob/main/docs/skill-development.md).
+The independent experiment is [`experiments/did-skill-validation/`](https://github.com/PKU-YuanGroup/OpenAI4S/blob/main/experiments/did-skill-validation/README.md).
 These checks validate behavior and numerical calculations, not a real study's
 identifying assumptions.

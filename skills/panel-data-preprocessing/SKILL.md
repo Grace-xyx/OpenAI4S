@@ -1,6 +1,6 @@
 ---
 name: panel-data-preprocessing
-description: Preprocess raw or wide tabular records into entity-time panel data, audit calendar gaps and sample coverage, summarize numeric outcomes, and visually inspect abrupt persistent changes alongside known event dates. Use for panel data preparation, exploratory event discovery, 面板数据预处理 and 数据突变; candidate dates are not causal identification.
+description: 面板数据预处理、数据突变。Preprocess raw or wide tabular records into entity-time panel data, audit calendar gaps and sample coverage, summarize numeric outcomes, and visually inspect abrupt persistent changes alongside known event dates. Use for panel data preparation, exploratory event discovery; candidate dates are not causal identification.
 origin: openai4s
 category: empirical-analysis
 capabilities:

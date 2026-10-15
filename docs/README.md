@@ -16,6 +16,7 @@ and the internal plans in this directory are not published by that site.
 | `windows-wsl-parity-audit_zh.md` | Chinese counterpart of the WSL2/macOS parity investigation. |
 | `windows-wsl-parity-evidence.json` | Synthetic-data observations from the real WSL parity probe, including the Windows interoperability boundary and unavailable secure store. |
 | `windows-wsl-shell-inventory.json` | Baseline per-file shell inventory, Ubuntu Bash syntax results, generated templates and recognizable Python process call sites. |
+| `skill-development.md` / `skill-development_zh.md` | Empirical Skill development record, implemented APIs and validation boundaries. |
 | `architecture.md` | Current dual-loop architecture and Host API overview; compatibility entry for contributors. |
 | `ark-agent-plan-9.9.png` | Volcengine Ark Agent Plan pricing screenshot displayed by the repository's root README. |
 | `auto-mode.md` | The frozen Stage 0 Auto Mode product contract plus the current Stages 1–12 implementation contract: normalized preset and precedence, finite budget ceilings, provisional/terminal truth, durable evidence, recovery, projection rules, and the independent default-off rollout boundaries. |

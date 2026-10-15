@@ -184,3 +184,5 @@ realization. It does not include Monte Carlo draws, detection-power calibration,
 confidence intervals or DiD causal estimation. Real research still needs
 independent event information, a missingness assessment and a design addressing
 seasonality, drift and noise.
+
+Maintenance refresh (2026-10-15): moving Chinese discovery terms earlier in the Skill description changed its recipe digest. The actual runner and complete verifier were rerun: all 298,130 checks pass. Every input, numeric and plot file is byte-identical to `ab9cfc48`; only the source/environment manifests and verification report were refreshed. The panel sidecar and experimental choices are unchanged.

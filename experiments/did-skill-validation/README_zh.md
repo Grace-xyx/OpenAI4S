@@ -31,4 +31,4 @@ python experiments/did-skill-validation/verify_experiment.py --bundle /tmp/did-n
 
 历史 `experiments/did-arxiv-replication/` 档案不是输入，也没有修改。本实验提供合成数据验证，不声称经验因果结论，也不声称完整的条件调整、双重稳健 Callaway–Sant'Anna bootstrap 复现。
 
-当前产物清单 SHA-256 是 `38e7d5a81574814b47d534afde687c897880eb7886c4af1888cc490ebac57994`。Skill 的无网络 frontmatter 更新后，完整重跑得到的 45 个确定性产物全部不变。对恢复后的仓库产物包执行最终验证器，通过 **12,237 个检查，零失败**。先前本地输入/结果包与比较记录仍保留在仓库之外的本地档案；当前源/审计哈希与刷新溯源详见 `REPORT_zh.md`。
+当前产物清单 SHA-256 是 `e3c89d3b6fb855b04dcd54efd9bc7b18bb4994e9ddfb6c91ba3861c8057bc454`。补齐 origin/category 并固定检查顺序后，实际运行器及完整独立重放通过 **12,238 项检查，零失败**。所有输入、数值和图形文件与 `ab9cfc48` 逐字节一致；仅源码／环境清单与审计报告更新。当前哈希与刷新溯源详见 `REPORT_zh.md`。

@@ -19,7 +19,7 @@
     "dgp_shape": 6,
     "event_joint_covariance": 4,
     "event_periods": 4,
-    "finite_json": 17,
+    "finite_json": 18,
     "manifest_completeness": 1,
     "mc_entity_count": 512,
     "mc_panel_count": 1,

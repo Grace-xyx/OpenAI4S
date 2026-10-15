@@ -14,6 +14,7 @@
 | `windows-wsl-parity-audit_zh.md` | WSL2/macOS 对齐调查的中文正文。 |
 | `windows-wsl-parity-evidence.json` | 真实 WSL 下使用合成数据的探针回执，包含 Windows 互操作边界与安全密钥存储观察。 |
 | `windows-wsl-shell-inventory.json` | 基线逐文件脚本清单、Ubuntu Bash 语法结果、生成模板及可识别的 Python 进程调用。 |
+| `skill-development.md` / `skill-development_zh.md` | 实证分析 Skill 开发记录、已实现 API 与验证边界。 |
 | `architecture.md` | 当前的双循环架构与 Host API 概览，也是贡献者使用的兼容入口。 |
 | `ark-agent-plan-9.9.png` | 源码仓库根 README 展示的火山方舟 Agent 套餐价格截图。 |
 | `auto-mode.md` | 冻结的 Stage 0 Auto Mode 产品契约与当前 Stage 1–12 实现契约：无矛盾预设与优先级、有限预算上限、候选/终态真值、持久证据、恢复、投影规则，以及各阶段互相独立且默认关闭的渐进开启边界。 |

@@ -61,17 +61,17 @@ DDD 示例包含共同处理后效应 0.7、子组额外效应 1.5、共享子�
 
 `results/artifact_manifest.json` 绑定源哈希和全部确定性输入/输出产物；`results/verification.json` 记录独立检查与字节重放。验证报告在审计后写入，因此明确不包含在该清单中。CSV 使用 LF，JSON 拒绝非有限数。运行器拒绝已有输入/结果目录，验证器拒绝已有审计文件。执行前捕获源哈希，冻结清单前重新核查。图形元数据没有时间戳，SVG ID 使用固定盐。
 
-最终在仓库上下文中的独立审计通过 **12,237 个确定性检查，零失败**，绝对和相对数值容差均为 1e-9。最大绝对数值差异为 4.3053e-12。**45 个保留的确定性产物**以及产物清单在新目录重放中逐字节一致，其中包括三张 PNG 和三张 SVG。图形也经过视觉检查。该运行绑定的估计器与配方哈希为：
+最终在仓库上下文中的独立审计通过 **12,238 个确定性检查，零失败**，绝对和相对数值容差均为 1e-9。最大绝对数值差异为 4.3053e-12。**45 个保留的确定性产物**以及产物清单在新目录重放中逐字节一致，其中包括三张 PNG 和三张 SVG。图形也经过视觉检查。该运行绑定的估计器与配方哈希为：
 
 | 冻结源或审计产物 | SHA-256 |
 | --- | --- |
-| `skills/did-analysis/kernel.py` | `b075a9b05b17fdd15938d5f387e50df53583b62e88e0bd4855dcbff6cbae4706` |
-| `skills/did-analysis/SKILL.md` | `3be8ae1fd74c9e80b61228947f6c294ddaca16994425f2cad2f5e677d2fcc553` |
+| `skills/did-analysis/kernel.py` | `6b1de47929be08215f6539567cea9d255c8b9c0fd6da0f271f846b98ae716fc1` |
+| `skills/did-analysis/SKILL.md` | `ee37c36e55ccab0a23953f5e6c1ddcfe6b370fae3998ee5b36dcdd79e5bbe079` |
 | `skills/did-analysis/method-notes.md` | `1e09628216d116b080c53357ab91ebac8e5d4f8bc050f217c1009937936e5ad2` |
-| `results/artifact_manifest.json` | `38e7d5a81574814b47d534afde687c897880eb7886c4af1888cc490ebac57994` |
-| `results/verification.json` | `5bddf1c24e04e3ed50f1a36b712e489fc392162aebe1237f5220fbec23fcbeb9` |
+| `results/artifact_manifest.json` | `e3c89d3b6fb855b04dcd54efd9bc7b18bb4994e9ddfb6c91ba3861c8057bc454` |
+| `results/verification.json` | `68a611733f747850fb70109e224f5e5a07228f2d95e212213ac5db3e8d708582` |
 
-随后仅元数据的更新在 Skill frontmatter 中明确声明 `network: {mode: none, domains: []}`。先前已验证的 47 文件输入/结果快照逐字节保留在仓库之外的本地档案。之后用当前源重新执行实际运行器、独立审计和重放，再恢复此更新后的产物包。45 个确定性产物全部不变，包括每个输入 CSV、数值输出和图；产物清单只改变 Skill 源哈希。独立参照值和数值差异也不变。本地比较记录是本地档案中的 `metadata-refresh-comparison.json`；其中说明新目标目录没有源运行器旁的协议 JSON，因此少了一个有限 JSON 上下文检查。随后对恢复后的仓库产物包执行最终验证器，包括相邻协议 JSON；实际 12,237 个检查的报告保留为 `results/verification.json`。中间的新目标目录审计报告也单独保留在本地档案中。没有改变估计器、Python 源、DGP、种子或统计结果，历史实验档案也未修改。
+先前无网络元数据更新与 12,237 项检查的报告保留在 Git 版本 `ab9cfc48` 中。2026-10-15 的维护更新补齐 bundled origin/category，并固定无效计划的检查顺序。之后再次执行实际运行器、独立验证器和完整重放。与该版本相比，所有输入、数值和图形文件逐字节不变；仅环境中的源码摘要、产物清单和审计报告更新。当前 45 个确定性产物与清单均与新重放逐字节一致。当前审计有 12,238 项检查，因为额外验证了已有审计报告的有限 JSON。未改变估计公式、DGP、种子、接受的数据格式或统计结果。
 
 本实验验证预先指定的平衡、无条件估计器并记录其边界。它不证明真实研究中的识别、任意聚类规模的推断校准、常规 TWFE 对异质效应的安全性、条件调整、bootstrap 推断、缺失数据有效性或精确经验论文复现。未读取或修改历史复现档案。合成真值与不利模拟都属于证据，不是替换指定处理日期、样本或种子列表的理由。
 

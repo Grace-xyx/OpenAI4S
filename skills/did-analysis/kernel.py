@@ -1526,7 +1526,7 @@ def analyze_did(
     frozen = _finite_json(dict(plan))
     staged = []
     counts = 1
-    for key in allowed - {"traditional"}:
+    for key in sorted(allowed - {"traditional"}):
         values = frozen.get(key, [])
         if not isinstance(values, list) or any(not isinstance(v, dict) for v in values):
             raise ValueError(f"plan.{key} must be a list of explicit configurations")

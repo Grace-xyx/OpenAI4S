@@ -75,6 +75,7 @@ OpenAI4S 的离线正确性门禁。`uv run pytest` 用确定性 fake 跑完这�
 | [`test_compaction_wave3_integration.py`](test_compaction_wave3_integration.py) | Lane D 与 F 之间的缝：ledger 恢复出的 note 必须与 `compact()` 在内存里构造的逐字节相同（共享 `COMPACTION_NOTE_PREFIX`），恢复一条已带框架句的 note 不得再加一次前缀。 |
 | [`test_compaction_wave4_review.py`](test_compaction_wave4_review.py) | Wave 4 审阅在各车道集成后发现的问题。持久 ledger 记录只为 policy 采纳的压缩写入；覆盖按分支拼接序列中的 group id 判定（fork 后 ordinal 从 0 重新计数），任何错位都判为一无所覆而不是覆盖到尾部；缺少 event 的压缩 group 被跳过而不是当作空 note 应用；摘要 `max_tokens` 钳到模型声明的上限，被截断的分块（`length`/`max_tokens`/`MAX_TOKENS`/`incomplete`，重试一次）绝不用占位符补齐；上下文预算为 0 意味着未知；工作区 `.openai4s/context` 被占用只损失 kernel 副本、不损失压缩；Artifact 路径同样写这份副本；重新闭合的熔断拿回完整的失败预算。 |
 | [`test_analysis_skills.py`](test_analysis_skills.py) | 内置的分析类 Skill 在这里是真的被执行，不只是被列出来。它的数据审计能抓出分组泄漏，AUC 会处理并列，bootstrap 是确定性的。 |
+| `test_sidecar_replay.py` | 面板／DiD 共享重放的浮点容差、非有限值拒绝和预期拒绝计分。 |
 | [`test_did_analysis_skill.py`](test_did_analysis_skill.py) | 传统 DiD、事件研究联合协方差、安全安慰剂、分批／DDD 估计目标、独立聚类推断核对、输入拒绝与确定性审计导出。 |
 | [`test_is_research_skills.py`](test_is_research_skills.py) | IS 研究请求检索、包内参考资源读取、Python 配方语法及固定版本第三方许可证来源检查。 |
 | [`test_is_survey_measurement.py`](test_is_survey_measurement.py) | 直接执行问卷计分配方，验证反向计分、原始数据保留、显式缺失策略、样本损失审计与非法输入拒绝。 |

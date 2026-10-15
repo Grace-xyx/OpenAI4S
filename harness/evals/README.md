@@ -8,6 +8,7 @@ Offline eval fixtures and the code that scores them. An eval measures one archit
 
 | File | Responsibility |
 | --- | --- |
+| [`sidecar_replay.py`](sidecar_replay.py) | Shared real-sidecar loading, finite numeric comparisons (1e-10 tolerance), expected-refusal scoring, report and CLI helpers for panel/DiD replays. |
 | [`did_analysis.py`](did_analysis.py) | Executes the actual stdlib DiD sidecar against declared synthetic algebraic contrasts and refusals; run `python -m harness.evals.did_analysis --json`. No LLM/kernel, visual judgment or real-study identification is claimed. |
 | [`did_analysis_cases.json`](did_analysis_cases.json) | Versioned full-history inputs and prespecified traditional/DDD/placebo expectations, contaminated-window and fake-group refusals, incomplete/imputed outcome exclusions and explicit complete-case behavior. |
 | [`panel_data.py`](panel_data.py) | Runs the actual panel-preprocessing sidecar on versioned synthetic inputs. Scores explicit fit-only cleaning, encoding-ready records, panel conversion, window readiness, persistent abrupt changes, exposure censoring and expected refusals. Run `python -m harness.evals.panel_data --json`; no model/kernel or visual judgment is claimed. |

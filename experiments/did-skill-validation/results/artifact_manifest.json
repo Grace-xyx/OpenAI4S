@@ -5,8 +5,8 @@
     "experiments/did-skill-validation/verify_experiment.py": "bdc6dc5596dedb879e788dc9aa26551a39e86a7620bcb7c131a2ff9f85a28677",
     "experiments/did-skill-validation/prespecification.json": "40677272e0197114072503b80b4debc0b542c6ba3713404e1d6f6f8f20e94f84",
     "experiments/did-skill-validation/requirements-analysis.txt": "7c34b80b63b903217260e206cef001ef53dccdc5fc3d70b3671ebca40c90cacd",
-    "skills/did-analysis/kernel.py": "b075a9b05b17fdd15938d5f387e50df53583b62e88e0bd4855dcbff6cbae4706",
-    "skills/did-analysis/SKILL.md": "3be8ae1fd74c9e80b61228947f6c294ddaca16994425f2cad2f5e677d2fcc553",
+    "skills/did-analysis/kernel.py": "6b1de47929be08215f6539567cea9d255c8b9c0fd6da0f271f846b98ae716fc1",
+    "skills/did-analysis/SKILL.md": "ee37c36e55ccab0a23953f5e6c1ddcfe6b370fae3998ee5b36dcdd79e5bbe079",
     "skills/did-analysis/method-notes.md": "1e09628216d116b080c53357ab91ebac8e5d4f8bc050f217c1009937936e5ad2"
   },
   "artifacts": {
@@ -22,7 +22,7 @@
     "inputs/violated_pretrends.csv": "5923655c9907ccb0cd1a744947e193a998e6c341ef78c942dca525500f7cf2f7",
     "results/README.md": "f60b34824d8f9d1d5677cdae49c48b4b750cba268fd890a1b17a2f898bfe7bac",
     "results/README_zh.md": "f60e35d9474c5eabaaf0ba11f4fb973c7e2e3e863a1ddb7e0ddc184471908f14",
-    "results/environment.json": "8f5f7ae2a047dfce66a1cba531538e3a1e573d0471786c3fda541a45ae52431e",
+    "results/environment.json": "b8362e915dfad3ce05a4026087a7516ac80ffb6ba1913b6a58a8ff4c4abde5a9",
     "results/monte_carlo.csv": "22996ae650d39f00f5ee90a5199154191c0e46b7db1c439c05856995c454b392",
     "results/monte_carlo_summary.json": "0ce53ec62e8e6501cd0fd578d291038606651a8c42d77603773e0652ece7aa11",
     "results/pipeline/README.md": "a427bc313a0c59ea7ee644fd958b8a31e337960ae07ff3de734bdb2e530e4c66",

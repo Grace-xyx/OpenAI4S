@@ -262,7 +262,7 @@ The canonical bilingual documentation is published at **[openai4s.org/docs](http
 | [**Backend extension guide**](docs/backend-extension-guide.md) | where new Tool classes, host services, repositories, and session behaviour belong |
 | [**Model backend bring-up**](docs/model-backend-bringup.md) | local/remote GPU selection, checkpoint staging, real-inference canary admission, and connector portability |
 | [**Skills**](docs/skills.md) | 50 curated Skills + 561 pinned bioSkills + how to write your own |
-| [**Skill development record**](doc/skill-development.md) | the empirical-analysis Skills developed here, their method choices, implementation and validation |
+| [**Skill development record**](docs/skill-development.md) | the empirical-analysis Skills developed here, their method choices, implementation and validation |
 | [**Research experiments**](experiments/README.md) | Separate data and results for bounded DiD worked-example replications using the panel preprocessing Skill |
 | [**Remote compute**](docs/compute.md) | BYOC GPU jobs, `host.fold`, auto-provisioning |
 | [**Science connectors**](docs/science-connectors.md) | the seven public databases, their filters, and retrieval provenance |

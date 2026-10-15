@@ -13,6 +13,9 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -114,6 +117,7 @@ def _event_run(did, rows=None, **changes):
 def test_skill_discovery_and_sidecar_compilation():
     skill = SkillLoader().discover()["did-analysis"]
     assert skill.read_only and skill.has_kernel
+    assert skill.origin == "openai4s"
     assert skill.sidecar_gate() == {"ok": True, "error": None}
 
 
@@ -935,3 +939,31 @@ def test_placebo_csv_distinguishes_actual_reference_from_every_fake_draw(did, tm
         [r["estimate"] for r in result["distribution"]]
     )
     assert all(r["ci_low"] == r["ci_high"] == r["p_value"] == "" for r in draws)
+
+
+def test_invalid_plan_reports_the_same_stage_across_hash_seeds():
+    code = """
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location('did_order_check', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    module.analyze_did([], plan={'traditional': {}, 'event_study': {}, 'placebo_time': {}})
+except ValueError as exc:
+    print(str(exc))
+else:
+    raise AssertionError('malformed plan was accepted')
+"""
+    for seed in ("0", "1", "42"):
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(ROOT / "skills/did-analysis/kernel.py")],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert (
+            result.stdout.strip()
+            == "plan.event_study must be a list of explicit configurations"
+        )

@@ -8,6 +8,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
+| [`sidecar_replay.py`](sidecar_replay.py) | 面板／DiD 重放共享的真实 sidecar 加载、有限数值比较（容差 1e-10）、预期拒绝计分、报告与 CLI 辅助函数。 |
 | [`did_analysis.py`](did_analysis.py) | 用已声明的合成代数对比和预期拒绝执行真实标准库 DiD sidecar；运行 `python -m harness.evals.did_analysis --json`。不宣称验证了模型／内核、视觉判断或真实研究的识别。 |
 | [`did_analysis_cases.json`](did_analysis_cases.json) | 版本化完整处理历史、预设传统／DDD／安慰剂结果，以及污染窗口、伪组、缺失／填补结果的拒绝和显式完整案例行为。 |
 | [`panel_data.py`](panel_data.py) | 用版本化合成输入执行真实面板预处理 sidecar，计分显式拟合范围的清理、编码记录、面板转换、窗口可用性、持续突变、处理状态删失与预期拒绝。运行 `python -m harness.evals.panel_data --json`；不声称验证了模型、内核或视觉判断。 |

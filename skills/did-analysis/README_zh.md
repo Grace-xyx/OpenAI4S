@@ -48,6 +48,6 @@ python3 -m zipfile -c did-analysis.zip did-analysis
 | [`kernel.py`](kernel.py) | 经审计的标准库估计、聚类推断、动态／安慰剂／衍生结果、来源记录与确定性导出，以及可选诊断图。 |
 | [`method-notes.md`](method-notes.md) | 公式、估计目标、推断约定、比较组／权重规则及主要方法来源。 |
 
-开发过程见 [`doc/skill-development_zh.md`](../../doc/skill-development_zh.md)。
-独立实验见 [`experiments/did-skill-validation/`](../../experiments/did-skill-validation/README_zh.md)。
+开发过程见 [`docs/skill-development_zh.md`](https://github.com/PKU-YuanGroup/OpenAI4S/blob/main/docs/skill-development_zh.md)。
+独立实验见 [`experiments/did-skill-validation/`](https://github.com/PKU-YuanGroup/OpenAI4S/blob/main/experiments/did-skill-validation/README_zh.md)。
 这些检查验证行为和数值计算，不能验证具体实证研究的识别假设。

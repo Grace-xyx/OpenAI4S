@@ -93,3 +93,16 @@ def test_third_party_adaptations_retain_pinned_sources_and_exact_license(name):
             license_sources.append(source)
     assert len(license_sources) == 1
     assert hashlib.sha256(license_bytes).hexdigest() == license_sources[0]["sha256"]
+
+
+@pytest.mark.parametrize(
+    ("name", "terms"),
+    [
+        ("panel-data-preprocessing", ("面板数据预处理", "数据突变")),
+        ("is-qualitative-analysis", ("信息系统访谈", "质性编码", "编码者一致性")),
+    ],
+)
+def test_chinese_triggers_survive_the_runtime_summary_boundary(name, terms):
+    context = SkillLoader().system_context(only=frozenset({name}))
+    assert name in context
+    assert all(term in context for term in terms)

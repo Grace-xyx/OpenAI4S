@@ -1,6 +1,6 @@
 ---
 name: is-qualitative-analysis
-description: "Information Systems (IS) interview and case-study analysis: codebooks, reflexive thematic analysis, evidence locators, negative cases and nominal intercoder agreement (Krippendorff alpha/Cohen kappa). 信息系统访谈、案例、质性编码与编码者一致性。"
+description: "信息系统访谈、案例、质性编码与编码者一致性。Information Systems (IS) interview and case-study analysis: codebooks, reflexive thematic analysis, evidence locators, negative cases and nominal intercoder agreement (Krippendorff alpha/Cohen kappa)."
 license: MIT
 origin: openai4s
 category: empirical-analysis

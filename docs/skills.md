@@ -75,7 +75,7 @@ break lines and sample coverage is plotted separately. Imputed cells are marked
 and excluded from event-window eligibility; encoding features are covariates,
 not automatically screened outcomes. It exports source-row maps, fitted cleaner,
 cleaning audit, configuration and checksums. Development is recorded in
-[`doc/skill-development.md`](../doc/skill-development.md). Candidates are exploratory, not inferred
+[`docs/skill-development.md`](skill-development.md). Candidates are exploratory, not inferred
 exogenous shocks. Its actual sidecar is replayed offline with
 `python -m harness.evals.panel_data --json`.
 

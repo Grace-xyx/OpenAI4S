@@ -9,6 +9,6 @@
     "matplotlib": "3.10.9"
   },
   "skill_path": "skills/did-analysis/kernel.py",
-  "skill_sha256": "b075a9b05b17fdd15938d5f387e50df53583b62e88e0bd4855dcbff6cbae4706",
+  "skill_sha256": "6b1de47929be08215f6539567cea9d255c8b9c0fd6da0f271f846b98ae716fc1",
   "plots_requested": true
 }
