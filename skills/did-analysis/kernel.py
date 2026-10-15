@@ -71,7 +71,9 @@ def _id(value: Any, column: str) -> str | int:
 
 
 def _integer(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not re.fullmatch(r"-?\d+", str(value).strip()):
+    if isinstance(value, bool) or not re.fullmatch(
+        r"-?\d+", str(value).strip(), re.ASCII
+    ):
         raise ValueError(f"{name}: use integer periods or upstream _period_index")
     return int(value)
 
