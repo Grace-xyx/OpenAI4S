@@ -34,6 +34,9 @@ def _number(value: Any, column: str) -> float | None:
         return None
     if isinstance(value, bool):
         raise ValueError(f"{column}: boolean is not a numeric measurement")
+    if isinstance(value, str) and "_" in value:
+        # float() accepts digit separators such as "1_000"; a CSV cell does not.
+        raise ValueError(f"{column}: invalid numeric value {value!r}")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
@@ -50,24 +53,24 @@ def _period(value: Any, frequency: str) -> tuple[int, str]:
         raise ValueError(f"invalid {frequency} time: {value!r}")
     text = value.isoformat() if isinstance(value, date) else str(value).strip()
     if frequency == "integer":
-        if not re.fullmatch(r"-?\d+", text):
+        if not re.fullmatch(r"-?\d+", text, re.ASCII):
             raise ValueError(f"integer time requires whole-number labels: {text!r}")
         index = int(text)
         return index, str(index)
-    if re.fullmatch(r"\d{4}", text) and frequency == "year":
+    if re.fullmatch(r"\d{4}", text, re.ASCII) and frequency == "year":
         year = int(text)
         date(year, 1, 1)
         return year, f"{year:04d}"
-    quarter = re.fullmatch(r"(\d{4})-?Q([1-4])", text, re.I)
+    quarter = re.fullmatch(r"(\d{4})-?Q([1-4])", text, re.I | re.ASCII)
     if quarter and frequency == "quarter":
         year, q = map(int, quarter.groups())
         date(year, 1, 1)
         return year * 4 + q - 1, f"{year:04d}Q{q}"
-    if re.fullmatch(r"\d{4}-\d{2}", text):
+    if re.fullmatch(r"\d{4}-\d{2}", text, re.ASCII):
         if frequency not in {"year", "quarter", "month"}:
             raise ValueError("day frequency requires an ISO date, not a month")
         parsed = date.fromisoformat(text + "-01")
-    elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+    elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", text, re.ASCII):
         parsed = date.fromisoformat(text)
     else:
         raise ValueError(f"ambiguous or unsupported time label: {text!r}")
@@ -1015,6 +1018,7 @@ def prepare_panel(
         grouped[(_canonical(row[entity]), row["_period_index"])].append(row)
     result = []
     collapsed = 0
+    partially_missing: Counter[str] = Counter()
     for key, group in sorted(grouped.items()):
         output = dict(group[0])
         if len(group) > 1:
@@ -1036,6 +1040,9 @@ def prepare_panel(
                     raise ValueError(f"conflicting non-aggregated column: {column}")
             for column in numeric:
                 values = [r[column] for r in group if r[column] is not None]
+                if values and len(values) < len(group):
+                    # The reducer sees observed values only; record the cell.
+                    partially_missing[column] += 1
                 reducer = reducers[column]
                 output[column] = (
                     {"sum": sum, "mean": statistics.mean, "min": min, "max": max}[
@@ -1062,17 +1069,22 @@ def prepare_panel(
         "wide_columns": wide_columns,
         "aggregations": reducers,
     }
+    transformation = {
+        "source_row_count": len(rows),
+        "expanded_row_count": len(expanded),
+        "collapsed_row_count": collapsed,
+        "output_row_count": len(result),
+        "source_records_sha256": _digest(list(rows)),
+    }
+    if reducers:
+        transformation["partially_missing_aggregations"] = {
+            column: partially_missing[column] for column in numeric
+        }
     return {
         "schema_version": 1,
         "config": config,
         "rows": result,
-        "transformation": {
-            "source_row_count": len(rows),
-            "expanded_row_count": len(expanded),
-            "collapsed_row_count": collapsed,
-            "output_row_count": len(result),
-            "source_records_sha256": _digest(list(rows)),
-        },
+        "transformation": transformation,
     }
 
 
@@ -1748,6 +1760,8 @@ def discover_events(
             "window": window,
             "threshold": threshold,
             "min_abs_change": min_abs_change,
+            # Same canonical form the configuration hash uses, so a supplied
+            # date object cannot make the exported manifest unserializable.
             "known_events": json.loads(_canonical(list(known_events))),
             "window_assessment": window_assessment["config"],
         },
@@ -1902,12 +1916,27 @@ def write_outputs(result: Mapping[str, Any], directory: str | Path) -> dict[str,
         names += ("cleaning_report.json", "cleaning_model.json")
     if any((root / name).exists() for name in names):
         raise FileExistsError("output bundle already exists; choose a new directory")
+    assessment = result["window_assessment"]
+
+    def encode(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+
+    # Serialize every JSON document before creating any file: a value that
+    # cannot be exported refuses the bundle instead of leaving a partial one
+    # that the exclusive-create guard would then refuse to replace.
+    documents = {
+        "summary.json": encode(result["analysis"]),
+        "window_assessment.json": encode(assessment),
+    }
+    if "cleaning" in result:
+        documents["cleaning_report.json"] = encode(result["cleaning"]["report"])
+        documents["cleaning_model.json"] = encode(result["cleaning"]["model"])
+    encode(result["manifest"])
     root.mkdir(parents=True, exist_ok=True)
     tables = {
         "panel.csv": result["rows"],
         "candidate_events.csv": result["events"]["candidates"],
     }
-    assessment = result["window_assessment"]
     tables["window_assessment.csv"] = [
         {
             **{k: v for k, v in a.items() if k not in {"coverage", "pre_statistics"}},
@@ -1933,28 +1962,9 @@ def write_outputs(result: Mapping[str, Any], directory: str | Path) -> dict[str,
                         for k, v in row.items()
                     }
                 )
-    with (root / "summary.json").open("x", encoding="utf-8") as handle:
-        json.dump(
-            result["analysis"], handle, ensure_ascii=False, indent=2, allow_nan=False
-        )
-        handle.write("\n")
-    with (root / "window_assessment.json").open("x", encoding="utf-8") as handle:
-        json.dump(assessment, handle, ensure_ascii=False, indent=2, allow_nan=False)
-        handle.write("\n")
-    if "cleaning" in result:
-        for filename, key in (
-            ("cleaning_report.json", "report"),
-            ("cleaning_model.json", "model"),
-        ):
-            with (root / filename).open("x", encoding="utf-8") as handle:
-                json.dump(
-                    result["cleaning"][key],
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                    allow_nan=False,
-                )
-                handle.write("\n")
+    for filename, text in documents.items():
+        with (root / filename).open("x", encoding="utf-8") as handle:
+            handle.write(text)
     manifest = {
         **result["manifest"],
         "outputs": {

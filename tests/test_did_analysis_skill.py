@@ -701,6 +701,33 @@ def test_unimplemented_staggered_comparisons_and_adjustments_refuse(did):
         _staggered_run(did, covariates=["x"])
 
 
+def test_staggered_cohort_sentinel_cannot_hide_a_period_zero_adoption(did):
+    # A cohort adopting in period 0 is encoded 0, the never-treated sentinel.
+    rows = [
+        {**row, "g": 0 if row["id"] == "A000" else row["g"]}
+        for row in _staggered_panel()
+    ]
+    with pytest.raises(ValueError, match="ambiguous cohort sentinel"):
+        _staggered_run(did, rows, periods=[0, 1, 2, 3])
+    # Observed exposure resolves the ambiguity: the hidden adopter is refused.
+    for row in rows:
+        row["d"] = int(row["id"] == "A000" or (row["g"] != 0 and row["t"] >= row["g"]))
+    with pytest.raises(ValueError, match="disagrees with declared absorbing cohort"):
+        _staggered_run(did, rows, periods=[0, 1, 2, 3], treatment="d")
+
+
+def test_pipeline_rejects_misspelled_stage_options_before_running(did):
+    plan = {
+        "traditional": _config(),
+        "placebo_time": [{**_config(), "fake_treatment_tme": 0}],
+    }
+    with pytest.raises(ValueError, match=r"plan\.placebo_time: unknown options"):
+        did.analyze_did(_panel(), plan=plan)
+    plan["placebo_time"] = [_config()]
+    with pytest.raises(ValueError, match="missing options \\['fake_treatment_time'\\]"):
+        did.analyze_did(_panel(), plan=plan)
+
+
 def test_pipeline_freezes_plan_and_executes_baseline_placebos_derived_in_order(did):
     rows = _ddd_panel()
     baseline = [r for r in rows if r["t"] == 0]
@@ -759,13 +786,22 @@ def test_exports_are_finite_deterministic_exclusive_and_hash_verifiable(did, tmp
         assert hashlib.sha256(path.read_bytes()).hexdigest() == info["sha256"]
         assert path.stat().st_size == info["size"]
     with Path(first["estimates.csv"]).open(newline="") as handle:
-        cells = list(csv.DictReader(handle))
+        table = list(csv.DictReader(handle))
+    cells = [r for r in table if r["role"] == "group_time_cell"]
     assert [(int(c["cohort"]), int(c["period"])) for c in cells] == [
         (2, 2),
         (2, 3),
         (3, 3),
     ]
     assert [float(c["estimate"]) for c in cells] == pytest.approx([2, 4, 3])
+    # The headline aggregate and dynamic effects are part of the CSV deliverable.
+    dynamic = [r for r in table if r["role"] == "dynamic_effect"]
+    assert [int(r["event_time"]) for r in dynamic] == [
+        e["event_time"] for e in result["dynamic_effects"]
+    ]
+    (overall,) = [r for r in table if r["role"] == "overall_aggregate"]
+    assert float(overall["estimate"]) == pytest.approx(result["aggregate"]["estimate"])
+    assert float(overall["se"]) == pytest.approx(result["aggregate"]["se"])
     saved = {name: Path(path).read_bytes() for name, path in first.items()}
     with pytest.raises(FileExistsError):
         did.write_outputs(result, tmp_path / "first")

@@ -3,8 +3,6 @@ name: did-analysis
 description: Analyze researcher-defined panel interventions with traditional difference-in-differences first, dynamic event studies, fake-time and fake-group placebo checks, and design-specific staggered group-time ATT or triple differences. Audit observed data, comparison groups and assignment clusters before estimation; export assumptions, uncertainty and every prespecified result.
 origin: openai4s
 category: empirical-analysis
-origin: openai4s
-category: empirical-analysis
 capabilities:
   network:
     mode: none
@@ -190,6 +188,8 @@ staggered = did.staggered_did(
 ```
 
 `cohort` is a time-invariant integer adoption period; **0 means never treated**.
+When period 0 is itself requested, pass the observed `treatment` column (or
+recode periods, e.g. upstream `_period_index`); otherwise the sentinel refuses.
 The unadjusted ATT(g,t) uses g-1 as baseline and either never-treated or
 `"not_yet_treated"` controls unexposed at the relevant periods. State absorbing
 treatment, no anticipation and unconditional parallel trends. Inspect cohort
@@ -257,12 +257,15 @@ figures = did.render_diagnostics(bundle, "did-figures")
 The baseline must be valid. Later invalid diagnostics are retained with
 `status="refused"`, the reason and configuration, and subsequent stages still
 execute. Review those refusals; a returned bundle is not evidence that every
-requested design was estimable. A staggered pipeline may explicitly set the
+requested design was estimable. Unknown or missing stage options are a malformed
+plan and refuse the whole pipeline before any stage runs. A staggered pipeline may explicitly set the
 traditional stage's `descriptive_staggered_benchmark=True`; its result is labeled
 descriptive. Use the staggered derivative for that design's identified estimand.
 
 Use fresh output directories. `write_outputs(result, directory)` exports
-`results.json`, `estimates.csv` and `manifest.json`.
+`results.json`, `estimates.csv` and `manifest.json`. For staggered results the
+CSV `role` column separates `group_time_cell`, `dynamic_effect` and
+`overall_aggregate` rows.
 `render_diagnostics(result, directory)` creates optional matplotlib figures. The sidecar
 refuses to overwrite existing outputs and records input/configuration provenance.
 Keep the independent event source, original exposure histories, imputation audit,

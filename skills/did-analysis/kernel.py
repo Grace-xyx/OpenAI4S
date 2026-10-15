@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import inspect
 import json
 import math
 import random
@@ -91,6 +92,9 @@ def _number(value: Any, name: str) -> float | None:
         return None
     if isinstance(value, bool):
         raise ValueError(f"{name}: boolean is not an outcome measurement")
+    if isinstance(value, str) and "_" in value:
+        # float() accepts digit separators such as "1_000"; a CSV cell does not.
+        raise ValueError(f"{name}: invalid numeric measurement")
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
@@ -398,6 +402,7 @@ def _fit(
         for u in units
     ]
     k, n = len(x[0]), len(x)
+    keys = [_canonical(u["cluster"]) for u in units]
     xx = [[sum(row[i] * row[j] for row in x) for j in range(k)] for i in range(k)]
     bread = _inverse(xx)
     beta = _mv(
@@ -406,8 +411,7 @@ def _fit(
     scores: dict[str, list[float]] = defaultdict(lambda: [0.0] * k)
     cluster_labels = {}
     residuals = []
-    for row, u in zip(x, units):
-        c = _canonical(u["cluster"])
+    for row, u, c in zip(x, units, keys):
         cluster_labels[c] = u["cluster"]
         residual = u["change"] - sum(a * b for a, b in zip(row, beta))
         residuals.append(residual)
@@ -423,15 +427,14 @@ def _fit(
             for i in range(k)
         ]
     groups = {
-        str(v): len({_canonical(u["cluster"]) for u in units if u["group"] == v})
-        for v in (0, 1)
+        str(v): len({c for u, c in zip(units, keys) if u["group"] == v}) for v in (0, 1)
     }
     cells = (
         {
             f"{a},{b}": len(
                 {
-                    _canonical(u["cluster"])
-                    for u in units
+                    c
+                    for u, c in zip(units, keys)
                     if u["group"] == a and u["subgroup"] == b
                 }
             )
@@ -1141,10 +1144,11 @@ def placebo_distribution(
     rng = random.Random(seed)
     distribution = []
     template = _units(sample, {k: 0 for k in sample}, pre, post)
+    template_keys = [_canonical(u["cluster"]) for u in template]
     for index in range(count):
         fake = set(rng.sample(clusters, fake_count))
         units = [
-            {**u, "group": int(_canonical(u["cluster"]) in fake)} for u in template
+            {**u, "group": int(c in fake)} for u, c in zip(template, template_keys)
         ]
         fit = _fit(units)
         distribution.append(
@@ -1330,6 +1334,13 @@ def staggered_did(
     if cohort in {entity, time, outcome, cluster}:
         raise ValueError(
             "cohort must be a separate column; integer date with never sentinel 0"
+        )
+    if treatment is None and min(selected) <= 0 <= max(selected):
+        # Cohort 0 means never treated, so an adoption in period 0 would be a
+        # silently contaminated control. Observed exposure disambiguates it.
+        raise ValueError(
+            "ambiguous cohort sentinel: period 0 is a requested period; pass the "
+            "observed treatment column or recode periods (e.g. _period_index)"
         )
     cohorts, assigned = {}, {}
     for key, rs in groups.items():
@@ -1538,6 +1549,35 @@ def analyze_did(
             raise ValueError(
                 "derived entries require supported method and explicit config"
             )
+    functions = {
+        "event_study": event_study,
+        "placebo_time": placebo_time,
+        "placebo_group": placebo_group,
+        "placebo_distribution": placebo_distribution,
+    }
+    # A misspelled or missing option is a malformed plan, not a design refusal:
+    # reject it before any stage runs instead of recording it as "refused".
+    stages = [("traditional", traditional_did, frozen["traditional"])]
+    stages += [(k, functions[k], c) for k in functions for c in frozen.get(k, [])]
+    stages += [
+        (f"derived.{e['method']}", derived[e["method"]], e["config"])
+        for e in frozen.get("derived", [])
+    ]
+    for label, function, config in stages:
+        parameters = inspect.signature(function).parameters
+        accepted = {
+            n for n, v in parameters.items() if v.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+        required = {
+            n for n in accepted if parameters[n].default is inspect.Parameter.empty
+        }
+        unknown, missing = sorted(set(config) - accepted), sorted(
+            required - set(config)
+        )
+        if unknown or missing:
+            raise ValueError(
+                f"plan.{label}: unknown options {unknown}; missing options {missing}"
+            )
     staged.append(traditional_did(rows, **frozen["traditional"]))
     source_hash = staged[0]["manifest"]["source_records_sha256"]
 
@@ -1563,12 +1603,6 @@ def analyze_did(
                 }
             )
 
-    functions = {
-        "event_study": event_study,
-        "placebo_time": placebo_time,
-        "placebo_group": placebo_group,
-        "placebo_distribution": placebo_distribution,
-    }
     for key in ("event_study", "placebo_time", "placebo_group", "placebo_distribution"):
         for config in frozen.get(key, []):
             record(key, functions[key], config)
@@ -1635,9 +1669,11 @@ def _table(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             for row in result["effects"]
         ]
     if "cells" in result:
-        return [
+        inference = ("estimate", "se", "ci_low", "ci_high", "p_value")
+        cells = [
             {
                 "method": result["method"],
+                "role": "group_time_cell",
                 **{
                     k: v
                     for k, v in row.items()
@@ -1646,6 +1682,24 @@ def _table(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             }
             for row in result["cells"]
         ]
+        dynamic = [
+            {
+                "method": result["method"],
+                "role": "dynamic_effect",
+                "event_time": row["event_time"],
+                "supported_cohorts": row["supported_cohorts"],
+                "weights": row["weights"],
+                **{k: row[k] for k in inference},
+            }
+            for row in result["dynamic_effects"]
+        ]
+        aggregate = {
+            "method": result["method"],
+            "role": "overall_aggregate",
+            "weights": result["aggregate"]["weights"],
+            **{k: result["aggregate"][k] for k in inference},
+        }
+        return [*cells, *dynamic, aggregate]
     return [
         {
             "method": result["method"],

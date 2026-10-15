@@ -88,6 +88,18 @@ def test_month_aggregation_requires_decision_and_preserves_missing_sums(prep):
     assert [r["y"] for r in result["rows"]] == [5, None]
     assert [r["_source_rows"] for r in result["rows"]] == [[1, 2], [3, 4]]
     assert result["transformation"]["collapsed_row_count"] == 2
+    assert result["transformation"]["partially_missing_aggregations"] == {"y": 0}
+
+
+def test_partially_missing_aggregation_is_recorded(prep):
+    rows = [
+        {"id": "001", "t": "2024-01-02", "y": "5"},
+        {"id": "001", "t": "2024-01-25", "y": ""},
+        {"id": "001", "t": "2024-02-01", "y": "7"},
+    ]
+    result = _run(prep, rows, frequency="month", aggregations={"y": "sum"})
+    assert [r["y"] for r in result["rows"]] == [5, 7]
+    assert result["transformation"]["partially_missing_aggregations"] == {"y": 1}
 
 
 def test_conflicting_static_columns_are_not_silently_collapsed(prep):
@@ -99,7 +111,7 @@ def test_conflicting_static_columns_are_not_silently_collapsed(prep):
         _run(prep, rows, aggregations={"y": "sum"})
 
 
-@pytest.mark.parametrize("value", ["bad", "NaN", float("inf"), True])
+@pytest.mark.parametrize("value", ["bad", "NaN", float("inf"), True, "1_000"])
 def test_bad_measurements_refuse_instead_of_coercing(prep, value):
     with pytest.raises(ValueError):
         _run(prep, _rows([value]))
@@ -113,6 +125,8 @@ def test_bad_measurements_refuse_instead_of_coercing(prep, value):
         ("month", "01/02/2024"),
         ("year", "2024-02-30"),
         ("integer", 1.5),
+        ("integer", "\u0663"),
+        ("year", "\uff12\uff10\uff12\uff14"),
     ],
 )
 def test_ambiguous_or_invalid_periods_refuse(prep, frequency, value):
@@ -232,6 +246,29 @@ def test_bundle_hashes_and_source_mapping_are_verifiable(prep, tmp_path):
     )
     with pytest.raises(FileExistsError):
         prep.write_outputs(result, tmp_path / "results")
+
+
+def test_date_known_event_exports_a_complete_bundle(prep, tmp_path):
+    from datetime import date
+
+    rows = [
+        {"id": "001", "t": f"2024-{m:02d}", "y": 15 if m > 6 else 5}
+        for m in range(1, 13)
+    ]
+    event = {"label": "launch", "time": date(2024, 7, 1), "source": "log 1"}
+    result = _run(prep, rows, frequency="month", known_events=[event])
+    outputs = prep.write_outputs(result, tmp_path / "dated")
+    manifest = json.loads(Path(outputs["manifest.json"]).read_text())
+    assert manifest["event_config"]["known_events"][0]["time"] == "2024-07-01"
+    assert set(manifest["outputs"]) == set(outputs) - {"manifest.json"}
+
+
+def test_unserializable_result_refuses_before_writing_any_file(prep, tmp_path):
+    result = _run(prep, _rows([5] * 4 + [15] * 4))
+    result["manifest"] = {**result["manifest"], "note": object()}
+    with pytest.raises(TypeError):
+        prep.write_outputs(result, tmp_path / "partial")
+    assert not (tmp_path / "partial").exists()
 
 
 def test_plot_dependency_is_optional_and_fails_explicitly(prep, monkeypatch, tmp_path):

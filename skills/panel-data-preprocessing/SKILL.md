@@ -223,7 +223,10 @@ For transaction data, parse dates into the intended frequency and explicitly
 choose a reducer for every numeric measurement, e.g.
 `aggregations={"sales": "sum", "price": "mean"}`. Allowed reducers:
 sum, mean, min, max. All other columns must agree within an entity-period;
-conflicts fail. Sum of an entirely missing group remains missing. Use a
+conflicts fail. Sum of an entirely missing group remains missing. A partially
+missing group is reduced over its observed values only;
+`transformation["partially_missing_aggregations"]` counts those cells per
+measurement, so review them before treating a sum as complete. Use a
 domain-specific upstream calculation for weighted means or exposure timing.
 
 ## Check window readiness before screening

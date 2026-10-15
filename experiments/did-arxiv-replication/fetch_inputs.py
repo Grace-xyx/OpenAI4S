@@ -25,6 +25,15 @@ def main() -> None:
         ) from exc
     inputs = ROOT / "inputs"
     inputs.mkdir(exist_ok=True)
+    output = inputs / "sources.json"
+    recorded = (
+        {
+            r["binary_filename"]: r["binary_sha256"]
+            for r in json.loads(output.read_text())["datasets"].values()
+        }
+        if output.exists()
+        else {}
+    )
     records = {}
     for filename, (repository, commit) in SOURCES.items():
         url = f"https://raw.githubusercontent.com/{repository}/{commit}/data/{filename}"
@@ -32,6 +41,10 @@ def main() -> None:
         if not binary.exists():
             with urllib.request.urlopen(url, timeout=60) as response:
                 binary.write_bytes(response.read())
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        if filename in recorded and digest != recorded[filename]:
+            # Verify the pinned bytes before handing them to a native parser.
+            raise ValueError(f"{filename} does not match its recorded sha256")
         objects = pyreadr.read_r(str(binary))
         if len(objects) != 1:
             raise ValueError("Expected exactly one public data frame")
@@ -48,7 +61,7 @@ def main() -> None:
             "commit": commit,
             "license": "GPL-3; upstream package DESCRIPTION",
             "binary_filename": filename,
-            "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            "binary_sha256": digest,
             "csv_filename": csv_path.name,
             "csv_sha256": hashlib.sha256(csv_bytes).hexdigest(),
             "rows": len(frame),
@@ -85,9 +98,12 @@ def main() -> None:
             },
         ],
     }
-    output = inputs / "sources.json"
     if output.exists():
-        if json.loads(output.read_text()) != record:
+        # The converting runtime is descriptive; a different Python or pandas
+        # version with identical inputs and outputs is the same acquisition.
+        existing = json.loads(output.read_text())
+        existing.pop("conversion_runtime", None)
+        if existing != {k: v for k, v in record.items() if k != "conversion_runtime"}:
             raise ValueError(
                 "Provenance already exists with different metadata; preserve the original acquisition record"
             )
