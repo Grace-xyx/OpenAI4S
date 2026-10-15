@@ -1748,7 +1748,7 @@ def discover_events(
             "window": window,
             "threshold": threshold,
             "min_abs_change": min_abs_change,
-            "known_events": list(known_events),
+            "known_events": json.loads(_canonical(list(known_events))),
             "window_assessment": window_assessment["config"],
         },
         "limitations": [
