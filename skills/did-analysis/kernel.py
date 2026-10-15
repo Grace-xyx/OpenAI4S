@@ -28,6 +28,8 @@ MAX_PERIODS = 200
 MAX_DRAWS = 1_000
 MAX_CONTRASTS = 100
 _IMPUTED = "_imputed_columns"
+# Validated loads shared by the stages of one analyze_did call; None otherwise.
+_LOAD_MEMO: dict[tuple[Any, ...], tuple[Any, ...]] | None = None
 
 
 def _finite_json(value: Any, *, missing_nan: bool = False) -> Any:
@@ -198,6 +200,11 @@ def _load(
             "entity/time/outcome must differ; cluster cannot be time/outcome"
         )
     design = _design(research_design)
+    memo_key = (id(rows), entity, time, outcome, cluster, _canonical(design))
+    memo_key += (missing_policy,)
+    if _LOAD_MEMO is not None and memo_key in _LOAD_MEMO:
+        cached, cached_info = _LOAD_MEMO[memo_key]
+        return cached, {**cached_info, "config": dict(cached_info["config"])}
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     seen: set[tuple[str, int]] = set()
     copied = []
@@ -255,12 +262,16 @@ def _load(
         "missing_policy": missing_policy,
         "covariates": [],
     }
-    return dict(groups), {
+    info = {
         "config": config,
         "source_records_sha256": _digest(copied),
         "source_row_count": len(rows),
         "source_entity_count": len(groups),
     }
+    if _LOAD_MEMO is not None:
+        _LOAD_MEMO[memo_key] = (dict(groups), info)
+        return dict(groups), {**info, "config": dict(config)}
+    return dict(groups), info
 
 
 def _common(
@@ -309,10 +320,24 @@ def _assignment(
         assigned[c] = group
 
 
+def _unverified(
+    groups: Mapping[str, list[dict[str, Any]]],
+    membership: Mapping[str, int],
+    treatment_time: int,
+) -> set[str]:
+    """All-zero histories ending before adoption cannot show never-treated status."""
+    return {
+        key
+        for key, rs in groups.items()
+        if membership[key] == 0 and rs[-1]["period"] < treatment_time
+    }
+
+
 def _select(
     groups: Mapping[str, list[dict[str, Any]]],
     periods: Sequence[int],
     missing_policy: str,
+    unverified: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     included, excluded = {}, []
     selected = set(periods)
@@ -324,23 +349,31 @@ def _select(
             p for p in selected & by_time.keys() if by_time[p]["outcome"] is None
         )
         imputed = sorted(p for p in selected & by_time.keys() if by_time[p]["imputed"])
-        if absent or missing or imputed:
-            excluded.append(
-                {
-                    "entity": rs[0]["entity"],
-                    "absent_periods": absent,
-                    "missing_outcome_periods": missing,
-                    "imputed_outcome_periods": imputed,
-                    "source_rows": sorted({n for r in rs for n in r["source_rows"]}),
-                    "input_row_positions": [r["source_row"] for r in rs],
-                }
-            )
+        if absent or missing or imputed or key in unverified:
+            record = {
+                "entity": rs[0]["entity"],
+                "absent_periods": absent,
+                "missing_outcome_periods": missing,
+                "imputed_outcome_periods": imputed,
+                "source_rows": sorted({n for r in rs for n in r["source_rows"]}),
+                "input_row_positions": [r["source_row"] for r in rs],
+            }
+            if key in unverified:
+                record["unverified_never_treated"] = True
+            excluded.append(record)
         else:
             included[key] = [by_time[p] for p in sorted(selected)]
     if excluded and missing_policy == "error":
+        unknown = sum(bool(r.get("unverified_never_treated")) for r in excluded)
         raise ValueError(
-            f"incomplete or imputed outcome for {len(excluded)} entities; "
-            "prespecify missing_policy='drop_entity' to exclude whole entities"
+            f"incomplete or imputed outcome for {len(excluded)} entities"
+            + (
+                f" ({unknown} with all-zero exposure ending before treatment_time, "
+                "so never-treated status is unverified)"
+                if unknown
+                else ""
+            )
+            + "; prespecify missing_policy='drop_entity' to exclude whole entities"
         )
     if not included:
         raise ValueError("no comparison: no complete observed entities")
@@ -691,7 +724,9 @@ def _setup_common(
         date,
         descriptive_staggered_benchmark=descriptive_staggered_benchmark,
     )
-    sample, audit = _select(groups, pre + post, missing_policy)
+    sample, audit = _select(
+        groups, pre + post, missing_policy, _unverified(groups, membership, date)
+    )
     info["config"].update(
         treatment=treatment,
         treatment_time=date,
@@ -828,7 +863,12 @@ def event_study(
         covariates=covariates,
     )
     membership = _common(groups, treatment, date)
-    sample, audit = _select(groups, sorted(set(selected + [reference])), missing_policy)
+    sample, audit = _select(
+        groups,
+        sorted(set(selected + [reference])),
+        missing_policy,
+        _unverified(groups, membership, date),
+    )
     info["config"].update(
         treatment=treatment,
         treatment_time=date,
@@ -984,7 +1024,9 @@ def placebo_time(
         raise ValueError(
             "time-placebo windows must straddle fake date strictly before real treatment"
         )
-    sample, audit = _select(groups, pre + post, missing_policy)
+    sample, audit = _select(
+        groups, pre + post, missing_policy, _unverified(groups, real, date)
+    )
     info["config"].update(fake_treatment_time=fake, alpha=alpha)
     units = _units(sample, real, pre, post)
     return _finish(
@@ -1004,14 +1046,17 @@ def _never_sample(
     pre: list[int],
     post: list[int],
     missing_policy: str,
+    treatment_time: int,
 ) -> tuple[Any, ...]:
     never = {k: rs for k, rs in groups.items() if real[k] == 0}
-    sample, audit = _select(never, pre + post, missing_policy)
+    sample, audit = _select(
+        never, pre + post, missing_policy, _unverified(never, real, treatment_time)
+    )
     audit["excluded_genuine_treated_entities"] = [
         groups[k][0]["entity"] for k in sorted(groups) if real[k] == 1
     ]
     audit["genuine_status_rule"] = (
-        "Classified on all original supplied exposure histories before window filtering; all-zero histories declared genuinely never-treated by research design."
+        "Classified on all original supplied exposure histories before window filtering; all-zero histories declared genuinely never-treated by research design, unless they end before treatment_time (unverified and excluded)."
     )
     return never, sample, audit
 
@@ -1063,7 +1108,7 @@ def placebo_group(
         raise ValueError("fake treated entity IDs must be unique")
     if any(k not in groups or real[k] != 0 for k in keys):
         raise ValueError("fake treated IDs must be genuine never-treated entities")
-    never, sample, audit = _never_sample(groups, real, pre, post, missing_policy)
+    never, sample, audit = _never_sample(groups, real, pre, post, missing_policy, date)
     membership = {k: int(k in keys) for k in never}
     _assignment(never, membership)
     if any(k not in sample for k in keys):
@@ -1132,14 +1177,19 @@ def placebo_distribution(
     )
     if max(pre) >= date or min(post) < date:
         raise ValueError("group-placebo periods must straddle real treatment_time")
-    never, sample, audit = _never_sample(groups, real, pre, post, missing_policy)
+    never, sample, audit = _never_sample(groups, real, pre, post, missing_policy, date)
     labels = {_canonical(rs[0]["cluster"]): rs[0]["cluster"] for rs in sample.values()}
     clusters = sorted(labels)
     if not 1 <= fake_count < len(clusters):
         raise ValueError("fake_cluster_count must leave at least one control cluster")
     if count * len(sample) > 5_000_000:
         raise ValueError("placebo draw-by-entity workload exceeds 5,000,000")
-    real_sample, real_audit = _select(groups, pre + post, missing_policy)
+    real_sample, real_audit = _select(
+        groups, pre + post, missing_policy, _unverified(groups, real, date)
+    )
+    real_audit["group_entity_counts"] = {
+        str(v): sum(real[k] == v for k in real_sample) for v in (0, 1)
+    }
     actual = _fit(_units(real_sample, real, pre, post))
     rng = random.Random(seed)
     distribution = []
@@ -1161,11 +1211,13 @@ def placebo_distribution(
     info["config"].update(
         seed=seed, draws=count, fake_cluster_count=fake_count, alpha=alpha
     )
+    # The top-level estimate is the real contrast, so its audit and sample hash
+    # describe the real sample; the never-treated draw sample is kept beside it.
     result = _finish(
         "placebo_distribution",
         actual,
         info,
-        audit,
+        real_audit,
         [],
         alpha=alpha,
         causal_status="descriptive_falsification_distribution",
@@ -1173,7 +1225,7 @@ def placebo_distribution(
     result.update(
         distribution=distribution,
         real_estimate=actual["estimate"],
-        real_sample_audit=real_audit,
+        placebo_sample_audit=audit,
         descriptive_tail_fraction=sum(
             abs(d["estimate"]) >= abs(actual["estimate"]) for d in distribution
         )
@@ -1578,36 +1630,47 @@ def analyze_did(
             raise ValueError(
                 f"plan.{label}: unknown options {unknown}; missing options {missing}"
             )
-    staged.append(traditional_did(rows, **frozen["traditional"]))
-    source_hash = staged[0]["manifest"]["source_records_sha256"]
+    # Every stage reads the same rows: validate them once per column set.
+    global _LOAD_MEMO
+    _LOAD_MEMO = {}
+    try:
+        staged.append(traditional_did(rows, **frozen["traditional"]))
+        source_hash = staged[0]["manifest"]["source_records_sha256"]
 
-    def record(method: str, function: Any, config: Mapping[str, Any]) -> None:
-        try:
-            staged.append(function(rows, **config))
-        except (ValueError, TypeError, ArithmeticError) as exc:
-            staged.append(
-                {
-                    "method": method,
-                    "status": "refused",
-                    "reason": str(exc),
-                    "config": dict(config),
-                    "manifest": {
-                        "schema_version": 1,
-                        "method": VERSION,
-                        "estimator": method,
-                        "source_records_sha256": source_hash,
-                        "configuration_sha256": _digest(config),
+        def record(method: str, function: Any, config: Mapping[str, Any]) -> None:
+            try:
+                staged.append(function(rows, **config))
+            except (ValueError, TypeError, ArithmeticError) as exc:
+                staged.append(
+                    {
+                        "method": method,
                         "status": "refused",
                         "reason": str(exc),
-                    },
-                }
-            )
+                        "config": dict(config),
+                        "manifest": {
+                            "schema_version": 1,
+                            "method": VERSION,
+                            "estimator": method,
+                            "source_records_sha256": source_hash,
+                            "configuration_sha256": _digest(config),
+                            "status": "refused",
+                            "reason": str(exc),
+                        },
+                    }
+                )
 
-    for key in ("event_study", "placebo_time", "placebo_group", "placebo_distribution"):
-        for config in frozen.get(key, []):
-            record(key, functions[key], config)
-    for entry in frozen.get("derived", []):
-        record(entry["method"], derived[entry["method"]], entry["config"])
+        for key in (
+            "event_study",
+            "placebo_time",
+            "placebo_group",
+            "placebo_distribution",
+        ):
+            for config in frozen.get(key, []):
+                record(key, functions[key], config)
+        for entry in frozen.get("derived", []):
+            record(entry["method"], derived[entry["method"]], entry["config"])
+    finally:
+        _LOAD_MEMO = None
     result = {
         "method": "prespecified_did_pipeline",
         "plan": frozen,
@@ -1616,9 +1679,7 @@ def analyze_did(
         "manifest": {
             "schema_version": 1,
             "method": VERSION,
-            "source_records_sha256": _digest(
-                _finite_json(list(rows), missing_nan=True)
-            ),
+            "source_records_sha256": source_hash,
             "plan_sha256": _digest(frozen),
             "execution_order": [r["method"] for r in staged],
             "result_sha256": _digest(staged),

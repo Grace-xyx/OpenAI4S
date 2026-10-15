@@ -266,6 +266,8 @@ available history. A sweep inspecting more than 64 distinct widths fails
 before allocation: supply bounded `window_options`, also limited to 64
 distinct widths including the requested one. This bounds the sweep, not the
 size of an individual window or the amount of data needed for eligibility.
+The whole report is also bounded: more than 200,000 anchor × metric × window
+records (rows × outcome metrics × inspected widths) fails before allocation.
 `noise_tolerance` is a positive scalar or per-metric mapping in
 measurement units: the intended budget for the variability of a window mean.
 Choose it before inspecting candidates. When it is omitted, a positive

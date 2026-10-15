@@ -13,7 +13,7 @@ python experiments/did-arxiv-replication/run_experiment.py --output /tmp/did-new
 python experiments/did-arxiv-replication/verify_experiment.py --results /tmp/did-new-run
 ```
 
-使用新的空输出目录，实验拒绝覆盖既有分析产物。本仓库已保存核验过的 `results/`。验证会独立回归、在临时目录完整重跑，并将 verification.json 写入所选结果目录；验证报告可重新生成，分析产物保留。
+使用新的空输出目录，实验拒绝覆盖既有分析产物。本仓库已保存核验过的 `results/`。验证会独立回归、在临时目录完整重跑，并将 verification.json 写在临时重跑目录旁（或 `--report` 指定位置），不会写入所选结果目录；PNG/SVG 渲染差异与数值产物分开报告，分析产物保留。
 
 保存的 `results/` 已于 2026-10-10 使用当前 Skill 实际重跑，并通过完整独立验证器：24/24 个参考值检查与 48/48 个产物字节比较全部通过。验证器仍会拒绝不同的 Skill 源码哈希。已有估计、面板、候选 CSV 和原有图形与先前运行逐字节一致；现在增加了十个窗口审查与图形文件。报告记录刷新前后的源哈希及更新范围。独立的 `window-review/` 也用当前 Skill 执行两次，五个生成文件全部逐字节重现。
 

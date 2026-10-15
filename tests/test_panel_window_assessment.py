@@ -141,6 +141,19 @@ def test_default_sweep_with_more_than_64_sizes_requests_bounded_options(prep):
         )
 
 
+def test_total_assessment_records_are_bounded_before_allocation(prep, monkeypatch):
+    panel = _panel(prep, _rows([3] * 6))
+    # Six anchors x one metric x widths 2..3 = 12 records.
+    monkeypatch.setattr(prep, "MAX_WINDOW_ASSESSMENTS", 11)
+    with pytest.raises(ValueError, match="12 anchor-windows"):
+        prep.assess_windows(panel, window=2, window_options=[3])
+    monkeypatch.setattr(prep, "MAX_WINDOW_ASSESSMENTS", 12)
+    assert (
+        len(prep.assess_windows(panel, window=2, window_options=[3])["assessments"])
+        == 12
+    )
+
+
 def test_missing_calendar_periods_and_missing_values_are_separate(prep):
     rows = _rows([4, None, 4, 4, 4, 4], [0, 1, 3, 4, 5, 6])
     panel = _panel(prep, rows)

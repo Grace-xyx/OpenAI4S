@@ -99,6 +99,11 @@ def independent_estimation(results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, default=ROOT / "results")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="where to write verification.json (default: beside the temporary rerun)",
+    )
     args = parser.parse_args()
     results = args.results.resolve()
     original = json.loads((results / "results.json").read_text())
@@ -125,10 +130,12 @@ def main():
     )
 
     def eligible(path):
-        return (
-            path.suffix in {".json", ".csv", ".png", ".svg"}
-            and path.name != "verification.json"
-        )
+        # environment.json records the platform and interpreter; its
+        # reproducible provenance keys are compared separately below.
+        return path.suffix in {".json", ".csv", ".png", ".svg"} and path.name not in {
+            "verification.json",
+            "environment.json",
+        }
 
     original_files = {
         p.relative_to(results): p
@@ -139,11 +146,20 @@ def main():
         p.relative_to(rerun): p for p in rerun.rglob("*") if p.is_file() and eligible(p)
     }
     mismatches = [
-        str(p)
+        p
         for p in sorted(set(original_files) | set(rerun_files))
         if p not in original_files
         or p not in rerun_files
         or sha(original_files[p]) != sha(rerun_files[p])
+    ]
+    rendered = [str(p) for p in mismatches if p.suffix in {".png", ".svg"}]
+    numeric = [str(p) for p in mismatches if p.suffix not in {".png", ".svg"}]
+    rerun_environment = json.loads((rerun / "environment.json").read_text())
+    provenance = ("runner_sha256", "skill_kernel_sha256", "reference_values_sha256")
+    provenance_mismatches = [
+        key
+        for key in (*provenance, "input_csv_sha256")
+        if rerun_environment.get(key) != environment.get(key)
     ]
     source = json.loads((ROOT / "inputs/sources.json").read_text())
     input_checks = [
@@ -153,9 +169,12 @@ def main():
     ]
     report = {
         "verdict": (
-            "REPRODUCIBLE"
-            if independent["passed"] and not mismatches and all(input_checks)
-            else "MISMATCH"
+            "MISMATCH"
+            if not independent["passed"]
+            or numeric
+            or provenance_mismatches
+            or not all(input_checks)
+            else "RENDERING_DIFFERS" if rendered else "REPRODUCIBLE"
         ),
         "classification": "Deterministic fixed-data analysis in the recorded environment; exact byte comparison, no timing comparison",
         "published_reference_checks": {
@@ -166,16 +185,21 @@ def main():
         "input_checksum_checks_passed": sum(input_checks),
         "input_checksum_checks_total": len(input_checks),
         "rerun_files_checked": len(original_files),
-        "mismatched_artifacts": mismatches,
+        "mismatched_artifacts": numeric + rendered,
+        "mismatched_numeric_artifacts": numeric,
+        "mismatched_rendered_artifacts": rendered,
+        "mismatched_environment_provenance": provenance_mismatches,
         "rerun_output": str(rerun),
         "scope": "Reproducibility of our bounded worked-example replications, not verification of the entire papers or inferential results",
     }
-    (results / "verification.json").write_text(
-        json.dumps(report, indent=2) + "\n", encoding="utf-8"
-    )
+    # Never rewrite the committed results by default: the report carries a
+    # machine-local rerun path.
+    destination = args.report or rerun.parent / "verification.json"
+    destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
+    print(f"verification report: {destination}")
     if report["verdict"] != "REPRODUCIBLE":
-        raise RuntimeError("Verification failed")
+        raise RuntimeError(f"Verification failed: {report['verdict']}")
 
 
 if __name__ == "__main__":

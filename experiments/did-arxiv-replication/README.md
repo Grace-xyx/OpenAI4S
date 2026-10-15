@@ -13,7 +13,7 @@ python experiments/did-arxiv-replication/run_experiment.py --output /tmp/did-new
 python experiments/did-arxiv-replication/verify_experiment.py --results /tmp/did-new-run
 ```
 
-Choose a new empty output directory; the runner refuses to overwrite existing artifacts. This checkout already includes the verified `results/` run. Verification performs independent regressions and a full rerun in a temporary directory, then writes verification.json to the selected results directory. This report is regenerated; the analysis artifacts are preserved.
+Choose a new empty output directory; the runner refuses to overwrite existing artifacts. This checkout already includes the verified `results/` run. Verification performs independent regressions and a full rerun in a temporary directory, then writes verification.json beside that temporary rerun (or to `--report`), never into the selected results directory. Rendered PNG/SVG differences are reported separately from numeric artifacts; the analysis artifacts are preserved.
 
 The saved `results/` were refreshed on 2026-10-10 by executing the current Skill and then the full independent verifier: 24/24 reference checks and 48/48 artifact comparisons pass. The verifier still rejects a different Skill source hash. All existing estimate, panel and candidate CSVs and existing figures are byte-identical to the earlier run; ten window-audit/figure files are now included. The report records the previous and current source hashes and the scope of this refresh. The separate `window-review/` was also rerun twice with the current Skill; all five generated files reproduced exactly.
 

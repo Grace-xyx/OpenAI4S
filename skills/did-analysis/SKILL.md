@@ -157,7 +157,10 @@ distribution = did.placebo_distribution(
 For fake dates, **both windows must be strictly before the real treatment date**.
 Retain the real eventually-treated group; a placebo cannot contain genuine
 post-treatment observations. For fake groups, use genuine never-treated controls
-only and move whole assignment clusters. Require comparison support after the
+only and move whole assignment clusters. An all-zero exposure history ending
+before the real treatment date cannot show never-treated status; such entities
+are flagged `unverified_never_treated` and follow `missing_policy`.
+Require comparison support after the
 split. Keep all requested dates, assignments, failures and results, rather than
 selecting a nonsignificant subset. A nonzero placebo can signal incompatible
 prior trends, confounding or an unsuitable comparison; it does not diagnose the

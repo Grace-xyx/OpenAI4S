@@ -19,6 +19,8 @@ _RESERVED = {"_period_index", "_source_rows"}
 _IMPUTED = "_imputed_columns"
 _FREQUENCIES = {"year", "quarter", "month", "day", "integer"}
 _AGGREGATIONS = {"sum", "mean", "min", "max"}
+# Each anchor x metric x window keeps a full assessment record (~1 KB in JSON).
+MAX_WINDOW_ASSESSMENTS = 200_000
 
 
 def _missing(value: Any) -> bool:
@@ -1254,6 +1256,12 @@ def assess_windows(
         if len(options) > 64:
             raise ValueError("window_options may inspect at most 64 distinct sizes")
     metrics = [c for c in config["numeric_columns"] if c != treatment]
+    planned = len(rows) * len(metrics) * len(options)
+    if planned > MAX_WINDOW_ASSESSMENTS:
+        raise ValueError(
+            f"window assessment would record {planned} anchor-windows (cap "
+            f"{MAX_WINDOW_ASSESSMENTS}); assess fewer windows, metrics or entities"
+        )
     tolerances: dict[str, float | None] = {c: None for c in metrics}
     if noise_tolerance is not None:
         supplied = (

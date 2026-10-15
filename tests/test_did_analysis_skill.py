@@ -401,6 +401,24 @@ def test_fake_date_placebo_has_no_real_treatment_in_either_window(did):
         did.placebo_time(rows, **_config(), fake_treatment_time=1)
 
 
+def test_all_zero_history_ending_before_adoption_is_not_a_verified_control(did):
+    # T000 is treated at t=2 but its rows stop at t=1, so its exposure is all 0.
+    rows = [
+        r
+        for r in _panel(times=(0, 1, 2, 3), date=2)
+        if not (r["id"] == "T000" and r["t"] >= 2)
+    ]
+    config = {**_config(treatment_time=2, pre_periods=[0], post_periods=[1])}
+    with pytest.raises(ValueError, match="never-treated status is unverified"):
+        did.placebo_time(rows, **config, fake_treatment_time=1)
+    result = did.placebo_time(
+        rows, **config, fake_treatment_time=1, missing_policy="drop_entity"
+    )
+    (excluded,) = result["audit"]["excluded_entities"]
+    assert excluded["entity"] == "T000" and excluded["unverified_never_treated"]
+    assert "T000" not in {u["entity"] for u in result["unit_changes"]}
+
+
 def test_group_placebo_estimates_only_genuinely_never_treated_entities(did):
     rows = _panel(treated=(100, 110, 120), controls=(0, 1, 2, 3, 4, 5))
     # Missing genuine-treated outcomes must not determine the never-treated
@@ -454,6 +472,12 @@ def test_seeded_placebo_distribution_is_reproducible_and_descriptive(did):
         assert all(c.startswith("C") for c in draw["fake_treated_clusters"])
         assert -3 <= draw["estimate"] <= 3
     json.dumps(result, allow_nan=False)
+    # The reported estimate is the real contrast, so its audit is the real sample.
+    assert result["audit"]["group_entity_counts"] == {"0": 6, "1": 3}
+    assert result["manifest"]["sample_sha256"] == did._digest(result["audit"])
+    placebo = result["placebo_sample_audit"]
+    assert placebo["included_entities"] == [f"C{i:03d}" for i in range(6)]
+    assert placebo["excluded_genuine_treated_entities"] == ["T000", "T001", "T002"]
 
 
 def test_randomized_placebos_respect_joint_unit_assignment_within_clusters(did):
@@ -761,6 +785,23 @@ def test_pipeline_freezes_plan_and_executes_baseline_placebos_derived_in_order(d
     assert result["results"][0]["estimate"] == pytest.approx(2.5)
     assert result["results"][-1]["estimate"] == pytest.approx(3)
     assert result == did.analyze_did(rows, plan=plan)
+
+
+def test_pipeline_validates_rows_once_and_matches_standalone_stages(did, monkeypatch):
+    rows = _panel(times=(-2, -1, 0, 1))
+    placebo = {
+        **_config(pre_periods=[-2], post_periods=[-1]),
+        "fake_treatment_time": -1,
+    }
+    expected = did.placebo_time(rows, **placebo)
+    calls = []
+    measure = did._number
+    monkeypatch.setattr(did, "_number", lambda *a: calls.append(a) or measure(*a))
+    plan = {"traditional": _config(), "placebo_time": [placebo, placebo]}
+    result = did.analyze_did(rows, plan=plan)
+    assert len(calls) == len(rows)
+    assert result["results"][1] == result["results"][2] == expected
+    assert did._LOAD_MEMO is None
 
 
 def test_pipeline_requires_a_prespecified_traditional_baseline(did):
